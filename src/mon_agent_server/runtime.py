@@ -7,13 +7,13 @@ from pathlib import Path
 from typing import Any
 
 from mon_agent_core import Agent, AgentOptions
-from mon_agent_core.coding_agent.tools import create_all_tools
 
 from .brokers import PermissionBroker, QuestionBroker
 from .core import CoreAuthenticationExpiredError, CoreClient
 from .events import EventBus
 from .ids import create_id, now_ms
 from .model_stream import core_model, env_model, stream_openai_compatible
+from .mon_tools import MonToolContext, create_mon_agent_tools
 from .prompts import attachment_context, build_agent_system_prompt, build_user_chat_task_prompt
 from .store import SessionStore
 
@@ -162,8 +162,22 @@ class MonAgentRuntime:
                 f"已选择模型：{runtime_config.label}，配置来源：{'Core' if runtime_config.source == 'core' else '环境变量'}。",
             )
             files = prompt_files(parts)
-            tools = list(create_all_tools(str(self.workspace_root)).values())
-            self.emit_runtime_thinking(session_id, run_state, f"已注册 Python AgentCore 工具：{len(tools)} 个。")
+            tools = create_mon_agent_tools(
+                self.workspace_root,
+                MonToolContext(
+                    session_id=session_id,
+                    core_client=self.core_client,
+                    core_token=auth_token,
+                    permissions=self.permissions,
+                    questions=self.questions,
+                    current_model_supports_images=runtime_config.supports_images,
+                    vision_config=(runtime_config.core or {}).get("visionConfig") if runtime_config.core else None,
+                    get_message_id=lambda: run_state.assistant_message_id,
+                    get_current_files=lambda: files,
+                ),
+                "user_chat",
+            )
+            self.emit_runtime_thinking(session_id, run_state, f"已注册 Python Mon 工具：{len(tools)} 个。")
             task_prompt = build_user_chat_task_prompt(
                 content_text(parts),
                 attachment_context(files, runtime_config.supports_images),
@@ -480,7 +494,18 @@ class MonAgentRuntime:
 
     @staticmethod
     def is_safe_tool(tool_name: str) -> bool:
-        return tool_name in {"read", "ls", "grep", "find", "loaded_tools", "ask_user", "analyze_image"}
+        return tool_name in {
+            "read",
+            "ls",
+            "grep",
+            "find",
+            "loaded_tools",
+            "ask_user",
+            "analyze_image",
+            "list_memos",
+            "list_due_memos",
+            "get_next_memo_wake",
+        }
 
     @staticmethod
     def permission_pattern(tool_name: str, args: Any) -> str:

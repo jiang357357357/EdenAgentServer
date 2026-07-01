@@ -11,7 +11,7 @@ from typing import Any
 
 from .app import AppState, is_agent_api_route
 from .core import CoreAuthenticationExpiredError, read_auth_token, require_core_token
-from .prompts import build_self_awake_decision
+from .self_awake import run_self_awake_sync
 
 CORS_HEADERS = {
     "access-control-allow-origin": "*",
@@ -170,9 +170,27 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                         "provider": "python-agent-core",
                         "mode": "embedded",
                         "label": "Python AgentCore",
-                        "message": "Python Agent Server 已启动；当前内置 read/ls/grep/find/bash/edit/write 工具。",
+                        "message": "Python Agent Server 已启动；当前内置 Mon 工具、备忘录工具、自醒工具和 Python AgentCore 文件工具。",
                     },
-                    "tools": {"read": "read", "grep": "grep", "find": "find", "ls": "ls", "bash": "bash", "edit": "edit", "write": "write"},
+                    "tools": {
+                        "loaded_tools": "loaded_tools",
+                        "web_search": "web_search",
+                        "web_fetch": "web_fetch",
+                        "ask_user": "ask_user",
+                        "analyze_image": "analyze_image",
+                        "analyze_screen": "analyze_screen",
+                        "create_memo": "create_memo",
+                        "create_reminder": "create_reminder",
+                        "dispatch_due_memos": "dispatch_due_memos",
+                        "set_self_awake_timer": "set_self_awake_timer",
+                        "read": "read",
+                        "grep": "grep",
+                        "find": "find",
+                        "ls": "ls",
+                        "bash": "bash",
+                        "edit": "edit",
+                        "write": "write",
+                    },
                 }
             )
             return
@@ -196,7 +214,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             body = self.read_json_body()
             token = read_auth_token(self.headers)
             context = body.get("context") if isinstance(body.get("context"), dict) else {}
-            decision = build_self_awake_decision(context)
+            decision = run_self_awake_sync(body, self.app, token)
             server_run_id = None
             server_error = ""
             if token:

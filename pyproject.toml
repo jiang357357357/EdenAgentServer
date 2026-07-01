@@ -9,6 +9,9 @@ description = "Python MonAgent local server"
 requires-python = ">=3.11"
 dependencies = []
 
+[project.optional-dependencies]
+hub = ["pyzmq>=26"]
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 

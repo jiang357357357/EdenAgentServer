@@ -322,6 +322,14 @@ class CoreClient:
         limit = int(params.get("limit") or 0)
         return memos[:limit] if limit > 0 else memos
 
+    def list_due_memos(self, token: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        params = params or {}
+        query = {key: str(value).strip() for key, value in params.items() if key != "limit" and value not in (None, "")}
+        raw = self._request(f"/api/memos/due/{'?' + urllib.parse.urlencode(query) if query else ''}", token)
+        memos = _unwrap_results(raw)
+        limit = int(params.get("limit") or 0)
+        return memos[:limit] if limit > 0 else memos
+
     def dispatch_due_memos(self, token: str, payload: dict[str, Any]) -> Any:
         return self._request("/api/memos/dispatch-due/", token, method="POST", payload=payload)
 
