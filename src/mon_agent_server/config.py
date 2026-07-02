@@ -114,6 +114,8 @@ class ServerConfig:
     is_dev: bool
     workspace_root: Path
     log_level: str
+    log_file: Path
+    plain_log_file: Path
     core_base_url: str
     auth_dev_username: str
     auth_dev_password: str
@@ -140,6 +142,8 @@ def load_server_config(agent_root: Path | None = None) -> ServerConfig:
         is_dev=not bool(os.environ.get("MON_AGENT_PROD")),
         workspace_root=Path(os.environ.get("MON_AGENT_WORKSPACE") or str(config.workspace_root)).resolve(),
         log_level=config.get("log", "LEVEL", "INFO") or "INFO",
+        log_file=config.path("log", "FILE", "Data/Logs/Text/MonAgent/MonAgent.log"),
+        plain_log_file=config.path("log", "PLAIN_FILE", "Data/Logs/Text/MonAgent/MonAgent_plain.log"),
         core_base_url=create_core_base_url(
             os.environ.get("MON_CORE_BASE_URL") or core_config.get("server", "BASE_URL"),
             core_config.get("server", "HOST", "127.0.0.1"),

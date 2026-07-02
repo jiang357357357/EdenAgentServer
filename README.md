@@ -30,3 +30,13 @@ Health check:
 ```bash
 curl http://127.0.0.1:40092/api/tools/status
 ```
+
+Logs are written from the Agent workspace root to:
+
+```bash
+Data/Logs/Text/MonAgent/MonAgent.log
+Data/Logs/Text/MonAgent/MonAgent_plain.log
+```
+
+MonHub registration is optional service discovery. Disable it for standalone
+debug runs with `MON_AGENT_HUB_ENABLED=false`.

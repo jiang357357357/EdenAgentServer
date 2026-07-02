@@ -11,6 +11,7 @@ from .core import to_storage_iso
 from .hub import HubRegistryClient
 from .http_server import AgentHTTPServer, AgentRequestHandler
 from .ids import now_ms
+from .log_setup import setup_process_logs
 from .self_awake import run_self_awake_sync
 
 
@@ -68,6 +69,7 @@ def start_startup_self_awake(app: AppState) -> None:
 def main(argv: list[str] | None = None) -> int:
     _ = argv
     config = load_server_config()
+    setup_process_logs(config)
     app = AppState(config)
     hub = HubRegistryClient(config)
     server = AgentHTTPServer((config.host, config.port), AgentRequestHandler)
@@ -90,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"[Server] Agent server 正在监听 http://{config.host}:{config.port}", flush=True)
     print(f"[Server] 工作区路径：{config.workspace_root}", flush=True)
+    print(f"[Server] 日志文件：{config.log_file}", flush=True)
     print("[Server] session 存储：Core Server（当前进程仅保留运行期内存缓存）", flush=True)
     print(f"[Server] Core 地址：{app.core_client.base_url}", flush=True)
     print("[Server] Python AgentCore 已启用", flush=True)
