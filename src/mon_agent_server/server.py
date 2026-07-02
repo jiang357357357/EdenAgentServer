@@ -18,18 +18,39 @@ server_logger = get_logger("MonAgent", "Server")
 self_awake_logger = get_logger("MonAgent", "SelfAwake")
 
 
-def _parse_storage_time(value: Any) -> datetime | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
+def run_startup_self_awake_once(app: AppState) -> None:
+    config = app.config
+    token = app.core_client.login_for_token(
+        config.auth_dev_username,
+        config.auth_dev_password,
+        client_id="monagent-startup-self-awake",
+        client_type="monagent",
+    )
+    latest = None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+        runs = app.core_client.list_self_awake_runs(token, 1)
+        latest = runs[0] if runs else None
+    except Exception as error:
+        self_awake_logger.warning(f"读取最近自醒记录失败，将继续执行启动自醒：{error}")
+    context = {
+        "trigger": "monagent_server_startup",
+        "source": "startup",
+        "current_time": to_storage_iso(now_ms()),
+        "current_time_local": datetime.now().astimezone().isoformat(),
+        "user_activity": "MonAgent Python Server 启动完成，执行一次启动自醒检查。",
+        "last_state": latest or {},
+        "policy": {"allow_workspace_file_tools": False},
+    }
+    self_awake_logger.info("启动自醒开始执行。")
+    decision = run_self_awake_sync({"context": context}, app, token)
+    app.core_client.persist_self_awake_run(token, decision, context)
+    self_awake_logger.info("启动自醒已完成并写入 Core。")
 
 
 def start_startup_self_awake(app: AppState) -> None:
     config = app.config
     if not config.startup_self_awake_enabled:
+        self_awake_logger.info("启动自醒已关闭。")
         return
     if not config.auth_dev_username or not config.auth_dev_password:
         self_awake_logger.warning("启动自醒已开启，但缺少 auth_dev 用户名/密码，跳过。")
@@ -39,34 +60,12 @@ def start_startup_self_awake(app: AppState) -> None:
         try:
             if config.startup_self_awake_delay_seconds > 0:
                 threading.Event().wait(config.startup_self_awake_delay_seconds)
-            token = app.core_client.login_for_token(
-                config.auth_dev_username,
-                config.auth_dev_password,
-                client_id="monagent-startup-self-awake",
-                client_type="monagent",
-            )
-            runs = app.core_client.list_self_awake_runs(token, 1)
-            latest = runs[0] if runs else None
-            next_wake_at = _parse_storage_time((latest or {}).get("next_wake_at")) if latest else None
-            if latest and latest.get("status") == "succeeded" and next_wake_at and next_wake_at.timestamp() * 1000 > now_ms():
-                self_awake_logger.info(f"最近自醒已安排未来唤醒，启动时跳过：{latest.get('next_wake_at')}")
-                return
-            context = {
-                "trigger": "monagent_server_startup",
-                "source": "startup",
-                "current_time": to_storage_iso(now_ms()),
-                "current_time_local": datetime.now().astimezone().isoformat(),
-                "user_activity": "MonAgent Python Server 启动完成，执行一次启动自醒检查。",
-                "last_state": latest or {},
-                "policy": {"allow_workspace_file_tools": False},
-            }
-            decision = run_self_awake_sync({"context": context}, app, token)
-            app.core_client.persist_self_awake_run(token, decision, context)
-            self_awake_logger.info("启动自醒已完成并写入 Core。")
+            run_startup_self_awake_once(app)
         except Exception as error:
             self_awake_logger.error(f"启动自醒失败：{error}", exc_info=True)
 
     threading.Thread(target=worker, name="monagent-startup-self-awake", daemon=True).start()
+    self_awake_logger.info("启动自醒任务已提交。")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -99,8 +98,8 @@ def main(argv: list[str] | None = None) -> int:
     server_logger.info("session 存储：Core Server（当前进程仅保留运行期内存缓存）")
     server_logger.info(f"Core 地址：{app.core_client.base_url}")
     server_logger.info("Python AgentCore 已启用")
-    hub.start()
     start_startup_self_awake(app)
+    hub.start()
     try:
         server.serve_forever()
     finally:

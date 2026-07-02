@@ -12,6 +12,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.vite_port, 40091)
         self.assertEqual(config.workspace_root.name, "Agent")
         self.assertEqual(config.core_base_url, "http://127.0.0.1:40011")
+        self.assertTrue(config.startup_self_awake_enabled)
+        self.assertEqual(config.startup_self_awake_delay_seconds, 0)
 
     def test_core_base_url_normalizes_public_bind_host(self):
         self.assertEqual(create_core_base_url(None, "0.0.0.0", 40011), "http://127.0.0.1:40011")

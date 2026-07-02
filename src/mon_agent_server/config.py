@@ -171,13 +171,13 @@ def load_server_config(agent_root: Path | None = None) -> ServerConfig:
         auth_dev_password=os.environ.get("MON_AGENT_CORE_PASSWORD") or config.get("auth_dev", "PASSWORD", "") or "",
         startup_self_awake_enabled=(
             os.environ.get("MON_AGENT_STARTUP_SELFAWAKE_ENABLED")
-            or config.get("self_awake", "STARTUP_WAKE_ENABLED", "false")
-            or "false"
+            or config.get("self_awake", "STARTUP_WAKE_ENABLED", "true")
+            or "true"
         ).lower()
         == "true",
         startup_self_awake_delay_seconds=int(
             os.environ.get("MON_AGENT_STARTUP_SELFAWAKE_DELAY_SECONDS")
-            or config.number("self_awake", "STARTUP_WAKE_DELAY_SECONDS", 2)
+            or config.number("self_awake", "STARTUP_WAKE_DELAY_SECONDS", 0)
         ),
         hub=HubConfig(
             enabled=(os.environ.get("MON_AGENT_HUB_ENABLED") or config.get("hub", "ENABLED", "true") or "true")
