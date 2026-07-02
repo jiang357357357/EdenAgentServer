@@ -7,6 +7,12 @@ It keeps the existing frontend-facing API shape and loads the Python
 
 ## Development
 
+Install or refresh the Python environment:
+
+```bash
+./Script/EnvTools/linux/install_env.sh
+```
+
 From the Agent root:
 
 ```bash
@@ -16,7 +22,7 @@ npm run dev:server
 From this directory:
 
 ```bash
-PYTHONPATH=src:../AgentCore/src python3 -m mon_agent_server
+uv run python -m mon_agent_server
 ```
 
 Health check:

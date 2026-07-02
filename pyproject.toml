@@ -6,11 +6,23 @@ build-backend = "setuptools.build_meta"
 name = "mon-agent-server"
 version = "0.1.0"
 description = "Python MonAgent local server"
-requires-python = ">=3.11"
-dependencies = []
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mon-agent-core",
+    "pyzmq>=26",
+]
 
-[project.optional-dependencies]
-hub = ["pyzmq>=26"]
+[tool.uv]
+managed = true
+
+[tool.uv.sources]
+mon-agent-core = { path = "../AgentCore", editable = true }
+
+[[tool.uv.index]]
+name = "aliyun"
+url = "https://mirrors.aliyun.com/pypi/simple"
+default = true
 
 [tool.setuptools]
 package-dir = {"" = "src"}
