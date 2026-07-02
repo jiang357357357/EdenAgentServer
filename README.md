@@ -10,7 +10,7 @@ It keeps the existing frontend-facing API shape and loads the Python
 From the Agent root:
 
 ```bash
-bun run dev:server
+npm run dev:server
 ```
 
 From this directory:

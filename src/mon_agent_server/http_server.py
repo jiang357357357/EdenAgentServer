@@ -306,7 +306,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
         except Exception:
-            body = f"Vite dev server not running on :{self.app.config.vite_port}. Run: bun dev:web".encode("utf-8")
+            body = f"Vite dev server not running on :{self.app.config.vite_port}. Run: npm run dev:web".encode("utf-8")
             self.send_response(503)
             self.send_header("content-type", "text/plain; charset=utf-8")
             self.send_header("content-length", str(len(body)))
