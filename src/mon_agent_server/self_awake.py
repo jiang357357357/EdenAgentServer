@@ -23,6 +23,10 @@ if TYPE_CHECKING:
 logger = get_logger("MonAgent", "SelfAwake")
 
 
+class SelfAwakeModelError(RuntimeError):
+    pass
+
+
 @dataclass(slots=True)
 class SelfAwakeRuntimeConfig:
     model: dict[str, Any]
@@ -213,6 +217,13 @@ async def run_self_awake_agent(
 
     agent.subscribe(handle_event)
     await agent.prompt({"role": "user", "timestamp": now_ms(), "content": [{"type": "text", "text": user_prompt}]})
+    error_messages = [
+        str(message.get("errorMessage"))
+        for message in agent.state.messages
+        if isinstance(message, dict) and message.get("errorMessage")
+    ]
+    if error_messages:
+        raise SelfAwakeModelError(error_messages[-1])
     return {"session_id": session_id, "messages": list(agent.state.messages), "text": final_assistant_text(list(agent.state.messages))}
 
 
@@ -231,7 +242,10 @@ async def run_self_awake(request: dict[str, Any], app: AppState, token: str | No
         return decision
     except Exception as error:
         reason = str(error)
-        logger.error(f"调用失败，使用 fallback: {reason}", exc_info=True)
+        if isinstance(error, SelfAwakeModelError):
+            logger.error(f"调用失败，使用 fallback: {reason}")
+        else:
+            logger.error(f"调用失败，使用 fallback: {reason}", exc_info=True)
         return fallback_self_awake_decision(context, reason, character)
 
 

@@ -39,6 +39,10 @@ def endpoint_to_chat_url(model: dict[str, Any]) -> str:
     return f"{base_url}/chat/completions"
 
 
+def http_user_agent() -> str:
+    return os.environ.get("MON_AGENT_HTTP_USER_AGENT") or "MonAgent/0.1"
+
+
 def env_model() -> tuple[dict[str, Any], str | None, str, str]:
     raw = os.environ.get("MON_AGENT_MODEL") or "openai/gpt-4o-mini"
     provider, _, model_id = raw.partition("/")
@@ -176,7 +180,12 @@ def call_openai_compatible(model: dict[str, Any], context: dict[str, Any], optio
         endpoint_to_chat_url(model),
         data=body,
         method="POST",
-        headers={"content-type": "application/json", "authorization": f"Bearer {api_key}", "accept": "application/json"},
+        headers={
+            "content-type": "application/json",
+            "authorization": f"Bearer {api_key}",
+            "accept": "application/json",
+            "user-agent": http_user_agent(),
+        },
     )
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
