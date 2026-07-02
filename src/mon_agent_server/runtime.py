@@ -12,10 +12,13 @@ from .brokers import PermissionBroker, QuestionBroker
 from .core import CoreAuthenticationExpiredError, CoreClient
 from .events import EventBus
 from .ids import create_id, now_ms
+from .logging import get_logger
 from .model_stream import core_model, env_model, stream_openai_compatible
 from .mon_tools import MonToolContext, create_mon_agent_tools
 from .prompts import attachment_context, build_agent_system_prompt, build_user_chat_task_prompt
 from .store import SessionStore
+
+logger = get_logger("MonAgent", "Runtime")
 
 
 def content_text(parts: list[dict[str, Any]]) -> str:
@@ -224,7 +227,7 @@ class MonAgentRuntime:
             self.events.emit({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "idle"}}})
             self.emit_session(session_id)
             duration = now_ms() - started
-            print(f"[Runtime] session {session_id} completed in {duration}ms", flush=True)
+            logger.info(f"session {session_id} completed in {duration}ms")
         except Exception as error:
             self.emit_runtime_thinking(session_id, run_state, f"运行失败：{error}", done=True)
             self.emit_session_error(session_id, error)

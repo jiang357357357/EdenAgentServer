@@ -11,7 +11,12 @@ from typing import Any
 
 from .app import AppState, is_agent_api_route
 from .core import CoreAuthenticationExpiredError, read_auth_token, require_core_token
+from .logging import get_logger
 from .self_awake import run_self_awake_sync
+
+http_logger = get_logger("MonAgent", "HTTP")
+access_logger = get_logger("MonAgent", "Access")
+core_logger = get_logger("MonAgent", "Core")
 
 CORS_HEADERS = {
     "access-control-allow-origin": "*",
@@ -44,9 +49,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         self.handle_request()
 
     def log_message(self, format: str, *args: Any) -> None:
-        if self.path.endswith("/session") or "/message" in self.path:
-            return
-        super().log_message(format, *args)
+        access_logger.info(f"{self.client_address[0]} {self.command} {self.path} {format % args}")
 
     def handle_request(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
@@ -64,7 +67,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             self.json_response({"error": "Not found"}, 404)
         except CoreAuthenticationExpiredError as error:
             if error.detail != "not_authenticated":
-                print(f"[Core] auth failed: {error.path} {error.detail}", flush=True)
+                core_logger.warning(f"auth failed: {error.path} {error.detail}")
             self.json_response(
                 {
                     "error": str(error),
@@ -75,7 +78,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                 error.status,
             )
         except Exception as error:
-            print(f"[Server] request failed: {error}", flush=True)
+            http_logger.error(f"request failed: {error}", exc_info=True)
             self.json_response({"error": str(error)}, 500)
 
     def handle_api(self, path: str, query: dict[str, list[str]]) -> None:

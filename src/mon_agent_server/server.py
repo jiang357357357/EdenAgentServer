@@ -11,8 +11,11 @@ from .core import to_storage_iso
 from .hub import HubRegistryClient
 from .http_server import AgentHTTPServer, AgentRequestHandler
 from .ids import now_ms
-from .log_setup import setup_process_logs
+from .logging import configure_from_server_config, get_logger, shutdown as shutdown_logging
 from .self_awake import run_self_awake_sync
+
+server_logger = get_logger("MonAgent", "Server")
+self_awake_logger = get_logger("MonAgent", "SelfAwake")
 
 
 def _parse_storage_time(value: Any) -> datetime | None:
@@ -29,7 +32,7 @@ def start_startup_self_awake(app: AppState) -> None:
     if not config.startup_self_awake_enabled:
         return
     if not config.auth_dev_username or not config.auth_dev_password:
-        print("[SelfAwake] 启动自醒已开启，但缺少 auth_dev 用户名/密码，跳过。", flush=True)
+        self_awake_logger.warning("启动自醒已开启，但缺少 auth_dev 用户名/密码，跳过。")
         return
 
     def worker() -> None:
@@ -46,7 +49,7 @@ def start_startup_self_awake(app: AppState) -> None:
             latest = runs[0] if runs else None
             next_wake_at = _parse_storage_time((latest or {}).get("next_wake_at")) if latest else None
             if latest and latest.get("status") == "succeeded" and next_wake_at and next_wake_at.timestamp() * 1000 > now_ms():
-                print(f"[SelfAwake] 最近自醒已安排未来唤醒，启动时跳过：{latest.get('next_wake_at')}", flush=True)
+                self_awake_logger.info(f"最近自醒已安排未来唤醒，启动时跳过：{latest.get('next_wake_at')}")
                 return
             context = {
                 "trigger": "monagent_server_startup",
@@ -59,9 +62,9 @@ def start_startup_self_awake(app: AppState) -> None:
             }
             decision = run_self_awake_sync({"context": context}, app, token)
             app.core_client.persist_self_awake_run(token, decision, context)
-            print("[SelfAwake] 启动自醒已完成并写入 Core。", flush=True)
+            self_awake_logger.info("启动自醒已完成并写入 Core。")
         except Exception as error:
-            print(f"[SelfAwake] 启动自醒失败：{error}", flush=True)
+            self_awake_logger.error(f"启动自醒失败：{error}", exc_info=True)
 
     threading.Thread(target=worker, name="monagent-startup-self-awake", daemon=True).start()
 
@@ -69,7 +72,7 @@ def start_startup_self_awake(app: AppState) -> None:
 def main(argv: list[str] | None = None) -> int:
     _ = argv
     config = load_server_config()
-    setup_process_logs(config)
+    configure_from_server_config(config)
     app = AppState(config)
     hub = HubRegistryClient(config)
     server = AgentHTTPServer((config.host, config.port), AgentRequestHandler)
@@ -84,18 +87,18 @@ def main(argv: list[str] | None = None) -> int:
         if stopping.is_set():
             return
         stopping.set()
-        print(f"[Server] 收到信号 {signum}，正在退出", flush=True)
+        server_logger.info(f"收到信号 {signum}，正在退出")
         threading.Thread(target=shutdown_worker, args=("signal",), daemon=True).start()
 
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    print(f"[Server] Agent server 正在监听 http://{config.host}:{config.port}", flush=True)
-    print(f"[Server] 工作区路径：{config.workspace_root}", flush=True)
-    print(f"[Server] 日志文件：{config.log_file}", flush=True)
-    print("[Server] session 存储：Core Server（当前进程仅保留运行期内存缓存）", flush=True)
-    print(f"[Server] Core 地址：{app.core_client.base_url}", flush=True)
-    print("[Server] Python AgentCore 已启用", flush=True)
+    server_logger.info(f"Agent server 正在监听 http://{config.host}:{config.port}")
+    server_logger.info(f"工作区路径：{config.workspace_root}")
+    server_logger.info(f"日志文件：{config.log_file}")
+    server_logger.info("session 存储：Core Server（当前进程仅保留运行期内存缓存）")
+    server_logger.info(f"Core 地址：{app.core_client.base_url}")
+    server_logger.info("Python AgentCore 已启用")
     hub.start()
     start_startup_self_awake(app)
     try:
@@ -103,4 +106,5 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         hub.stop("shutdown")
         server.server_close()
+        shutdown_logging()
     return 0

@@ -60,6 +60,12 @@ class MonConfig:
         except ValueError:
             return fallback
 
+    def boolean(self, section: str, key: str, fallback: bool) -> bool:
+        raw = self.get(section, key)
+        if raw is None or raw == "":
+            return fallback
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
     def path(self, section: str, key: str, fallback: str) -> Path:
         raw = self.get(section, key, fallback) or fallback
         value = Path(raw)
@@ -116,6 +122,12 @@ class ServerConfig:
     log_level: str
     log_file: Path
     plain_log_file: Path
+    log_console_enabled: bool
+    log_file_enabled: bool
+    log_color_enabled: bool
+    log_dual_file_enabled: bool
+    log_max_bytes: int
+    log_backup_count: int
     core_base_url: str
     auth_dev_username: str
     auth_dev_password: str
@@ -144,6 +156,12 @@ def load_server_config(agent_root: Path | None = None) -> ServerConfig:
         log_level=config.get("log", "LEVEL", "INFO") or "INFO",
         log_file=config.path("log", "FILE", "Data/Logs/Text/MonAgent/MonAgent.log"),
         plain_log_file=config.path("log", "PLAIN_FILE", "Data/Logs/Text/MonAgent/MonAgent_plain.log"),
+        log_console_enabled=config.boolean("log", "CONSOLE_ENABLED", True),
+        log_file_enabled=config.boolean("log", "FILE_ENABLED", True),
+        log_color_enabled=config.boolean("log", "COLOR_ENABLED", True),
+        log_dual_file_enabled=config.boolean("log", "DUAL_FILE_ENABLED", True),
+        log_max_bytes=config.number("log", "MAX_BYTES", 10 * 1024 * 1024),
+        log_backup_count=config.number("log", "BACKUP_COUNT", 5),
         core_base_url=create_core_base_url(
             os.environ.get("MON_CORE_BASE_URL") or core_config.get("server", "BASE_URL"),
             core_config.get("server", "HOST", "127.0.0.1"),

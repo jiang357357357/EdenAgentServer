@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from mon_agent_core import Agent, AgentOptions
 
 from .ids import create_id, now_ms
+from .logging import get_logger
 from .model_stream import core_model, env_model, stream_openai_compatible
 from .mon_tools import MonToolContext, create_mon_agent_tools
 from .prompts import (
@@ -18,6 +19,8 @@ from .prompts import (
 
 if TYPE_CHECKING:
     from .app import AppState
+
+logger = get_logger("MonAgent", "SelfAwake")
 
 
 @dataclass(slots=True)
@@ -56,7 +59,7 @@ async def resolve_self_awake_runtime_config(app: AppState, token: str | None) ->
             if core:
                 return _runtime_config_from_model(*core_model(core), core)
         except Exception as error:
-            print(f"[SelfAwake] 解析 Core 默认助手配置失败，将使用环境模型: {error}", flush=True)
+            logger.warning(f"解析 Core 默认助手配置失败，将使用环境模型: {error}")
     return _runtime_config_from_model(*env_model(), None)
 
 
@@ -136,18 +139,18 @@ def self_awake_before_tool_call(context_data: dict[str, Any] | None):
         args = context.get("args")
         pattern = tool_pattern(tool_name, args)
         if self_awake_can_use_file_tool(context_data, tool_name, args):
-            print(f"[SelfAwake] 文件工具已按上下文放行: {tool_name} {pattern}", flush=True)
+            logger.info(f"文件工具已按上下文放行: {tool_name} {pattern}")
             return None
         if tool_name in file_tools:
-            print(f"[SelfAwake] 文件工具已拦截: {tool_name} {pattern}", flush=True)
+            logger.warning(f"文件工具已拦截: {tool_name} {pattern}")
             return {
                 "block": True,
                 "reason": "当前自醒上下文已提供工作区与工作日记摘要，后台自醒不能无目的浏览文件。只有存在 debug_target、recent_incidents 或明确错误日志时才可读取具体文件。",
             }
         if tool_name in allowed_tools:
-            print(f"[SelfAwake] 工具已允许: {tool_name} {pattern}", flush=True)
+            logger.info(f"工具已允许: {tool_name} {pattern}")
             return None
-        print(f"[SelfAwake] 后台工具已拦截: {tool_name} {pattern}", flush=True)
+        logger.warning(f"后台工具已拦截: {tool_name} {pattern}")
         return {
             "block": True,
             "reason": "当前轮次是后台非交互观察，不能直接执行需要用户确认或可能产生副作用的工具。请在最终 JSON 的 action 字段中说明需要的动作。",
@@ -179,10 +182,7 @@ async def run_self_awake_agent(
     character = request_character(request, runtime_config.core)
     system_prompt = build_agent_system_prompt({"character": character}, source="self_awake")
     user_prompt = build_self_awake_task_prompt(context)
-    print(
-        f"[SelfAwake] 调用开始 session={session_id} model={runtime_config.label} tools={len(tools)} context_keys={list(context.keys())}",
-        flush=True,
-    )
+    logger.info(f"调用开始 session={session_id} model={runtime_config.label} tools={len(tools)} context_keys={list(context.keys())}")
     agent = Agent(
         AgentOptions(
             session_id=session_id,
@@ -203,16 +203,13 @@ async def run_self_awake_agent(
     def handle_event(event: dict[str, Any], _signal: Any = None) -> None:
         event_type = event.get("type")
         if event_type == "tool_execution_start":
-            print(f"[SelfAwake] 工具开始: {event.get('toolName')} {event.get('toolCallId')}", flush=True)
+            logger.info(f"工具开始: {event.get('toolName')} {event.get('toolCallId')}")
         elif event_type == "tool_execution_end":
-            print(
-                f"[SelfAwake] 工具{'失败' if event.get('isError') else '完成'}: {event.get('toolName')} {event.get('toolCallId')}",
-                flush=True,
-            )
+            logger.info(f"工具{'失败' if event.get('isError') else '完成'}: {event.get('toolName')} {event.get('toolCallId')}")
         elif event_type == "message_end":
             message = event.get("message") or {}
             if message.get("errorMessage"):
-                print(f"[SelfAwake] 助手消息失败: {message.get('errorMessage')}", flush=True)
+                logger.error(f"助手消息失败: {message.get('errorMessage')}")
 
     agent.subscribe(handle_event)
     await agent.prompt({"role": "user", "timestamp": now_ms(), "content": [{"type": "text", "text": user_prompt}]})
@@ -227,14 +224,14 @@ async def run_self_awake(request: dict[str, Any], app: AppState, token: str | No
     try:
         result = await run_self_awake_agent(request, app, token, runtime_config)
         decision = parse_self_awake_decision(str(result.get("text") or ""))
-        print(
-            f"[SelfAwake] 决策完成 model={runtime_config.label} action={decision['action']['type']} next={decision['next_wake']['after_minutes']}m duration={now_ms() - started}ms",
-            flush=True,
+        logger.info(
+            f"决策完成 model={runtime_config.label} action={decision['action']['type']} "
+            f"next={decision['next_wake']['after_minutes']}m duration={now_ms() - started}ms"
         )
         return decision
     except Exception as error:
         reason = str(error)
-        print(f"[SelfAwake] 调用失败，使用 fallback: {reason}", flush=True)
+        logger.error(f"调用失败，使用 fallback: {reason}", exc_info=True)
         return fallback_self_awake_decision(context, reason, character)
 
 

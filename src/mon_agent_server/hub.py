@@ -9,6 +9,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .config import ServerConfig
+from .logging import get_logger
+
+logger = get_logger("MonAgent", "Discovery")
 
 
 def now_iso() -> str:
@@ -49,12 +52,12 @@ class HubRegistryClient:
 
     def start(self) -> None:
         if not self.config.hub.enabled:
-            print("[Hub] MonHub 注册已关闭", flush=True)
+            logger.info("MonHub 服务注册已关闭")
             return
         try:
             import zmq  # type: ignore
         except Exception as error:
-            print(f"[Hub] 未安装 pyzmq，跳过 MonHub 注册：{error}", flush=True)
+            logger.warning(f"未安装 pyzmq，跳过 MonHub 服务注册：{error}")
             return
         try:
             self._context = zmq.Context.instance()
@@ -65,9 +68,9 @@ class HubRegistryClient:
             self.register("startup")
             self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
             self._heartbeat_thread.start()
-            print(f"[Hub] MonHub 注册客户端已启动：{self.config.hub.address}", flush=True)
+            logger.info(f"MonHub 服务注册客户端已启动：{self.config.hub.address}")
         except Exception as error:
-            print(f"[Hub] MonHub 注册失败，Agent 将继续本地运行：{error}", flush=True)
+            logger.error(f"MonHub 服务注册失败，Agent 将继续本地运行：{error}", exc_info=True)
             self.stop("startup_failed")
 
     def stop(self, reason: str = "shutdown") -> None:
@@ -86,7 +89,7 @@ class HubRegistryClient:
                     }
                 )
             except Exception as error:
-                print(f"[Hub] MonHub 注销失败：{error}", flush=True)
+                logger.warning(f"MonHub 服务注销失败：{error}")
         with self._lock:
             if self._socket:
                 try:
@@ -129,7 +132,7 @@ class HubRegistryClient:
             }
         )
         self._registered = True
-        print(f"[Hub] 已发送 MonHub 服务注册：http://{host}:{self.config.port}", flush=True)
+        logger.info(f"已发送 MonHub 服务注册：http://{host}:{self.config.port}")
 
     def send(self, message: dict[str, Any]) -> None:
         with self._lock:
@@ -158,5 +161,5 @@ class HubRegistryClient:
                     }
                 )
             except Exception as error:
-                print(f"[Hub] MonHub 心跳发送失败：{error}", flush=True)
+                logger.warning(f"MonHub 心跳发送失败：{error}")
                 time.sleep(2)
