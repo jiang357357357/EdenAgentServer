@@ -17,5 +17,6 @@ build/
 dist/
 *.egg-info/
 .artifacts/
+Data/
 
 *.log
