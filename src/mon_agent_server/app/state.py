@@ -1,0 +1,79 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+from ..brokers import PermissionBroker, QuestionBroker
+from ..config import ServerConfig, environment_context, merge_environment_context
+from ..core import CoreClient
+from ..events import EventBus
+from ..runtime import MonAgentRuntime
+from ..store import SessionStore
+
+
+@dataclass(slots=True)
+class AppState:
+    config: ServerConfig
+    events: EventBus = field(default_factory=EventBus)
+    store: SessionStore = field(default_factory=SessionStore)
+    hydrated_session_ids: set[str] = field(default_factory=set)
+
+    def __post_init__(self) -> None:
+        self.permissions = PermissionBroker(self.events)
+        self.questions = QuestionBroker(self.events)
+        self.core_client = CoreClient(self.config.core_base_url)
+        self.runtime = MonAgentRuntime(
+            self.config.workspace_root,
+            self.store,
+            self.events,
+            self.permissions,
+            self.questions,
+            self.core_client,
+            environment_context(self.config.environment),
+        )
+
+    permissions: PermissionBroker = field(init=False)
+    questions: QuestionBroker = field(init=False)
+    core_client: CoreClient = field(init=False)
+    runtime: MonAgentRuntime = field(init=False)
+
+    def environment_context_for_token(self, token: str | None) -> dict[str, Any]:
+        base = environment_context(self.config.environment)
+        if not token:
+            return base
+        profile = self.core_client.get_user_profile(token)
+        environment = profile.get("environment") if isinstance(profile.get("environment"), dict) else {}
+        return merge_environment_context(base, environment)
+
+    def hydrate(self, token: str, session_id: str) -> None:
+        data = self.core_client.get_agent_session(token, session_id)
+        self.store.upsert_session_info(data["info"])
+        self.store.hydrate_messages(session_id, data["messages"])
+        self.hydrated_session_ids.add(session_id)
+
+    def ensure_hydrated(self, token: str, session_id: str) -> None:
+        if session_id not in self.hydrated_session_ids:
+            self.hydrate(token, session_id)
+            return
+        self.store.require_session(session_id)
+
+    def mark_hydrated(self, session_id: str) -> None:
+        self.hydrated_session_ids.add(session_id)
+
+
+def is_agent_api_route(pathname: str) -> bool:
+    return (
+        pathname == "/events"
+        or pathname == "/session"
+        or pathname.startswith("/session/")
+        or pathname == "/permission"
+        or pathname.startswith("/permission/")
+        or pathname == "/question"
+        or pathname.startswith("/question/")
+        or pathname == "/self-awake/runs"
+        or pathname == "/memos"
+        or pathname.startswith("/memos/")
+        or pathname == "/model"
+        or pathname == "/internal/self-awake/run"
+        or pathname == "/tools/status"
+    )

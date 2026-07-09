@@ -37,6 +37,31 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(stored["info"]["title"], "第一条")
         self.assertEqual(stored["agentMessages"][0]["role"], "user")
 
+    def test_compaction_message_is_hidden_and_resets_agent_context(self):
+        store = SessionStore()
+        session = store.create_session("")
+        old_message = {
+            "info": {"id": "msg_old", "role": "user", "time": {"created": 1, "completed": 1}},
+            "parts": [{"id": "part_old", "messageID": "msg_old", "sessionID": session["id"], "type": "text", "text": "旧消息"}],
+        }
+        compaction_message = store.append_compaction_message(
+            session["id"],
+            summary="旧消息已经摘要。",
+            tokens_before=120000,
+            first_kept_entry_id="runtime_000010",
+            created_at=2,
+        )
+        new_message = {
+            "info": {"id": "msg_new", "role": "user", "time": {"created": 3, "completed": 3}},
+            "parts": [{"id": "part_new", "messageID": "msg_new", "sessionID": session["id"], "type": "text", "text": "新消息"}],
+        }
+        store.hydrate_messages(session["id"], [old_message, compaction_message, new_message])
+
+        self.assertEqual([message["info"]["id"] for message in store.list_messages(session["id"], 10)], ["msg_old", "msg_new"])
+        stored = store.require_session(session["id"])
+        self.assertEqual([message["role"] for message in stored["agentMessages"]], ["compactionSummary", "user"])
+        self.assertEqual(stored["agentMessages"][0]["summary"], "旧消息已经摘要。")
+
 
 if __name__ == "__main__":
     unittest.main()

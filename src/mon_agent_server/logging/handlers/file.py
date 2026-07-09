@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import os
 import re
+import sys
 import threading
 from pathlib import Path
 from typing import TextIO
 
 from ..config import get_config
 from .base import BaseHandler, LogRecord
+
+try:
+    import msvcrt
+
+    HAS_MSVCRT = True
+except ImportError:
+    HAS_MSVCRT = False
 
 
 class FileHandler(BaseHandler):
@@ -22,6 +31,22 @@ class FileHandler(BaseHandler):
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.stream = self.path.open("a", encoding="utf-8")
+
+    def _lock_file(self) -> bool:
+        if HAS_MSVCRT and self.stream:
+            try:
+                msvcrt.locking(self.stream.fileno(), msvcrt.LK_LOCK, 1)
+                return True
+            except (IOError, OSError):
+                return False
+        return True
+
+    def _unlock_file(self) -> None:
+        if HAS_MSVCRT and self.stream:
+            try:
+                msvcrt.locking(self.stream.fileno(), msvcrt.LK_UNLCK, 1)
+            except (IOError, OSError):
+                pass
 
     def _should_rotate(self, record_len: int) -> bool:
         config = get_config()
@@ -47,14 +72,26 @@ class FileHandler(BaseHandler):
                 dst = self.path.with_name(f"{self.path.name}.{index + 1}")
                 if src.exists():
                     if dst.exists():
-                        dst.unlink()
-                    src.rename(dst)
+                        try:
+                            dst.unlink()
+                        except OSError:
+                            pass
+                    try:
+                        src.rename(dst)
+                    except OSError:
+                        pass
 
             first_backup = self.path.with_name(f"{self.path.name}.1")
             if self.path.exists():
                 if first_backup.exists():
-                    first_backup.unlink()
-                self.path.rename(first_backup)
+                    try:
+                        first_backup.unlink()
+                    except OSError:
+                        pass
+                try:
+                    self.path.rename(first_backup)
+                except OSError:
+                    pass
         except OSError:
             pass
         finally:
@@ -94,14 +131,19 @@ class FileHandler(BaseHandler):
             try:
                 self._open()
                 if self._should_rotate(encoded_len):
-                    self._rotate()
+                    if self._lock_file():
+                        try:
+                            if self._should_rotate(encoded_len):
+                                self._rotate()
+                        finally:
+                            self._unlock_file()
                 if self.stream:
                     self.stream.write(text)
                     self.stream.flush()
             except Exception as error:
-                import sys
-
                 print(f"[MonAgentLogs] 无法写入日志文件: {self.path}: {error}", file=sys.stderr)
+                if isinstance(error, PermissionError):
+                    print(f"[MonAgentLogs] 请检查目录权限或文件是否被占用: {os.fspath(self.path.parent)}", file=sys.stderr)
 
     def close(self) -> None:
         with self._lock:

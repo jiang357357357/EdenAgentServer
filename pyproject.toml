@@ -11,6 +11,7 @@ requires-python = ">=3.12"
 dependencies = [
     "mon-agent-core",
     "pyzmq>=26",
+    "rich>=13",
 ]
 
 [tool.uv]

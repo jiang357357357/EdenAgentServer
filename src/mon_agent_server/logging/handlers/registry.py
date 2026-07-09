@@ -29,16 +29,17 @@ def get_handlers(_main: str, _sub: str, stream: Optional[TextIO]) -> List[BaseHa
                 _console_handler = ConsoleHandler(sys.stdout)
             handlers.append(_console_handler)
 
-        if config.file_enabled and config.log_file is not None:
-            key = (config.log_file.resolve(), True)
+        files = config.files_for(_main)
+        if config.file_enabled and files.colored is not None:
+            key = (files.colored.resolve(), True)
             handler = _file_handlers.get(key)
             if handler is None:
                 handler = FileHandler(key[0], colored=True)
                 _file_handlers[key] = handler
             handlers.append(handler)
 
-        if config.file_enabled and config.dual_file_enabled and config.plain_log_file is not None:
-            key = (config.plain_log_file.resolve(), False)
+        if config.file_enabled and config.dual_file_enabled and files.plain is not None:
+            key = (files.plain.resolve(), False)
             handler = _file_handlers.get(key)
             if handler is None:
                 handler = FileHandler(key[0], colored=False)
