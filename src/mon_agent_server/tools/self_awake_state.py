@@ -46,6 +46,7 @@ def resolve_self_awake_state_path(workspace_root: Path | str) -> dict[str, Any]:
         state_path = base_os_root / state_path
     return {
         "state_path": state_path,
+        "request_dir": state_path.parent / "schedule_requests",
         "min_minutes": int(read_ini_value(content, "self_awake", "MIN_WAKE_MINUTES") or 1),
         "max_minutes": int(read_ini_value(content, "self_awake", "MAX_WAKE_MINUTES") or 1440),
     }

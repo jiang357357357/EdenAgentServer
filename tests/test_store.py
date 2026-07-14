@@ -37,6 +37,33 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(stored["info"]["title"], "第一条")
         self.assertEqual(stored["agentMessages"][0]["role"], "user")
 
+    def test_hydration_preserves_local_assistant_missing_from_core(self):
+        store = SessionStore()
+        session = store.create_session("")
+        user_message = store.append_user_message(session["id"], "用户消息", [])
+        assistant_info = {
+            "id": "msg_assistant_local",
+            "role": "assistant",
+            "time": {"created": 2, "completed": 3},
+        }
+        store.upsert_message(session["id"], assistant_info)
+        store.upsert_part(
+            session["id"],
+            {
+                "id": "part_assistant_local",
+                "messageID": "msg_assistant_local",
+                "sessionID": session["id"],
+                "type": "text",
+                "text": "尚未同步到 Core 的助手回复",
+            },
+        )
+
+        store.hydrate_messages(session["id"], [user_message])
+
+        messages = store.list_messages(session["id"], 10)
+        self.assertEqual([message["info"]["role"] for message in messages], ["assistant", "user"])
+        self.assertEqual(messages[0]["parts"][0]["text"], "尚未同步到 Core 的助手回复")
+
     def test_compaction_message_is_hidden_and_resets_agent_context(self):
         store = SessionStore()
         session = store.create_session("")

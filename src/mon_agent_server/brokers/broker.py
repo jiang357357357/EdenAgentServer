@@ -147,3 +147,71 @@ class QuestionBroker:
             }
         )
         return True
+
+
+@dataclass(slots=True)
+class _ScreenCaptureWaiter:
+    request: dict[str, Any]
+    event: threading.Event
+    result: dict[str, Any] | None = None
+    error: str | None = None
+
+
+class ScreenCaptureBroker:
+    def __init__(self, events: EventBus) -> None:
+        self._events = events
+        self._waiters: dict[str, _ScreenCaptureWaiter] = {}
+        self._lock = threading.Lock()
+
+    def list(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [waiter.request for waiter in self._waiters.values()]
+
+    def capture(self, request: dict[str, Any], timeout: float = 30.0) -> dict[str, Any]:
+        request_id = create_id("cap")
+        full_request = {**request, "id": request_id}
+        waiter = _ScreenCaptureWaiter(full_request, threading.Event())
+        with self._lock:
+            self._waiters[request_id] = waiter
+        self._events.emit({"type": "screen_capture.requested", "properties": full_request})
+        if not waiter.event.wait(timeout):
+            with self._lock:
+                self._waiters.pop(request_id, None)
+            self._events.emit(
+                {
+                    "type": "screen_capture.replied",
+                    "properties": {
+                        "sessionID": full_request.get("sessionID"),
+                        "requestID": request_id,
+                        "success": False,
+                        "error": "桌面客户端截图响应超时",
+                    },
+                }
+            )
+            raise RuntimeError("桌面客户端未在 30 秒内返回屏幕截图。")
+        if waiter.error:
+            raise RuntimeError(waiter.error)
+        if not waiter.result:
+            raise RuntimeError("桌面客户端没有返回屏幕截图。")
+        return waiter.result
+
+    def reply(self, request_id: str, result: dict[str, Any] | None = None, error: str | None = None) -> bool:
+        with self._lock:
+            waiter = self._waiters.pop(request_id, None)
+        if not waiter:
+            return False
+        waiter.result = result if isinstance(result, dict) else None
+        waiter.error = str(error or "").strip() or None
+        waiter.event.set()
+        self._events.emit(
+            {
+                "type": "screen_capture.replied",
+                "properties": {
+                    "sessionID": waiter.request.get("sessionID"),
+                    "requestID": request_id,
+                    "success": waiter.error is None and waiter.result is not None,
+                    "error": waiter.error,
+                },
+            }
+        )
+        return True

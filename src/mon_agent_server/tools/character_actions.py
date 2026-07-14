@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import random
 from typing import Any
 
 from mon_agent_core import AgentTool
@@ -11,10 +10,32 @@ from .context import MonToolContext
 from .core_access import core_call, require_core_access
 from .result import text_result
 
-MOTIONS = {"none", "jump", "approach", "retreat", "shake", "nod", "bounce"}
-EFFECTS = {"none", "question", "exclamation", "sweat", "heart", "anger"}
-INTENSITIES = {"light", "normal", "strong"}
-EFFECT_ANCHORS = {"head_left", "head_right", "above", "body_left", "body_right"}
+HOLD_ACTION = "保持当前"
+MOTION_CODES = {
+    "无": "none",
+    "上下跳动": "jump",
+    "向前靠近": "approach",
+    "向后退开": "retreat",
+    "左右摇晃": "shake",
+    "连续弹跳": "bounce",
+    "轻微上下浮动": "float",
+    "快速颤抖": "tremble",
+    "垂直震动": "vertical_shake",
+    "轻微下沉": "sink",
+    "强调放大": "emphasize",
+}
+EFFECT_CODES = {
+    "无": "none",
+    "疑问": "question",
+    "惊讶": "exclamation",
+    "汗滴": "sweat",
+    "爱心": "heart",
+    "生气": "anger",
+    "叹气": "sigh",
+    "无语": "speechless",
+    "低落": "gloomy",
+    "困倦": "sleepy",
+}
 
 
 def _as_list(value: Any) -> list[dict[str, Any]]:
@@ -40,9 +61,13 @@ def _action_image_url(action: dict[str, Any], visual_preference: str | None = No
     return static_url or dynamic_url
 
 
-def _clean_choice(value: Any, allowed: set[str], default: str = "none") -> str:
-    text = str(value or default).strip().lower()
-    return text if text in allowed else default
+def _required_chinese_choice(params: dict[str, Any], field: str, choices: dict[str, str]) -> tuple[str, str]:
+    label = str(params.get(field) or "").strip()
+    if not label:
+        raise RuntimeError(f"缺少必填参数「{field}」。")
+    if label not in choices:
+        raise RuntimeError(f"「{field}」不支持“{label}”，可选值：{'、'.join(choices)}。")
+    return label, choices[label]
 
 
 def _action_identity(action: dict[str, Any] | None) -> str:
@@ -118,32 +143,7 @@ def _match_action(action: dict[str, Any], selector: str) -> bool:
     return normalized in candidates
 
 
-def _match_group(group: dict[str, Any], selector: str) -> bool:
-    if not selector:
-        return False
-    normalized = selector.strip().lower()
-    candidates = {
-        str(group.get("id") or "").strip().lower(),
-        str(group.get("trigger") or "").strip().lower(),
-        str(group.get("name") or "").strip().lower(),
-    }
-    return normalized in candidates
-
-
-def _choose_group_action(group: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    items = [item for item in _as_list(group.get("items")) if item.get("enabled", True) is not False]
-    if not items:
-        return None, None
-    mode = str(group.get("selection_mode") or "weighted_random")
-    if mode == "first" or mode == "sequence":
-        item = sorted(items, key=lambda value: (int(value.get("priority") or 100), int(value.get("id") or 0)))[0]
-        return item.get("action") if isinstance(item.get("action"), dict) else None, item
-    weights = [max(int(item.get("weight") or 1), 1) for item in items]
-    item = random.choices(items, weights=weights, k=1)[0]
-    return item.get("action") if isinstance(item.get("action"), dict) else None, item
-
-
-async def _load_character_action_data(context: MonToolContext) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+async def _load_character_action_data(context: MonToolContext) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     character = context.character if isinstance(context.character, dict) else None
     if not character or not character.get("id"):
         core, token = require_core_access(context)
@@ -153,16 +153,14 @@ async def _load_character_action_data(context: MonToolContext) -> tuple[dict[str
         raise RuntimeError("当前默认助手没有绑定可读取的角色。")
 
     actions = _as_list(character.get("visual_actions"))
-    groups = _as_list(character.get("visual_action_groups"))
     if context.core_client and context.core_token:
         core, token = require_core_access(context)
         try:
             actions = await asyncio.to_thread(core_call, core.list_character_visual_actions, token, character["id"])
-            groups = await asyncio.to_thread(core_call, core.list_character_visual_action_groups, token, character["id"])
         except Exception:
             if not actions:
                 raise
-    return character, _enabled_actions(actions), [group for group in groups if group.get("enabled", True) is not False]
+    return character, _enabled_actions(actions)
 
 
 def _format_current_action(current: dict[str, Any] | None) -> str:
@@ -200,66 +198,45 @@ def _format_actions(actions: list[dict[str, Any]], current: dict[str, Any] | Non
     return "\n\n".join(lines)
 
 
-def _format_groups(groups: list[dict[str, Any]]) -> str:
-    if not groups:
-        return "暂无可用动作组。"
-    lines = []
-    for group in groups:
-        actions = []
-        for item in _as_list(group.get("items")):
-            action = item.get("action") if isinstance(item.get("action"), dict) else {}
-            if action:
-                actions.append(_action_label(action))
-        lines.append(
-            f"#{group.get('id')} {group.get('name')} | 触发: {group.get('trigger')} | 选择: {group.get('selection_mode')} | 动作: {', '.join(actions) or '-'}"
-        )
-    return "\n".join(lines)
-
-
 def create_character_action_tools(context: MonToolContext) -> list[AgentTool]:
     async def list_character_actions_execute(_tool_call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
-        character, actions, groups = await _load_character_action_data(context)
+        character, actions = await _load_character_action_data(context)
         current = _current_action(context)
         body = "\n\n".join(
             [
                 f"当前角色：{character.get('name') or character.get('id')}",
                 _format_current_action(current),
-                "可用动作：",
+                f"可用立绘动作（也可以明确选择“{HOLD_ACTION}”）：",
                 _format_actions(actions, current),
-                "动作组：",
-                _format_groups(groups),
             ]
         )
-        return text_result(body, {"character": character, "current": current, "actions": actions, "groups": groups})
+        return text_result(body, {"character": character, "current": current, "actions": actions})
 
     async def switch_character_action_execute(_tool_call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
         if not context.emit_event:
             raise RuntimeError("当前运行环境不能向前端发送角色动作事件。")
-        character, actions, groups = await _load_character_action_data(context)
-        selector = str(params.get("action") or params.get("action_id") or params.get("intent") or params.get("name") or "").strip()
-        group_selector = str(params.get("group") or params.get("group_id") or params.get("trigger") or "").strip()
-        motion = _clean_choice(params.get("motion"), MOTIONS)
-        effect = _clean_choice(params.get("effect"), EFFECTS)
-        intensity = _clean_choice(params.get("intensity"), INTENSITIES, "normal")
-        effect_anchor = _clean_choice(params.get("effect_anchor") or params.get("effectAnchor"), EFFECT_ANCHORS, "head_right")
-        if not selector and not group_selector and motion == "none" and effect == "none":
-            raise RuntimeError("请至少提供 action/group/motion/effect 之一，用于切换立绘或播放角色表现。")
-        selected_group = next((group for group in groups if _match_group(group, group_selector)), None) if group_selector else None
+        character, actions = await _load_character_action_data(context)
+        selector = str(params.get("立绘动作") or "").strip()
+        if not selector:
+            raise RuntimeError("缺少必填参数「立绘动作」。")
+        motion_label, motion = _required_chinese_choice(params, "立绘动效", MOTION_CODES)
+        effect_label, effect = _required_chinese_choice(params, "表情符号", EFFECT_CODES)
+        selected_group = None
         group_item = None
         image_url = ""
-        if selected_group:
-            action, group_item = _choose_group_action(selected_group)
-        elif selector:
-            action = next((item for item in actions if _match_action(item, selector)), None)
-        else:
-            current = _current_action(context)
+        current = _current_action(context)
+        if selector == HOLD_ACTION:
             action = current.get("action") if isinstance(current, dict) and isinstance(current.get("action"), dict) else {}
+            selected_group = current.get("group") if isinstance(current, dict) and isinstance(current.get("group"), dict) else None
+            group_item = current.get("groupItem") if isinstance(current, dict) and isinstance(current.get("groupItem"), dict) else None
             image_url = str((current or {}).get("imageUrl") or "").strip()
+        else:
+            action = next((item for item in actions if _match_action(item, selector)), None)
         if not action:
-            raise RuntimeError("没有找到匹配的角色动作。请先调用 list_character_actions 查看可用动作。")
+            available = "、".join(filter(None, (_action_label(item) for item in actions))) or "暂无"
+            raise RuntimeError(f"没有找到立绘动作“{selector}”。可用立绘动作：{available}；或选择“{HOLD_ACTION}”。")
         if not image_url:
             image_url = _action_image_url(action, str(character.get("visual_preference") or "static"))
-        reason = str(params.get("reason") or "").strip()
         state = _character_action_state(
             context,
             character,
@@ -267,11 +244,11 @@ def create_character_action_tools(context: MonToolContext) -> list[AgentTool]:
             selected_group,
             group_item,
             image_url,
-            reason,
+            "智能体自主选择角色表现",
             motion=motion,
             effect=effect,
-            intensity=intensity,
-            effect_anchor=effect_anchor,
+            intensity="normal",
+            effect_anchor="head_right",
         )
         context.current_character_action = state
         if context.set_character_action:
@@ -281,13 +258,11 @@ def create_character_action_tools(context: MonToolContext) -> list[AgentTool]:
             "properties": state,
         }
         context.emit_event(event)
-        summary = [f"已切换角色动作：{_action_label(action)}" if selector or group_selector else "已播放角色表现。"]
-        if image_url and (selector or group_selector):
+        summary = [f"立绘动作：{selector if selector == HOLD_ACTION else _action_label(action)}"]
+        if image_url and selector != HOLD_ACTION:
             summary.append(f"图片: {image_url}")
-        if motion != "none":
-            summary.append(f"小动作: {motion}")
-        if effect != "none":
-            summary.append(f"特效: {effect} ({effect_anchor})")
+        summary.append(f"表情符号：{effect_label}")
+        summary.append(f"立绘动效：{motion_label}")
         return text_result(
             "\n".join(summary),
             event["properties"],
@@ -303,35 +278,28 @@ def create_character_action_tools(context: MonToolContext) -> list[AgentTool]:
         ),
         AgentTool(
             "switch_character_action",
-            "切换角色动作",
-            "统一控制当前前端角色表现：可切换立绘动作，也可播放小动作和头顶/身侧特效。action/group/motion/effect 至少提供一个。",
+            "选择角色表现",
+            "为本轮回复明确选择立绘动作、表情符号和静态立绘动效。三个中文字段全部必填；不需要变化时也必须明确选择“保持当前”或“无”。",
             {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "description": "动作名称、意图、别名或 ID。"},
-                    "intent": {"type": "string", "description": "内置动作意图，如 idle、talk、think、happy。"},
-                    "action_id": {"type": "number", "description": "动作 ID。"},
-                    "group": {"type": "string", "description": "动作组名称、触发场景或 ID。"},
-                    "trigger": {"type": "string", "description": "动作组触发场景，如 idle、click、slow_walk、drag。"},
-                    "group_id": {"type": "number", "description": "动作组 ID。"},
-                    "motion": {
+                    "立绘动作": {
                         "type": "string",
-                        "description": "不换图时也可播放的小动作。",
-                        "enum": ["none", "jump", "approach", "retreat", "shake", "nod", "bounce"],
+                        "description": "当前角色实际拥有的立绘动作名称；不切换图片时填写“保持当前”。",
                     },
-                    "effect": {
+                    "表情符号": {
                         "type": "string",
-                        "description": "叠加在角色附近的短特效。",
-                        "enum": ["none", "question", "exclamation", "sweat", "heart", "anger"],
+                        "description": "叠加在角色附近并短暂显示的中文表情符号。",
+                        "enum": list(EFFECT_CODES),
                     },
-                    "intensity": {"type": "string", "enum": ["light", "normal", "strong"], "description": "小动作/特效强度。"},
-                    "effect_anchor": {
+                    "立绘动效": {
                         "type": "string",
-                        "enum": ["head_left", "head_right", "above", "body_left", "body_right"],
-                        "description": "特效锚点位置。",
+                        "description": "让静态立绘整体摇晃、跳动、靠近或点头的中文动效。",
+                        "enum": list(MOTION_CODES),
                     },
-                    "reason": {"type": "string", "description": "切换原因，供前端调试显示。"},
                 },
+                "required": ["立绘动作", "表情符号", "立绘动效"],
+                "additionalProperties": False,
             },
             switch_character_action_execute,
             execution_mode="sequential",

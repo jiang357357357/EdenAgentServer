@@ -2,7 +2,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from mon_agent_server.mon_tools import MonToolContext, create_mon_agent_tools
 
@@ -222,6 +222,44 @@ class FakeHTTPResponse:
 
 
 class MonToolsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_notify_auto_routes_normal_events_to_qq(self):
+        with TemporaryDirectory() as temp_dir:
+            tools = create_mon_agent_tools(Path(temp_dir), MonToolContext(), "self_awake")
+            notify_tool = tool_by_name(tools, "notify_user")
+            qq_result = {"details": {"queued": True}}
+
+            with (
+                patch("mon_agent_server.tools.notify.send_qq_message", new=AsyncMock(return_value=qq_result)) as send_qq,
+                patch("mon_agent_server.tools.notify.send_external_email", new=AsyncMock()) as send_email,
+            ):
+                result = await notify_tool.run(
+                    "call_notify_normal",
+                    {"message": "普通提醒", "channel": "auto", "priority": "normal"},
+                )
+
+            send_qq.assert_awaited_once()
+            send_email.assert_not_awaited()
+            self.assertEqual(result["details"]["delivered_channels"], ["qq"])
+
+    async def test_notify_auto_routes_important_events_to_email(self):
+        with TemporaryDirectory() as temp_dir:
+            tools = create_mon_agent_tools(Path(temp_dir), MonToolContext(), "self_awake")
+            notify_tool = tool_by_name(tools, "notify_user")
+            email_result = {"details": {"sent": True}}
+
+            with (
+                patch("mon_agent_server.tools.notify.send_external_email", new=AsyncMock(return_value=email_result)) as send_email,
+                patch("mon_agent_server.tools.notify.send_qq_message", new=AsyncMock()) as send_qq,
+            ):
+                result = await notify_tool.run(
+                    "call_notify_high",
+                    {"message": "重要事件", "channel": "auto", "priority": "high"},
+                )
+
+            send_email.assert_awaited_once()
+            send_qq.assert_not_awaited()
+            self.assertEqual(result["details"]["delivered_channels"], ["email"])
+
     async def test_character_action_tools_emit_frontend_event(self):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -253,22 +291,18 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
 
             listing = await tool_by_name(tools, "list_character_actions").run("call_list_actions", {})
             self.assertEqual(core.action_args, ("token-character", 9))
-            self.assertEqual(core.group_args, ("token-character", 9))
+            self.assertIsNone(core.group_args)
             self.assertIn("当前角色：江梦晚", listing["content"][0]["text"])
             self.assertIn("当前前端显示动作：思考", listing["content"][0]["text"])
             self.assertIn("开心", listing["content"][0]["text"])
             self.assertIn("思考 [当前]", listing["content"][0]["text"])
-            self.assertIn("说话", listing["content"][0]["text"])
 
             result = await tool_by_name(tools, "switch_character_action").run(
                 "call_switch_action",
                 {
-                    "intent": "happy",
-                    "motion": "jump",
-                    "effect": "question",
-                    "intensity": "strong",
-                    "effect_anchor": "head_right",
-                    "reason": "测试切换",
+                    "立绘动作": "开心",
+                    "表情符号": "爱心",
+                    "立绘动效": "上下跳动",
                 },
             )
 
@@ -280,8 +314,8 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(event["properties"]["imageUrl"], "/media/actions/happy.png")
             self.assertEqual(event["properties"]["source"], "tool")
             self.assertEqual(event["properties"]["motion"], "jump")
-            self.assertEqual(event["properties"]["effect"], "question")
-            self.assertEqual(event["properties"]["intensity"], "strong")
+            self.assertEqual(event["properties"]["effect"], "heart")
+            self.assertEqual(event["properties"]["intensity"], "normal")
             self.assertEqual(event["properties"]["effectAnchor"], "head_right")
             self.assertEqual(
                 set(event["properties"]),
@@ -305,7 +339,28 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(states[-1]["action"]["intent"], "happy")
             self.assertEqual(result["details"]["action"]["intent"], "happy")
-            self.assertIn("小动作: jump", result["content"][0]["text"])
+            self.assertIn("表情符号：爱心", result["content"][0]["text"])
+            self.assertIn("立绘动效：上下跳动", result["content"][0]["text"])
+
+            switch_tool = tool_by_name(tools, "switch_character_action")
+            self.assertEqual(
+                switch_tool.parameters["required"],
+                ["立绘动作", "表情符号", "立绘动效"],
+            )
+            self.assertEqual(
+                set(switch_tool.parameters["properties"]),
+                {"立绘动作", "表情符号", "立绘动效"},
+            )
+            self.assertTrue(
+                {"快速颤抖", "垂直震动", "轻微下沉", "强调放大"}.issubset(
+                    set(switch_tool.parameters["properties"]["立绘动效"]["enum"])
+                )
+            )
+            self.assertTrue(
+                {"疑问", "惊讶", "汗滴", "爱心", "生气", "叹气", "无语", "低落", "困倦"}.issubset(
+                    set(switch_tool.parameters["properties"]["表情符号"]["enum"])
+                )
+            )
 
     async def test_character_action_tool_can_play_performance_without_switching_image(self):
         with TemporaryDirectory() as temp_dir:
@@ -338,7 +393,7 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
 
             result = await tool_by_name(tools, "switch_character_action").run(
                 "call_performance_only",
-                {"motion": "shake", "effect": "sweat", "intensity": "light"},
+                {"立绘动作": "保持当前", "表情符号": "汗滴", "立绘动效": "左右摇晃"},
             )
 
             self.assertEqual(len(events), 1)
@@ -348,9 +403,36 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(event["properties"]["imageUrl"], "/media/actions/think.png")
             self.assertEqual(event["properties"]["motion"], "shake")
             self.assertEqual(event["properties"]["effect"], "sweat")
-            self.assertEqual(event["properties"]["intensity"], "light")
+            self.assertEqual(event["properties"]["intensity"], "normal")
             self.assertEqual(states[-1]["action"]["intent"], "think")
-            self.assertIn("已播放角色表现", result["content"][0]["text"])
+            self.assertIn("立绘动作：保持当前", result["content"][0]["text"])
+
+    async def test_character_action_tool_rejects_incomplete_or_english_performance(self):
+        with TemporaryDirectory() as temp_dir:
+            tools = create_mon_agent_tools(
+                Path(temp_dir),
+                MonToolContext(
+                    session_id="session-1",
+                    core_client=FakeCharacterActionCoreClient(),
+                    core_token="token-character",
+                    character={"id": 9, "name": "江梦晚", "visual_preference": "static"},
+                    current_character_action={
+                        "action": {"id": 102, "name": "思考", "intent": "think"},
+                        "imageUrl": "/media/actions/think.png",
+                    },
+                    emit_event=lambda _event: None,
+                ),
+                "user_chat",
+            )
+            switch_tool = tool_by_name(tools, "switch_character_action")
+
+            with self.assertRaisesRegex(RuntimeError, "缺少必填参数「表情符号」"):
+                await switch_tool.run("call_incomplete", {"立绘动作": "保持当前", "立绘动效": "无"})
+            with self.assertRaisesRegex(RuntimeError, "不支持“shake”"):
+                await switch_tool.run(
+                    "call_english",
+                    {"立绘动作": "保持当前", "表情符号": "无", "立绘动效": "shake"},
+                )
 
     async def test_qq_send_uses_default_bot_and_super_admin_target(self):
         with TemporaryDirectory() as temp_dir:
@@ -458,9 +540,14 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("read_self_awake_diary", names)
             self.assertIn("get_calendar_context", names)
             self.assertIn("get_weather", names)
+            self.assertNotIn("set_self_awake_timer", names)
+            self.assertNotIn("send_qq_message", names)
+            self.assertNotIn("send_external_email", names)
+            self.assertIn("notify_user", names)
 
             state = await tool_by_name(tools, "get_self_awake_state").run("call_1", {})
             self.assertIn("MonOs 自醒状态", state["content"][0]["text"])
+
             self.assertEqual(state["details"]["next_wake_after_minutes"], 60)
 
             diaries = await tool_by_name(tools, "list_self_awake_diaries").run("call_2", {"limit": 1})
@@ -501,6 +588,34 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("天气：上海", weather["content"][0]["text"])
             self.assertIn("晴朗", weather["content"][0]["text"])
             self.assertEqual(weather["details"]["location"]["city"], "上海")
+
+    async def test_timer_tool_submits_request_without_writing_monos_state(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            base_os = root / "Backend" / "BaseOs"
+            base_os.mkdir(parents=True)
+            (base_os / ".monconfig").write_text(
+                "[self_awake]\nDATA_DIR=Data/SelfAwake\nMIN_WAKE_MINUTES=1\nMAX_WAKE_MINUTES=1440\n",
+                encoding="utf-8",
+            )
+            state_path = base_os / "Data" / "SelfAwake" / "state.json"
+            state_path.parent.mkdir(parents=True)
+            original_state = '{"next_wake_at": "2026-07-20T12:00:00+08:00"}'
+            state_path.write_text(original_state, encoding="utf-8")
+            tools = create_mon_agent_tools(root, MonToolContext(), "user_chat")
+
+            result = await tool_by_name(tools, "set_self_awake_timer").run(
+                "call_timer",
+                {"after_minutes": 60, "reason": "测试单一调度权"},
+            )
+
+            self.assertEqual(state_path.read_text(encoding="utf-8"), original_state)
+            requests = list((state_path.parent / "schedule_requests").glob("*.json"))
+            self.assertEqual(len(requests), 1)
+            payload = json.loads(requests[0].read_text(encoding="utf-8"))
+            self.assertEqual(payload["reason"], "测试单一调度权")
+            self.assertEqual(payload["requested_by"], "monagent")
+            self.assertEqual(result["details"]["status"], "submitted")
 
     async def test_weather_uses_full_environment_location_label(self):
         with TemporaryDirectory() as temp_dir:

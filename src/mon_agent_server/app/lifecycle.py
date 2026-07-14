@@ -1,61 +1,9 @@
 from __future__ import annotations
 
-import threading
-from datetime import datetime
-
 from ..logging import get_logger
-from ..self_awake import enrich_self_awake_context, run_self_awake_sync
 from .state import AppState
 
 server_logger = get_logger("MonAgent", "Server")
-self_awake_logger = get_logger("MonAgent", "SelfAwake")
-
-
-def local_iso_now() -> str:
-    return datetime.now().astimezone().isoformat()
-
-
-def run_startup_self_awake_once(app: AppState) -> None:
-    config = app.config
-    token = app.core_client.login_for_token(
-        config.auth_dev_username,
-        config.auth_dev_password,
-        client_id="monagent-startup-self-awake",
-        client_type="monagent",
-    )
-    context = {
-        "trigger": "monagent_server_startup",
-        "source": "startup",
-        "current_time": local_iso_now(),
-        "wake": {"source": "monagent_server", "reason": "server_startup"},
-        "policy": {"allow_workspace_file_tools": False},
-    }
-    context = enrich_self_awake_context(context, app, token=token)
-    self_awake_logger.info("启动自醒开始执行。")
-    decision = run_self_awake_sync({"context": context}, app, token)
-    app.core_client.persist_self_awake_run(token, decision, context)
-    self_awake_logger.info("启动自醒已完成并写入 Core。")
-
-
-def start_startup_self_awake(app: AppState) -> None:
-    config = app.config
-    if not config.startup_self_awake_enabled:
-        self_awake_logger.info("启动自醒已关闭。")
-        return
-    if not config.auth_dev_username or not config.auth_dev_password:
-        self_awake_logger.warning("启动自醒已开启，但缺少 auth_dev 用户名/密码，跳过。")
-        return
-
-    def worker() -> None:
-        try:
-            if config.startup_self_awake_delay_seconds > 0:
-                threading.Event().wait(config.startup_self_awake_delay_seconds)
-            run_startup_self_awake_once(app)
-        except Exception as error:
-            self_awake_logger.error(f"启动自醒失败：{error}", exc_info=True)
-
-    threading.Thread(target=worker, name="monagent-startup-self-awake", daemon=True).start()
-    self_awake_logger.info("启动自醒任务已提交。")
 
 
 def render_startup_summary(app: AppState) -> None:

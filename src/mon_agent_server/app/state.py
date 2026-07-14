@@ -3,12 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..brokers import PermissionBroker, QuestionBroker
+from ..brokers import PermissionBroker, QuestionBroker, ScreenCaptureBroker
 from ..config import ServerConfig, environment_context, merge_environment_context
 from ..core import CoreClient
 from ..events import EventBus
 from ..runtime import MonAgentRuntime
 from ..store import SessionStore
+from ..speech import SpeechCache
 
 
 @dataclass(slots=True)
@@ -21,7 +22,9 @@ class AppState:
     def __post_init__(self) -> None:
         self.permissions = PermissionBroker(self.events)
         self.questions = QuestionBroker(self.events)
+        self.screen_captures = ScreenCaptureBroker(self.events)
         self.core_client = CoreClient(self.config.core_base_url)
+        self.speech_cache = SpeechCache(self.config.workspace_root / ".artifacts" / "speech-cache")
         self.runtime = MonAgentRuntime(
             self.config.workspace_root,
             self.store,
@@ -29,12 +32,15 @@ class AppState:
             self.permissions,
             self.questions,
             self.core_client,
+            self.screen_captures,
             environment_context(self.config.environment),
         )
 
     permissions: PermissionBroker = field(init=False)
     questions: QuestionBroker = field(init=False)
+    screen_captures: ScreenCaptureBroker = field(init=False)
     core_client: CoreClient = field(init=False)
+    speech_cache: SpeechCache = field(init=False)
     runtime: MonAgentRuntime = field(init=False)
 
     def environment_context_for_token(self, token: str | None) -> dict[str, Any]:
@@ -66,10 +72,13 @@ def is_agent_api_route(pathname: str) -> bool:
         pathname == "/events"
         or pathname == "/session"
         or pathname.startswith("/session/")
+        or pathname == "/speech/synthesize"
         or pathname == "/permission"
         or pathname.startswith("/permission/")
         or pathname == "/question"
         or pathname.startswith("/question/")
+        or pathname == "/screen-capture"
+        or pathname.startswith("/screen-capture/")
         or pathname == "/self-awake/runs"
         or pathname == "/memos"
         or pathname.startswith("/memos/")

@@ -14,6 +14,7 @@ class RuntimePermissionMixin:
             "loaded_tools",
             "ask_user",
             "analyze_image",
+            "analyze_screen",
             "get_calendar_context",
             "get_weather",
             "list_character_actions",

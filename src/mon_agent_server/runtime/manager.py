@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import threading
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ from mon_agent_core.harness.compaction import (
 from mon_agent_core.harness.messages import convert_to_llm
 from mon_agent_core.harness.session.session import build_session_context
 
-from ..brokers import PermissionBroker, QuestionBroker
+from ..brokers import PermissionBroker, QuestionBroker, ScreenCaptureBroker
 from ..core import CoreAuthenticationExpiredError, CoreClient
 from ..events import EventBus
 from ..ids import create_id, now_ms
@@ -32,10 +33,40 @@ from .permissions import RuntimePermissionMixin
 from .state import RunState
 
 logger = get_logger("MonAgent", "Runtime")
+_CORE_SYNC_RETRY_DELAYS = (0.15, 0.5, 1.5)
 
 
 def _as_dict_list(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _vision_inputs_from_parts(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    images: list[dict[str, Any]] = []
+    for index, part in enumerate(parts, start=1):
+        if part.get("type") != "file":
+            continue
+        mime_type = str(part.get("mime") or "application/octet-stream")
+        if not mime_type.startswith("image/"):
+            continue
+        url = str(part.get("url") or "")
+        if not url.startswith("data:") or "," not in url:
+            continue
+        header, payload = url.split(",", 1)
+        if ";base64" not in header:
+            continue
+        try:
+            base64.b64decode(payload, validate=True)
+        except Exception:
+            continue
+        images.append(
+            {
+                "type": "base64",
+                "source": payload,
+                "media_type": mime_type,
+                "ref": str(part.get("filename") or f"附件图片 {index}"),
+            }
+        )
+    return images
 
 
 def _action_image_url(action: dict[str, Any], visual_preference: str | None = None) -> str:
@@ -86,6 +117,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         permissions: PermissionBroker,
         questions: QuestionBroker,
         core_client: CoreClient,
+        screen_captures: ScreenCaptureBroker | None = None,
         environment: dict[str, Any] | None = None,
     ) -> None:
         self.workspace_root = workspace_root.resolve()
@@ -94,6 +126,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         self.permissions = permissions
         self.questions = questions
         self.core_client = core_client
+        self.screen_captures = screen_captures
         self.environment = environment
         self._running: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
@@ -149,6 +182,88 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             logger.warning(f"读取 Core 用户偏好环境配置失败，使用本地默认值: {error}")
             return self.environment
 
+    async def _analyze_non_multimodal_images(
+        self,
+        *,
+        session_id: str,
+        message_id: str,
+        parts: list[dict[str, Any]],
+        user_text: str,
+        auth_token: str | None,
+        runtime_config: RuntimeModelConfig,
+    ) -> str:
+        image_parts = [
+            part
+            for part in parts
+            if part.get("type") == "file" and str(part.get("mime") or "").startswith("image/")
+        ]
+        if runtime_config.supports_images or not image_parts:
+            return ""
+        if not auth_token or not runtime_config.core:
+            raise RuntimeError("当前对话模型不支持图片，且当前会话无法读取角色绑定的 Vision 配置。")
+
+        character = runtime_config.core.get("character")
+        vision_config = runtime_config.core.get("visionConfig")
+        character_name = character.get("name") if isinstance(character, dict) else "当前角色"
+        if not isinstance(vision_config, dict) or not vision_config.get("id"):
+            raise RuntimeError(f"角色「{character_name or '当前角色'}」的对话模型不支持图片，且角色未绑定 Vision 配置。")
+        if vision_config.get("status") == "unavailable":
+            raise RuntimeError(
+                f"无法读取角色「{character_name or '当前角色'}」绑定的 Vision 配置："
+                f"{vision_config.get('error') or 'Core Vision 配置不可用'}"
+            )
+        if vision_config.get("status") not in (None, "", "active"):
+            raise RuntimeError(
+                f"角色「{character_name or '当前角色'}」绑定的 Vision 配置「{vision_config.get('vision_name') or vision_config.get('id')}」未启用。"
+            )
+
+        images = _vision_inputs_from_parts(parts)
+        if len(images) != len(image_parts):
+            raise RuntimeError("图片附件不是有效的 base64 data URL，无法交给角色绑定的 Vision 服务分析。")
+
+        question = user_text.strip()
+        prompt = (
+            "请客观、完整地分析这些图片，提取画面内容、可见文字、界面状态、错误信息及其他重要细节。"
+            "分析必须基于图片，不要猜测看不见的内容。"
+        )
+        if question:
+            prompt += f"\n用户当前问题：{question[:2000]}"
+        result = await asyncio.to_thread(
+            self.core_client.analyze_vision,
+            auth_token,
+            {
+                "config_id": vision_config["id"],
+                "images": images,
+                "prompt": prompt,
+                "source": "monagent",
+                "related_session_id": session_id,
+                "related_message_id": message_id,
+                "metadata": {
+                    "automatic": True,
+                    "fallback_reason": "current_model_does_not_support_images",
+                    "character_id": character.get("id") if isinstance(character, dict) else None,
+                },
+                "temperature": 0.2,
+                "max_tokens": 1600,
+            },
+        )
+        if not isinstance(result, dict) or not result.get("success"):
+            error = (result.get("error") or result.get("error_message")) if isinstance(result, dict) else None
+            raise RuntimeError(error or "角色绑定的 Vision 服务分析失败。")
+        analysis = str(result.get("content") or result.get("summary") or "").strip()
+        if not analysis:
+            raise RuntimeError("角色绑定的 Vision 服务没有返回可用的图片分析结果。")
+
+        references = "、".join(str(image.get("ref") or "图片") for image in images)
+        return "\n".join(
+            [
+                "### 自动视觉分析结果",
+                f"图片：{references}",
+                f"视觉配置：{vision_config.get('vision_name') or vision_config.get('name') or vision_config.get('id')}",
+                analysis,
+            ]
+        )
+
     async def _run_prompt(self, session_id: str, parts: list[dict[str, Any]], auth_token: str | None) -> None:
         session = self.store.require_session(session_id)
         started = now_ms()
@@ -173,6 +288,20 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             files = prompt_files(parts)
             environment = await self._resolve_environment(auth_token)
             character = (runtime_config.core or {}).get("character") if runtime_config.core else None
+            automatic_vision_context = await self._analyze_non_multimodal_images(
+                session_id=session_id,
+                message_id=user_message["info"]["id"],
+                parts=parts,
+                user_text=content_text(parts),
+                auth_token=auth_token,
+                runtime_config=runtime_config,
+            )
+            if automatic_vision_context:
+                self.emit_runtime_thinking(
+                    session_id,
+                    run_state,
+                    "当前对话模型不支持图片，已使用角色绑定的 Vision 配置完成自动分析。",
+                )
             current_character_action = self.store.get_character_action(session_id)
             if (
                 not current_character_action
@@ -193,6 +322,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     core_token=auth_token,
                     permissions=self.permissions,
                     questions=self.questions,
+                    screen_captures=self.screen_captures,
                     current_model_supports_images=runtime_config.supports_images,
                     vision_config=(runtime_config.core or {}).get("visionConfig") if runtime_config.core else None,
                     environment=environment,
@@ -206,11 +336,16 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 "user_chat",
             )
             self.emit_runtime_thinking(session_id, run_state, f"已注册 Python Mon 工具：{len(tools)} 个。")
-            task_prompt = build_user_chat_task_prompt(
-                content_text(parts),
-                attachment_context(files, runtime_config.supports_images),
+            attachment_details = attachment_context(files, runtime_config.supports_images)
+            if automatic_vision_context:
+                attachment_details = "\n\n".join(filter(None, [attachment_details, automatic_vision_context]))
+            task_prompt = build_user_chat_task_prompt(content_text(parts), attachment_details)
+            system_prompt = build_agent_system_prompt(
+                runtime_config.core,
+                current_character_action=current_character_action,
+                supports_images=runtime_config.supports_images,
+                environment=environment,
             )
-            system_prompt = build_agent_system_prompt(runtime_config.core, current_character_action=current_character_action)
             agent_messages = await self.compact_agent_messages_if_needed(
                 session_id,
                 run_state,
@@ -256,13 +391,22 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     None,
                 )
                 if assistant_message:
-                    await self.sync_core_message(session_id, assistant_message, auth_token, runtime_config.core)
+                    try:
+                        await self.sync_core_message(session_id, assistant_message, auth_token, runtime_config.core)
+                    except Exception as error:
+                        logger.error(
+                            f"助手消息已生成但持久化到 Core 失败: session={session_id}, "
+                            f"message={assistant_message['info']['id']}, error={error}",
+                            exc_info=True,
+                        )
+                        self.emit_session_error(session_id, f"助手回复已生成，但保存历史记录失败：{error}")
             await self.sync_core_session(session_id, auth_token, runtime_config.core)
             self.events.emit({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "idle"}}})
             self.emit_session(session_id)
             duration = now_ms() - started
             logger.info(f"session {session_id} completed in {duration}ms")
         except Exception as error:
+            logger.error(f"session {session_id} 运行失败: {error}", exc_info=True)
             self.emit_runtime_thinking(session_id, run_state, f"运行失败：{error}", done=True)
             self.emit_session_error(session_id, error)
 
@@ -382,7 +526,21 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         if not auth_token:
             return
         session = self.store.require_session(session_id)
-        await asyncio.to_thread(self.core_client.sync_agent_session, auth_token, session["info"], core)
+        for attempt in range(len(_CORE_SYNC_RETRY_DELAYS) + 1):
+            try:
+                await asyncio.to_thread(self.core_client.sync_agent_session, auth_token, session["info"], core)
+                return
+            except CoreAuthenticationExpiredError:
+                raise
+            except Exception as error:
+                if attempt >= len(_CORE_SYNC_RETRY_DELAYS):
+                    raise
+                delay = _CORE_SYNC_RETRY_DELAYS[attempt]
+                logger.warning(
+                    f"Core 会话同步失败，准备重试: session={session_id}, "
+                    f"attempt={attempt + 1}, delay={delay}s, error={error}"
+                )
+                await asyncio.sleep(delay)
 
     async def sync_core_message(
         self,
@@ -394,4 +552,40 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         if not auth_token:
             return
         session = self.store.require_session(session_id)
-        await asyncio.to_thread(self.core_client.sync_agent_message, auth_token, session["info"], message, core)
+        message_id = str(message.get("info", {}).get("id") or "unknown")
+        for attempt in range(len(_CORE_SYNC_RETRY_DELAYS) + 1):
+            try:
+                result = await asyncio.to_thread(
+                    self.core_client.sync_agent_message,
+                    auth_token,
+                    session["info"],
+                    message,
+                    core,
+                )
+            except CoreAuthenticationExpiredError:
+                raise
+            except Exception as error:
+                if attempt >= len(_CORE_SYNC_RETRY_DELAYS):
+                    raise
+                delay = _CORE_SYNC_RETRY_DELAYS[attempt]
+                logger.warning(
+                    f"Core 消息同步失败，准备重试: session={session_id}, message={message_id}, "
+                    f"attempt={attempt + 1}, delay={delay}s, error={error}"
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            projection_failed = isinstance(result, dict) and result.get("sync_status") == "failed"
+            if not projection_failed:
+                return
+            if attempt >= len(_CORE_SYNC_RETRY_DELAYS):
+                logger.error(
+                    f"Core 已保存原始消息，但业务消息投影持续失败: session={session_id}, message={message_id}"
+                )
+                return
+            delay = _CORE_SYNC_RETRY_DELAYS[attempt]
+            logger.warning(
+                f"Core 消息投影失败，准备重试: session={session_id}, message={message_id}, "
+                f"attempt={attempt + 1}, delay={delay}s"
+            )
+            await asyncio.sleep(delay)

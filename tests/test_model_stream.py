@@ -99,6 +99,41 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("用户正在调试上下文压缩。", messages[0]["content"])
         self.assertEqual(messages[1], {"role": "user", "content": "继续"})
 
+    def test_tool_result_image_is_forwarded_as_multimodal_context(self):
+        messages = to_openai_messages(
+            {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "toolCall",
+                                "id": "tool-1",
+                                "name": "analyze_screen",
+                                "arguments": {"question": "屏幕上是什么？"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "toolResult",
+                        "toolCallId": "tool-1",
+                        "toolName": "analyze_screen",
+                        "content": [
+                            {"type": "text", "text": "请根据当前屏幕截图回答。"},
+                            {"type": "image", "mimeType": "image/png", "data": "YQ=="},
+                        ],
+                    },
+                ]
+            }
+        )
+
+        self.assertEqual(messages[1]["role"], "tool")
+        self.assertEqual(messages[1]["tool_call_id"], "tool-1")
+        self.assertEqual(messages[2]["role"], "user")
+        self.assertIn("不要", messages[2]["content"][0]["text"])
+        self.assertEqual(messages[2]["content"][1]["type"], "image_url")
+        self.assertEqual(messages[2]["content"][1]["image_url"]["url"], "data:image/png;base64,YQ==")
+
     async def test_openai_compatible_streams_text_deltas(self):
         captured = {}
 

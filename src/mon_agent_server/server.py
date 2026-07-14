@@ -4,7 +4,7 @@ import threading
 import signal
 
 from .app import AppState
-from .app.lifecycle import render_startup_summary, run_startup_self_awake_once, start_startup_self_awake
+from .app.lifecycle import render_startup_summary
 from .config import load_server_config
 from .hub import HubRegistryClient
 from .http_server import AgentHTTPServer, AgentRequestHandler
@@ -55,7 +55,6 @@ def main(argv: list[str] | None = None) -> int:
     server_logger.info("Python AgentCore 已启用")
     server_logger.info("外部邮件能力：Core 用户配置 -> MonOs Email")
     render_startup_summary(app)
-    start_startup_self_awake(app)
     hub.start()
     try:
         server.serve_forever()

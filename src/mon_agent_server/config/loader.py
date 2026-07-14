@@ -85,16 +85,6 @@ def load_server_config(agent_root: Path | None = None) -> ServerConfig:
         ),
         auth_dev_username=os.environ.get("MON_AGENT_CORE_USERNAME") or config.get("auth_dev", "USERNAME", "") or "",
         auth_dev_password=os.environ.get("MON_AGENT_CORE_PASSWORD") or config.get("auth_dev", "PASSWORD", "") or "",
-        startup_self_awake_enabled=(
-            os.environ.get("MON_AGENT_STARTUP_SELFAWAKE_ENABLED")
-            or config.get("self_awake", "STARTUP_WAKE_ENABLED", "true")
-            or "true"
-        ).lower()
-        == "true",
-        startup_self_awake_delay_seconds=int(
-            os.environ.get("MON_AGENT_STARTUP_SELFAWAKE_DELAY_SECONDS")
-            or config.number("self_awake", "STARTUP_WAKE_DELAY_SECONDS", 0)
-        ),
         environment=EnvironmentConfig(
             timezone=os.environ.get("MON_AGENT_TIMEZONE") or config.get("environment", "TIMEZONE", "Asia/Shanghai") or "Asia/Shanghai",
             locale=os.environ.get("MON_AGENT_LOCALE") or config.get("environment", "LOCALE", "zh-CN") or "zh-CN",

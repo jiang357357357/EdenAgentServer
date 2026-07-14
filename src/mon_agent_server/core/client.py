@@ -41,14 +41,22 @@ class CoreClient:
         ai_entity = self.get_ai_entity(token, ai_entity_id)
         if not ai_entity.get("api_key"):
             raise RuntimeError(f"AI 实体「{ai_entity.get('ai_name')}」没有配置 API Key。")
-        vision_configs = []
-        try:
-            vision_configs = self.list_vision_configs(token)
-        except Exception:
-            vision_configs = []
-        vision_config = next((item for item in vision_configs if item.get("status") == "active"), None)
-        if vision_config is None and vision_configs:
-            vision_config = vision_configs[0]
+        vision_config = None
+        vision_reference = character.get("vision_config_id")
+        if vision_reference is None:
+            vision_reference = character.get("vision_config")
+        if isinstance(vision_reference, dict):
+            vision_reference = vision_reference.get("id")
+        if vision_reference not in (None, ""):
+            try:
+                vision_config = self.get_vision_config(token, vision_reference)
+            except Exception as error:
+                vision_config = {
+                    "id": vision_reference,
+                    "vision_name": character.get("vision_config_name") or "角色绑定 Vision",
+                    "status": "unavailable",
+                    "error": str(error),
+                }
         return {"assistant": assistant, "character": character, "aiEntity": ai_entity, "visionConfig": vision_config}
 
     def get_default_assistant(self, token: str) -> dict[str, Any]:
@@ -144,16 +152,66 @@ class CoreClient:
             payload=payload,
         )
 
-    def persist_self_awake_run(self, token: str | None, decision: dict[str, Any], context: dict[str, Any] | None = None) -> Any:
+    def synthesize_speech(self, token: str, text: str, config_id: int) -> dict[str, Any]:
+        raw = self._request(
+            "/api/tts/configs/synthesize/",
+            token,
+            method="POST",
+            payload={"text": text, "config_id": config_id},
+        )
+        return raw if isinstance(raw, dict) else {"success": False, "error_message": "Core TTS response is invalid"}
+
+    def persist_self_awake_pending(
+        self,
+        token: str | None,
+        context: dict[str, Any] | None,
+        external_run_id: str,
+    ) -> Any:
         if not token:
             return None
         current = now_ms()
+        event = context.get("event") if isinstance(context, dict) and isinstance(context.get("event"), dict) else {}
+        return self._request(
+            "/api/agent/self-awake/runs/",
+            token,
+            method="POST",
+            payload={
+                "source_service": "monagent",
+                "external_run_id": external_run_id,
+                "event_type": event.get("type") or "scheduled",
+                "event_source": event.get("source") or "monagent",
+                "event_reason": event.get("reason") or "",
+                "event_id": event.get("event_id") or "",
+                "event_occurred_at": event.get("occurred_at") or to_storage_iso(current),
+                "status": "pending",
+                "started_at": to_storage_iso(current),
+                "context": context or None,
+            },
+        )
+
+    def persist_self_awake_run(
+        self,
+        token: str | None,
+        decision: dict[str, Any],
+        context: dict[str, Any] | None = None,
+        *,
+        external_run_id: str | None = None,
+    ) -> Any:
+        if not token:
+            return None
+        current = now_ms()
+        event = context.get("event") if isinstance(context, dict) and isinstance(context.get("event"), dict) else {}
         next_wake = decision.get("next_wake") or {}
         after_minutes = int(next_wake.get("after_minutes") or 720)
         failed = decision.get("source") == "fallback"
         payload = {
             "source_service": "monagent",
-            "external_run_id": run_id_from_millis("monagent", current),
+            "external_run_id": external_run_id or run_id_from_millis("monagent", current),
+            "event_type": event.get("type") or "scheduled",
+            "event_source": event.get("source") or "monagent",
+            "event_reason": event.get("reason") or "",
+            "event_id": event.get("event_id") or "",
+            "event_occurred_at": event.get("occurred_at") or to_storage_iso(current),
             "status": "failed" if failed else "succeeded",
             "started_at": to_storage_iso(current),
             "finished_at": to_storage_iso(current),
@@ -197,7 +255,7 @@ class CoreClient:
             "previous": raw.get("previous") if isinstance(raw, dict) else None,
             "page_size": int(raw.get("page_size", page_size)) if isinstance(raw, dict) else page_size,
             "current_page": int(raw.get("current_page", page)) if isinstance(raw, dict) else page,
-            "total_pages": int(raw.get("total_pages", max(1, math.ceil(count / max(1, page_size))))) if isinstance(raw, dict) else 1,
+            "total_pages": int(raw.get("total_pages", max(1, (count + page_size - 1) // page_size))) if isinstance(raw, dict) else 1,
             "results": results,
         }
 
@@ -249,6 +307,10 @@ class CoreClient:
 
     def list_vision_configs(self, token: str) -> list[dict[str, Any]]:
         return unwrap_results(self._request("/api/vision/configs/", token))
+
+    def get_vision_config(self, token: str, config_id: int | str) -> dict[str, Any]:
+        raw = self._request(f"/api/vision/configs/{urllib.parse.quote(str(config_id))}/", token)
+        return raw if isinstance(raw, dict) else {}
 
     def get_user_profile(self, token: str) -> dict[str, Any]:
         raw = self._request("/api/users/me/profile/", token)

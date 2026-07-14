@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from ..brokers import PermissionBroker, QuestionBroker
+from ..brokers import PermissionBroker, QuestionBroker, ScreenCaptureBroker
 from ..core import CoreClient
 
 
@@ -14,6 +14,7 @@ class MonToolContext:
     core_token: str | None = None
     permissions: PermissionBroker | None = None
     questions: QuestionBroker | None = None
+    screen_captures: ScreenCaptureBroker | None = None
     current_model_supports_images: bool = True
     vision_config: dict[str, Any] | None = None
     environment: dict[str, Any] | None = None

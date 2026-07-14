@@ -57,7 +57,42 @@ class SessionStore:
     def hydrate_messages(self, session_id: str, messages: list[dict[str, Any]]) -> None:
         with self._lock:
             session = self.require_session(session_id)
-            session["messages"] = sorted(messages, key=lambda item: item.get("info", {}).get("time", {}).get("created", 0))
+            merged_by_id = {
+                str(message.get("info", {}).get("id")): message
+                for message in messages
+                if message.get("info", {}).get("id")
+            }
+            for local_message in session["messages"]:
+                message_id = str(local_message.get("info", {}).get("id") or "")
+                if not message_id:
+                    continue
+                remote_message = merged_by_id.get(message_id)
+                if not remote_message:
+                    merged_by_id[message_id] = local_message
+                    continue
+                remote_parts = {
+                    str(part.get("id")): part
+                    for part in remote_message.get("parts", [])
+                    if part.get("id")
+                }
+                for part in local_message.get("parts", []):
+                    if part.get("id"):
+                        remote_parts[str(part["id"])] = part
+                merged_by_id[message_id] = {
+                    "info": {
+                        **remote_message.get("info", {}),
+                        **local_message.get("info", {}),
+                        "time": {
+                            **remote_message.get("info", {}).get("time", {}),
+                            **local_message.get("info", {}).get("time", {}),
+                        },
+                    },
+                    "parts": list(remote_parts.values()),
+                }
+            session["messages"] = sorted(
+                merged_by_id.values(),
+                key=lambda item: item.get("info", {}).get("time", {}).get("created", 0),
+            )
             session["agentMessages"] = to_agent_messages(session["messages"])
             latest = max((item.get("info", {}).get("time", {}).get("created", 0) for item in session["messages"]), default=0)
             if latest:

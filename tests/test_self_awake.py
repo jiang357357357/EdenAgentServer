@@ -5,10 +5,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from mon_agent_server.prompts import build_agent_system_prompt, build_user_chat_task_prompt, fallback_self_awake_decision, parse_self_awake_decision
+from mon_agent_server.core import CoreClient
+from mon_agent_server.prompts import build_agent_system_prompt, build_self_awake_task_prompt, build_user_chat_task_prompt, fallback_self_awake_decision, parse_self_awake_decision
 from mon_agent_server.self_awake import (
     SelfAwakeRuntimeConfig,
     build_self_awake_environment,
+    ensure_self_awake_notification,
     final_assistant_usage,
     render_self_awake_decision,
     render_self_awake_request,
@@ -27,8 +29,12 @@ class FakeCoreClient:
     def __init__(self):
         self.persisted = []
 
-    def persist_self_awake_run(self, token, decision, context):
-        self.persisted.append((token, decision, context))
+    def persist_self_awake_pending(self, token, context, external_run_id):
+        self.pending = (token, context, external_run_id)
+        return {"id": 122}
+
+    def persist_self_awake_run(self, token, decision, context, *, external_run_id=None):
+        self.persisted.append((token, decision, context, external_run_id))
         return {"id": 123}
 
 
@@ -82,6 +88,25 @@ class FakeAgent:
             listener({"type": "message_end", "message": message}, None)
 
 
+class FakeNotifyTool:
+    name = "notify_user"
+
+    def __init__(self):
+        self.calls = []
+
+    async def run(self, tool_call_id, params):
+        self.calls.append((tool_call_id, params))
+        return {"details": {"delivered_channels": ["email" if params["priority"] == "high" else "qq"]}}
+
+
+class InlineThread:
+    def __init__(self, *, target, **_kwargs):
+        self.target = target
+
+    def start(self):
+        self.target()
+
+
 class CapturingAgent(FakeAgent):
     system_prompts = []
 
@@ -90,7 +115,101 @@ class CapturingAgent(FakeAgent):
         self.system_prompts.append((options.initial_state or {}).get("systemPrompt") or "")
 
 
+class DuplicateNotifyAgent(FakeAgent):
+    async def prompt(self, _message):
+        events = [
+            {"type": "tool_execution_start", "toolName": "notify_user", "toolCallId": "notify-1"},
+            {"type": "tool_execution_end", "toolName": "notify_user", "toolCallId": "notify-1", "isError": False},
+            {"type": "tool_execution_start", "toolName": "notify_user", "toolCallId": "notify-2"},
+            {
+                "type": "tool_execution_end",
+                "toolName": "notify_user",
+                "toolCallId": "notify-2",
+                "isError": True,
+                "error": "本轮重复通知已拦截",
+            },
+        ]
+        for event in events:
+            for listener in self.listeners:
+                listener(event, None)
+        self.state.messages.append(
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "{}"}],
+            }
+        )
+
+
 class SelfAwakePromptTest(unittest.TestCase):
+    def test_list_self_awake_runs_page_calculates_missing_total_pages(self):
+        client = CoreClient("http://core.test")
+        client._request = lambda *_args, **_kwargs: {"count": 41, "results": []}
+
+        page = client.list_self_awake_runs_page("token", page=1, page_size=20)
+
+        self.assertEqual(page["total_pages"], 3)
+
+    def test_persist_self_awake_run_promotes_event_fields(self):
+        client = CoreClient("http://core.test")
+        captured = {}
+
+        def capture_request(path, token, method="GET", payload=None):
+            captured.update({"path": path, "token": token, "method": method, "payload": payload})
+            return {"id": 12}
+
+        client._request = capture_request
+        client.persist_self_awake_run(
+            "token-1",
+            {
+                "mood": "平静",
+                "next_wake": {"after_minutes": 60, "reason": "继续观察"},
+                "diary": {"title": "定时自醒", "content": "完成"},
+                "action": {"type": "write_diary", "message": "完成", "payload": {}},
+            },
+            {
+                "event": {
+                    "type": "scheduled",
+                    "source": "monos",
+                    "reason": "timer_due",
+                    "occurred_at": "2026-07-14T06:00:00+08:00",
+                    "event_id": "selfawakeevent_test",
+                }
+            },
+        )
+
+        self.assertEqual(captured["payload"]["event_type"], "scheduled")
+        self.assertEqual(captured["payload"]["event_source"], "monos")
+        self.assertEqual(captured["payload"]["event_reason"], "timer_due")
+        self.assertEqual(captured["payload"]["event_id"], "selfawakeevent_test")
+        self.assertEqual(captured["payload"]["event_occurred_at"], "2026-07-14T06:00:00+08:00")
+
+    def test_persist_self_awake_pending_uses_async_run_as_stable_id(self):
+        client = CoreClient("http://core.test")
+        captured = {}
+
+        def capture_request(path, token, method="GET", payload=None):
+            captured.update({"path": path, "token": token, "method": method, "payload": payload})
+            return {"id": 11}
+
+        client._request = capture_request
+        client.persist_self_awake_pending(
+            "token-1",
+            {
+                "event": {
+                    "type": "scheduled",
+                    "source": "monos",
+                    "reason": "timer_due",
+                    "event_id": "event-1",
+                    "occurred_at": "2026-07-14T06:00:00+08:00",
+                }
+            },
+            "job-1",
+        )
+
+        self.assertEqual(captured["payload"]["external_run_id"], "job-1")
+        self.assertEqual(captured["payload"]["status"], "pending")
+        self.assertEqual(captured["payload"]["event_id"], "event-1")
+
     def test_parse_self_awake_decision_from_fenced_json(self):
         decision = parse_self_awake_decision(
             """
@@ -176,15 +295,90 @@ class SelfAwakePromptTest(unittest.TestCase):
 
         self.assertIn("视觉偏好：static", prompt)
         self.assertIn("可用视觉动作", prompt)
-        self.assertIn("视觉动作组", prompt)
+        self.assertNotIn("视觉动作组", prompt)
         self.assertIn("当前前端显示动作：思考", prompt)
         self.assertIn("当前动作意图：think", prompt)
         self.assertIn("每轮生成最终正文前必须先调用 switch_character_action 一次", prompt)
+        self.assertIn("立绘动作、表情符号、立绘动效", prompt)
+        self.assertIn("生气、叹气、无语、低落、困倦", prompt)
+
+    def test_user_chat_prompt_keeps_every_visual_action_without_api_payload_noise(self):
+        actions = [
+            {
+                "id": index,
+                "character_id": 8,
+                "name": f"动作{index}",
+                "intent": f"intent_{index}",
+                "description": f"第{index}个动作的适用场景。",
+                "aliases": [f"动作{index}", f"别名{index}"],
+                "static_image": f"http://127.0.0.1:40011/media/actions/{index}.png",
+                "static_image_url": f"http://127.0.0.1:40011/media/actions/{index}.png",
+                "metadata": {"source_path": f"/private/import/action-{index}.png"},
+                "dynamic_frames": [],
+                "created_at": "2026-07-13T22:00:00+08:00",
+                "updated_at": "2026-07-13T22:00:00+08:00",
+                "enabled": True,
+            }
+            for index in range(1, 14)
+        ]
+
+        prompt = build_agent_system_prompt(
+            {"character": {"name": "江梦晚", "visual_actions": actions}},
+            source="user_chat",
+            current_character_action={
+                "action": {"name": "动作1", "intent": "intent_1"},
+                "imageUrl": "http://127.0.0.1:40011/media/actions/1.png",
+            },
+        )
+
+        for index in range(1, 14):
+            self.assertIn(f"- 动作{index}｜语义=intent_{index}", prompt)
+        self.assertNotIn("static_image", prompt)
+        self.assertNotIn("127.0.0.1:40011/media", prompt)
+        self.assertNotIn("source_path", prompt)
+        self.assertNotIn("created_at", prompt)
+        self.assertNotIn("已截断", prompt)
+        self.assertNotIn("当前动作图片", prompt)
 
     def test_user_chat_task_prompt_requires_character_action_adjustment(self):
         prompt = build_user_chat_task_prompt("你好")
 
         self.assertIn("在最终回复正文前先调用 switch_character_action", prompt)
+
+    def test_self_awake_prompt_requires_exactly_one_notification(self):
+        prompt = build_self_awake_task_prompt({"trigger": "test"})
+
+        self.assertIn("每次自醒都必须且只能调用一次 notify_user", prompt)
+        self.assertIn("没有异常时也发送一条简短的普通状态通知", prompt)
+        self.assertIn("priority=normal", prompt)
+        self.assertIn("priority=high", prompt)
+        self.assertIn("user_activity 是桌面端上报的原始事实快照，不是行为判断", prompt)
+
+    def test_agent_system_prompt_includes_current_runtime_environment(self):
+        prompt = build_agent_system_prompt(
+            {"character": {"name": "江梦晚"}},
+            environment={
+                "timezone": "Asia/Shanghai",
+                "locale": "zh-CN",
+                "location": {"country": "中国", "region": "湖北省", "city": "武汉市", "district": "江夏区"},
+                "runtime": {
+                    "operating_system": "Linux",
+                    "distribution": "Linux Mint 22.1",
+                    "os_release": "6.14.0-37-generic",
+                    "architecture": "x86_64",
+                    "desktop_environment": "X-Cinnamon",
+                    "desktop_session": "cinnamon",
+                    "session_type": "x11",
+                },
+            },
+        )
+
+        self.assertIn("# 当前环境感知", prompt)
+        self.assertIn("操作系统：Linux Mint 22.1（Linux），内核 6.14.0-37-generic", prompt)
+        self.assertIn("桌面环境：X-Cinnamon，桌面会话：cinnamon", prompt)
+        self.assertIn("图形会话类型：x11", prompt)
+        self.assertIn("配置位置：中国 湖北省 武汉市 江夏区", prompt)
+        self.assertIn("不要根据界面外观猜测冲突的操作系统", prompt)
 
     def test_start_self_awake_run_async_returns_accepted_without_running_inline(self):
         with patch("mon_agent_server.self_awake.threading.Thread") as thread_cls:
@@ -195,6 +389,30 @@ class SelfAwakePromptTest(unittest.TestCase):
         self.assertTrue(str(accepted["async_run_id"]).startswith("selfawakejob_"))
         thread_cls.assert_called_once()
         thread_cls.return_value.start.assert_called_once()
+
+    def test_async_self_awake_worker_reaches_persistence_without_recursive_wrapper(self):
+        decision = {
+            "mood": "平静",
+            "current_desire": "记录",
+            "observations": [],
+            "should_interrupt_user": False,
+            "action": {"type": "write_diary", "message": "ok", "payload": {}},
+            "next_wake": {"after_minutes": 60, "reason": "稍后"},
+            "diary": {"title": "自醒", "content": "完成"},
+            "source": "agent",
+            "error": "",
+        }
+        app = FakeApp()
+        app.core_client = FakeCoreClient()
+
+        with (
+            patch("mon_agent_server.self_awake.threading.Thread", InlineThread),
+            patch("mon_agent_server.self_awake.run_self_awake_sync", return_value=decision),
+        ):
+            accepted = start_self_awake_run_async({"context": {"trigger": "test"}}, app, "token-1")
+
+        self.assertTrue(accepted["accepted"])
+        self.assertEqual(len(app.core_client.persisted), 1)
 
     def test_build_self_awake_environment_includes_calendar_awareness(self):
         with patch("mon_agent_server.self_awake.self_awake_now", return_value=datetime(2026, 2, 17, 8, 30, tzinfo=ZoneInfo("Asia/Shanghai"))):
@@ -228,7 +446,6 @@ class SelfAwakePromptTest(unittest.TestCase):
 
         with (
             patch("mon_agent_server.self_awake.run_self_awake_sync", return_value=decision),
-            patch("mon_agent_server.self_awake.update_self_awake_timer_from_decision") as update_timer,
         ):
             result = run_self_awake_and_persist_sync({"context": {"trigger": "test"}}, app, "token-1", "job-1")
 
@@ -236,8 +453,8 @@ class SelfAwakePromptTest(unittest.TestCase):
         self.assertEqual(result["server_run_id"], 123)
         self.assertEqual(result["server_error"], "")
         self.assertEqual(result["async_run_id"], "job-1")
-        update_timer.assert_called_once_with(app, decision, "job-1")
         self.assertEqual(app.core_client.persisted[-1][0], "token-1")
+        self.assertEqual(app.core_client.persisted[-1][3], "job-1")
 
     def test_run_self_awake_and_persist_sync_uses_user_environment(self):
         decision = {
@@ -255,11 +472,13 @@ class SelfAwakePromptTest(unittest.TestCase):
 
         with (
             patch("mon_agent_server.self_awake.run_self_awake_sync", return_value=decision),
-            patch("mon_agent_server.self_awake.update_self_awake_timer_from_decision"),
         ):
             run_self_awake_and_persist_sync({"context": {"trigger": "test"}}, app, "token-1", "job-1")
 
         persisted_context = app.core_client.persisted[-1][2]
+        self.assertEqual(persisted_context["event"]["type"], "scheduled")
+        self.assertEqual(persisted_context["event"]["source"], "monagent")
+        self.assertTrue(persisted_context["event"]["event_id"].startswith("selfawakeevent_"))
         self.assertEqual(app.environment_token, "token-1")
         self.assertEqual(persisted_context["environment"]["location"]["city"], "武汉市")
         self.assertEqual(persisted_context["environment"]["location"]["district"], "江夏区")
@@ -287,7 +506,7 @@ class SelfAwakePromptTest(unittest.TestCase):
                 {"name": "测试角色"},
                 "system prompt",
                 "user prompt",
-                ["list_due_memos", "set_self_awake_timer"],
+                ["list_due_memos", "notify_user"],
             )
 
         render_table.assert_called_once()
@@ -358,6 +577,66 @@ class SelfAwakePromptTest(unittest.TestCase):
 
 
 class SelfAwakeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_duplicate_block_does_not_overwrite_successful_notification(self):
+        runtime_config = SelfAwakeRuntimeConfig(
+            model={"id": "minimax-m2.7", "provider": "opencode-go", "input": ["text"], "reasoning": False},
+            api_key="sk-test",
+            label="opencode-go/minimax-m2.7",
+            source="core",
+            core={"character": {"name": "测试角色"}},
+            supports_images=False,
+            thinking_level="off",
+        )
+
+        with (
+            patch("mon_agent_server.self_awake.Agent", DuplicateNotifyAgent),
+            patch("mon_agent_server.self_awake.create_mon_agent_tools", return_value=[]),
+        ):
+            result = await run_self_awake_agent({"context": {"trigger": "test"}}, FakeApp(), "token-1", runtime_config)
+
+        self.assertTrue(result["notification"]["attempted"])
+        self.assertTrue(result["notification"]["succeeded"])
+        self.assertEqual(result["notification"]["error"], "")
+
+    async def test_runtime_enforces_normal_qq_notification_when_agent_omits_it(self):
+        decision = {
+            "mood": "平静",
+            "current_desire": "继续观察",
+            "observations": ["没有到期提醒"],
+            "should_interrupt_user": False,
+            "action": {"type": "write_diary", "message": "完成普通自醒检查", "payload": {}},
+            "next_wake": {"after_minutes": 60, "reason": "稍后再看"},
+            "diary": {"title": "普通自醒", "content": "完成"},
+        }
+        notify_tool = FakeNotifyTool()
+
+        with patch("mon_agent_server.self_awake.runner.create_mon_agent_tools", return_value=[notify_tool]):
+            notification = await ensure_self_awake_notification(FakeApp(), "token-1", {}, decision)
+
+        self.assertTrue(notification["succeeded"])
+        self.assertEqual(notification["source"], "runtime_enforced")
+        self.assertEqual(notification["delivered_channels"], ["qq"])
+        self.assertEqual(notify_tool.calls[0][1]["priority"], "normal")
+
+    async def test_runtime_enforces_important_email_notification(self):
+        decision = {
+            "mood": "警觉",
+            "current_desire": "立即告知用户",
+            "observations": ["发现数据风险"],
+            "should_interrupt_user": True,
+            "action": {"type": "remind_user", "message": "发现重要风险", "payload": {}},
+            "next_wake": {"after_minutes": 15, "reason": "继续检查"},
+            "diary": {"title": "重要自醒", "content": "发现风险"},
+        }
+        notify_tool = FakeNotifyTool()
+
+        with patch("mon_agent_server.self_awake.runner.create_mon_agent_tools", return_value=[notify_tool]):
+            notification = await ensure_self_awake_notification(FakeApp(), "token-1", {}, decision)
+
+        self.assertTrue(notification["succeeded"])
+        self.assertEqual(notification["delivered_channels"], ["email"])
+        self.assertEqual(notify_tool.calls[0][1]["priority"], "high")
+
     async def test_model_error_message_is_raised_before_json_parse(self):
         runtime_config = SelfAwakeRuntimeConfig(
             model={"id": "minimax-m2.7", "provider": "opencode-go", "input": ["text"], "reasoning": False},

@@ -63,6 +63,28 @@ def to_openai_messages(context: dict[str, Any]) -> list[dict[str, Any]]:
                 item["tool_calls"] = tool_calls
             messages.append(item)
         elif role == "toolResult":
-            text = "\n".join(block.get("text", "") for block in message.get("content", []) if isinstance(block, dict) and block.get("type") == "text")
-            messages.append({"role": "tool", "tool_call_id": message.get("toolCallId"), "content": text})
+            blocks = [block for block in message.get("content", []) if isinstance(block, dict)]
+            text = "\n".join(block.get("text", "") for block in blocks if block.get("type") == "text")
+            images = [block for block in blocks if block.get("type") == "image" and block.get("data")]
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": message.get("toolCallId"),
+                    "content": text or ("图片已由工具获取。" if images else ""),
+                }
+            )
+            if images:
+                image_content = message_content(images)
+                content = [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"以下图片由工具 {message.get('toolName') or 'image tool'} 刚刚返回。"
+                            "请直接根据图片完成分析，不要因为本轮没有上传附件而再次调用 analyze_image。"
+                        ),
+                    }
+                ]
+                if isinstance(image_content, list):
+                    content.extend(image_content)
+                messages.append({"role": "user", "content": content})
     return messages

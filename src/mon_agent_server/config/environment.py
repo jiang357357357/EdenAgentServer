@@ -1,11 +1,32 @@
 from __future__ import annotations
 
+import os
+import platform
 from copy import deepcopy
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .schema import EnvironmentConfig
+
+
+def runtime_environment_context() -> dict[str, Any]:
+    distribution = ""
+    if platform.system() == "Linux":
+        try:
+            distribution = str(platform.freedesktop_os_release().get("PRETTY_NAME") or "").strip()
+        except OSError:
+            distribution = ""
+    values = {
+        "operating_system": platform.system(),
+        "distribution": distribution,
+        "os_release": platform.release(),
+        "architecture": platform.machine(),
+        "desktop_environment": os.environ.get("XDG_CURRENT_DESKTOP") or "",
+        "desktop_session": os.environ.get("DESKTOP_SESSION") or "",
+        "session_type": os.environ.get("XDG_SESSION_TYPE") or "",
+    }
+    return {key: value for key, value in values.items() if value not in (None, "")}
 
 
 def environment_context(environment: EnvironmentConfig) -> dict[str, Any]:
@@ -20,6 +41,7 @@ def environment_context(environment: EnvironmentConfig) -> dict[str, Any]:
         "timezone": environment.timezone,
         "locale": environment.locale,
         "location": {key: value for key, value in location.items() if value not in (None, "")},
+        "runtime": runtime_environment_context(),
     }
 
 
@@ -68,6 +90,6 @@ def merge_environment_context(base: dict[str, Any], override: dict[str, Any] | N
     base_location = merged.get("location") if isinstance(merged.get("location"), dict) else {}
     merged["location"] = {**base_location, **{key: value for key, value in override_location.items() if value not in (None, "")}}
     for key, value in override.items():
-        if key not in {"timezone", "locale", "location"} and value not in (None, ""):
+        if key not in {"timezone", "locale", "location", "runtime"} and value not in (None, ""):
             merged[key] = value
     return localize_environment_times(merged, merged.get("timezone"))

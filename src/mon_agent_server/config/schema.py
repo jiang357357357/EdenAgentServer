@@ -52,7 +52,5 @@ class ServerConfig:
     core_base_url: str
     auth_dev_username: str
     auth_dev_password: str
-    startup_self_awake_enabled: bool
-    startup_self_awake_delay_seconds: int
     environment: EnvironmentConfig
     hub: HubConfig

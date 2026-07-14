@@ -1,9 +1,10 @@
 import os
+import platform
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from mon_agent_server.config import create_core_base_url, load_server_config
+from mon_agent_server.config import create_core_base_url, environment_context, load_server_config
 
 
 class ConfigTest(unittest.TestCase):
@@ -45,13 +46,14 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.render_log_dir.name, "Render")
         self.assertEqual(config.render_log_dir, start_dir / "Render")
         self.assertEqual(config.render_panels_file.name, "panels.json")
-        self.assertTrue(config.startup_self_awake_enabled)
-        self.assertEqual(config.startup_self_awake_delay_seconds, 0)
         self.assertEqual(config.environment.timezone, "Asia/Shanghai")
         self.assertEqual(config.environment.locale, "zh-CN")
         self.assertEqual(config.environment.city, "上海")
         self.assertAlmostEqual(config.environment.latitude or 0, 31.2304, places=4)
         self.assertAlmostEqual(config.environment.longitude or 0, 121.4737, places=4)
+        runtime = environment_context(config.environment)["runtime"]
+        self.assertEqual(runtime["operating_system"], platform.system())
+        self.assertTrue(runtime["architecture"])
 
     def test_core_base_url_normalizes_public_bind_host(self):
         self.assertEqual(create_core_base_url(None, "0.0.0.0", 40011), "http://127.0.0.1:40011")

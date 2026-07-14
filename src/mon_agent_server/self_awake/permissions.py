@@ -40,6 +40,7 @@ def tool_pattern(tool_name: str, args: Any) -> str:
 
 
 def self_awake_before_tool_call(context_data: dict[str, Any] | None):
+    notification_calls = 0
     allowed_tools = {
         "loaded_tools",
         "get_self_awake_state",
@@ -60,21 +61,27 @@ def self_awake_before_tool_call(context_data: dict[str, Any] | None):
         "archive_memo",
         "snooze_memo",
         "mark_memo_triggered",
-        "set_self_awake_timer",
         "external_email_status",
-        "send_external_email",
         "qq_bot_list",
         "qq_bot_targets",
-        "send_qq_message",
         "notify_user",
     }
     file_tools = {"read", "ls", "grep", "find"}
 
     async def before_tool_call(context: dict[str, Any], _signal: Any = None) -> dict[str, Any] | None:
+        nonlocal notification_calls
         tool_call = context.get("toolCall") or {}
         tool_name = str(tool_call.get("name") or "")
         args = context.get("args")
         pattern = tool_pattern(tool_name, args)
+        if tool_name == "notify_user":
+            if notification_calls >= 1:
+                logger.warning("本轮重复通知已拦截")
+                return {
+                    "block": True,
+                    "reason": "每次后台自醒只能调用一次 notify_user；首次调用已经负责通道回退，不能重复通知用户。",
+                }
+            notification_calls += 1
         if self_awake_can_use_file_tool(context_data, tool_name, args):
             logger.info(f"文件工具已按上下文放行: {tool_name} {pattern}")
             return None

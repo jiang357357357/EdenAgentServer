@@ -45,11 +45,8 @@ def create_notify_tools(context: MonToolContext) -> list[AgentTool]:
         elif requested_channel == "email":
             channels = ["email"]
             fallback = False
-        elif priority == "high" or source_type in {"memo", "reminder", "due_memo"} or len(text) <= 800:
-            channels = ["qq", "email"]
-            fallback = True
         else:
-            channels = ["email", "qq"]
+            channels = ["email", "qq"] if priority == "high" else ["qq", "email"]
             fallback = True
 
         attempts: list[dict[str, Any]] = []
@@ -124,7 +121,7 @@ def create_notify_tools(context: MonToolContext) -> list[AgentTool]:
         AgentTool(
             "notify_user",
             "通知用户",
-            "向当前用户发送主动通知。channel 为 auto 时工具会优先使用默认 QQBot 和超级管理员，失败时回退到外部邮箱；qq/email/both 可指定通道。到期提醒应先调用本工具通知成功，再标记提醒已触发。",
+            "向当前用户发送主动通知。channel=auto 时，priority=high 的重要事件优先发邮件并回退到 QQ，其他普通事件优先发 QQ 并回退到邮件；qq/email/both 可显式指定通道。到期提醒应先调用本工具通知成功，再标记提醒已触发。",
             {
                 "type": "object",
                 "properties": {
