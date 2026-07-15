@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+# ConfigApp desktop sessions include this path, but non-login shells often do not.
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=./common.sh
 source "$SCRIPT_DIR/common.sh"
