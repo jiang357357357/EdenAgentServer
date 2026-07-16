@@ -35,7 +35,7 @@ def create_mon_agent_tools(
     tools.extend(create_interaction_tools(context))
     tools.extend(create_character_action_tools(context))
     tools.extend(create_self_awake_tools(root, context))
-    tools.extend(create_memo_tools(context))
+    tools.extend(create_memo_tools(root, context))
     tools.extend(create_timer_tools(root))
     tools.extend(create_email_tools(context))
     tools.extend(create_qq_tools(context))

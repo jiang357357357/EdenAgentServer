@@ -15,10 +15,12 @@ from ..prompts import (
     fallback_self_awake_decision,
     parse_self_awake_decision,
 )
+from ..skills import create_skill_runtime
 from ..tools import MonToolContext, create_mon_agent_tools
+from ..tools.memo_schedule import submit_memo_schedule_refresh
 from .config import SelfAwakeRuntimeConfig, resolve_self_awake_runtime_config
 from .environment import enrich_self_awake_context, enrich_self_awake_request
-from .permissions import self_awake_before_tool_call
+from .permissions import memo_due_notification_args, self_awake_before_tool_call
 from .render import render_self_awake_decision, render_self_awake_request
 from .result import final_assistant_text, final_assistant_usage, request_character
 
@@ -32,7 +34,32 @@ class SelfAwakeModelError(RuntimeError):
     pass
 
 
-def self_awake_notification_payload(decision: dict[str, Any]) -> dict[str, Any]:
+def memo_due_items(context: dict[str, Any] | None) -> list[dict[str, Any]]:
+    data = context or {}
+    event = data.get("event") if isinstance(data.get("event"), dict) else {}
+    reason = str(event.get("reason") or data.get("trigger") or "").strip().lower()
+    if reason != "memo_due":
+        return []
+    raw_items = data.get("due_memos") if isinstance(data.get("due_memos"), list) else []
+    items = [item for item in raw_items if isinstance(item, dict)]
+    if not items and isinstance(data.get("memo"), dict):
+        items = [data["memo"]]
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        key = str(item.get("id") or "")
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        unique.append(item)
+    return unique
+
+
+def self_awake_notification_payload(decision: dict[str, Any], context: dict[str, Any] | None = None) -> dict[str, Any]:
+    memo_payload = memo_due_notification_args(context)
+    if memo_payload:
+        return memo_payload
     important = bool(decision.get("should_interrupt_user"))
     diary = decision.get("diary") if isinstance(decision.get("diary"), dict) else {}
     action = decision.get("action") if isinstance(decision.get("action"), dict) else {}
@@ -83,7 +110,7 @@ async def ensure_self_awake_notification(
         notify_tool = next((tool for tool in tools if tool.name == "notify_user"), None)
         if notify_tool is None:
             raise RuntimeError("自醒工具集中没有 notify_user。")
-        result = await notify_tool.run(create_id("selfawakenotify"), self_awake_notification_payload(decision))
+        result = await notify_tool.run(create_id("selfawakenotify"), self_awake_notification_payload(decision, context))
         details = result.get("details") if isinstance(result, dict) and isinstance(result.get("details"), dict) else {}
         return {
             "attempted": True,
@@ -103,6 +130,46 @@ async def ensure_self_awake_notification(
         }
 
 
+async def finalize_memo_due_notification(
+    app: AppState,
+    token: str | None,
+    context: dict[str, Any],
+    notification: dict[str, Any],
+) -> dict[str, Any]:
+    memos = memo_due_items(context)
+    if not memos:
+        return {"attempted": False, "completed": [], "errors": []}
+    if not token or not notification.get("succeeded"):
+        return {
+            "attempted": False,
+            "completed": [],
+            "errors": ["notification_not_delivered" if token else "core_token_missing"],
+        }
+
+    completed: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for memo in memos:
+        memo_id = memo.get("id")
+        if memo_id in (None, ""):
+            continue
+        try:
+            marked = await asyncio.to_thread(app.core_client.mark_memo_triggered, token, int(memo_id))
+            final_memo = marked
+            auto_completed = (
+                str(memo.get("kind") or "") == "reminder"
+                and str(memo.get("status") or "active") == "active"
+                and not str(memo.get("repeat_rule") or "").strip()
+            )
+            if auto_completed:
+                final_memo = await asyncio.to_thread(app.core_client.complete_memo, token, int(memo_id))
+            submit_memo_schedule_refresh(app.config.workspace_root, reason="memo_due_delivered", memo=final_memo)
+            completed.append({"id": int(memo_id), "auto_completed": auto_completed})
+        except Exception as error:
+            logger.error(f"到期提醒已通知但标记触发失败 memo={memo_id}: {error}", exc_info=True)
+            errors.append({"id": memo_id, "error": str(error)})
+    return {"attempted": True, "completed": completed, "errors": errors}
+
+
 async def run_self_awake_agent(
     request: dict[str, Any],
     app: AppState,
@@ -111,7 +178,7 @@ async def run_self_awake_agent(
 ) -> dict[str, Any]:
     context = request.get("context") if isinstance(request.get("context"), dict) else {}
     session_id = create_id("selfawake")
-    tools = create_mon_agent_tools(
+    skill_runtime = create_skill_runtime(
         app.config.workspace_root,
         MonToolContext(
             session_id=session_id,
@@ -122,16 +189,21 @@ async def run_self_awake_agent(
             environment=context.get("environment") if isinstance(context.get("environment"), dict) else None,
             get_current_files=lambda: [],
         ),
-        "self_awake",
+        profile="self_awake",
     )
+    tools = skill_runtime.active_tools()
     character = request_character(request, runtime_config.core)
     prompt_core = runtime_config.core if runtime_config.core else {"character": character}
-    system_prompt = build_agent_system_prompt(
-        prompt_core,
-        source="self_awake",
-        supports_images=runtime_config.supports_images,
-        environment=context.get("environment") if isinstance(context.get("environment"), dict) else None,
-    )
+    def system_prompt_for(active_skill_ids: tuple[str, ...]) -> str:
+        return build_agent_system_prompt(
+            prompt_core,
+            source="self_awake",
+            supports_images=runtime_config.supports_images,
+            environment=context.get("environment") if isinstance(context.get("environment"), dict) else None,
+            active_skill_ids=active_skill_ids,
+        )
+
+    system_prompt = system_prompt_for(skill_runtime.active_skill_ids)
     user_prompt = build_self_awake_task_prompt(context)
     logger.info(f"调用开始 session={session_id} model={runtime_config.label} tools={len(tools)} context_keys={list(context.keys())}")
     render_self_awake_request(
@@ -158,6 +230,10 @@ async def run_self_awake_agent(
             },
             get_api_key=lambda _provider: runtime_config.api_key,
             before_tool_call=self_awake_before_tool_call(context),
+            prepare_next_turn_with_context=lambda turn, _signal: skill_runtime.prepare_next_turn(
+                turn,
+                system_prompt_for,
+            ),
         )
     )
     notification = {"attempted": False, "succeeded": False, "error": ""}
@@ -234,6 +310,12 @@ async def run_self_awake(request: dict[str, Any], app: AppState, token: str | No
         context,
         decision,
         result.get("notification") if isinstance(result.get("notification"), dict) else None,
+    )
+    decision["notification"]["memo_finalization"] = await finalize_memo_due_notification(
+        app,
+        token,
+        context,
+        decision["notification"],
     )
     render_self_awake_decision(app, decision, runtime_config, now_ms() - started, character, decision["usage"])
     return decision

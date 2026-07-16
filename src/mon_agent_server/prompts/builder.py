@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Iterable
 
+from ..skills.catalog import render_active_skill_instructions, render_skill_catalog
 from .attachments import attachment_context, dump_context
 from .parsers import fallback_self_awake_decision, parse_self_awake_decision, sanitize_self_awake_decision
 
@@ -197,7 +198,53 @@ def build_current_character_action_section(current_action: dict[str, Any] | None
     return "\n".join(lines)
 
 
-def build_agent_tool_section(source: str = "user_chat", supports_images: bool | None = None) -> str:
+def _build_skill_aware_tool_section(
+    source: str,
+    supports_images: bool | None,
+    active_skill_ids: Iterable[str],
+) -> str:
+    active = tuple(active_skill_ids)
+    catalog = render_skill_catalog(source, active)
+    active_instructions = render_active_skill_instructions(active)
+    if source == "self_awake":
+        lines = [
+            "本轮工具采用按需技能机制；系统已经激活自醒和到期提醒技能，其他能力只在确实需要时通过 activate_skill 加载。",
+            "后台自醒不等待用户，也不能调用未激活或不适合后台执行的能力。",
+            "每次后台自醒在输出最终 JSON 前必须且只能调用一次 notify_user；通知优先级、精准提醒内容和状态收尾以本轮任务协议为准。",
+            "除非上下文明确提供 due_memos_checked=true，否则最终 JSON 前至少调用一次 list_due_memos。",
+            "只有存在明确调试目标、事故日志或策略允许时才使用基础只读文件工具，不无目的浏览工作区。",
+            "工具被拒绝、拦截或失败后，根据结果调整判断，不重复调用完全相同的失败工具。",
+        ]
+    else:
+        vision_instruction = (
+            "当前对话模型支持图片输入：用户图片已经直接进入上下文；不要重复调用 analyze_image。需要查看桌面时先激活 visual-observation，再调用 analyze_screen。"
+            if supports_images is True
+            else "当前对话模型不支持图片输入：附件会由角色绑定的 Vision 服务自动分析；需要额外分析图片或屏幕时先激活 visual-observation。"
+        )
+        lines = [
+            "本轮工具采用按需技能机制。基础工具可以直接调用；使用备忘录、网页、天气、视觉、通信或工作区写入能力前，必须先调用 activate_skill 激活匹配技能。",
+            "activate_skill 返回的技能说明是当前任务必须遵循的工作流；相关工具会从同一轮的下一次模型调用开始可用。不要猜测或直接调用尚未激活的工具。",
+            "你可以直接使用 read、ls、grep、find 读取和搜索当前工作区；写文件、编辑或执行命令前先激活 workspace-development。",
+            vision_instruction,
+            "如果当前角色有可用立绘动作，每轮生成最终正文前必须且只能调用一次 switch_character_action；需要确认准确动作名称时先调用 list_character_actions。",
+            "switch_character_action 的立绘动作、表情符号和立绘动效三个中文字段全部必填；平静表达时自主选择“无”，不需要换图时填写“保持当前”。",
+            "缺少继续执行所必需的信息、需要用户选择或确认边界时，使用 ask_user 展示问题卡片；闲聊或不影响继续的小问题可以直接回复。",
+            "技能激活不等同于授权；写文件、执行命令和其他受控操作仍必须经过权限系统。",
+            "工具被拒绝、拦截或失败后先调整方案，不重复调用完全相同的失败工具。",
+        ]
+    lines.extend(["", "可按需激活的技能：", catalog or "- 当前 profile 没有其他可激活技能。"])
+    if active_instructions:
+        lines.extend(["", "当前已激活技能说明：", active_instructions])
+    return "\n".join(lines)
+
+
+def build_agent_tool_section(
+    source: str = "user_chat",
+    supports_images: bool | None = None,
+    active_skill_ids: Iterable[str] | None = None,
+) -> str:
+    if active_skill_ids is not None:
+        return _build_skill_aware_tool_section(source, supports_images, active_skill_ids)
     if source == "self_awake":
         return "\n".join(
             [
@@ -264,6 +311,7 @@ def build_agent_system_prompt(
     current_character_action: dict[str, Any] | None = None,
     supports_images: bool | None = None,
     environment: dict[str, Any] | None = None,
+    active_skill_ids: Iterable[str] | None = None,
 ) -> str:
     character = (core or {}).get("character")
     sections = [
@@ -303,7 +351,7 @@ def build_agent_system_prompt(
                 ]
             ),
             "# 工具",
-            build_agent_tool_section(source, supports_images),
+            build_agent_tool_section(source, supports_images, active_skill_ids),
         ]
     )
     return "\n\n".join(sections)
@@ -314,7 +362,7 @@ def build_user_chat_task_prompt(text: str = "", attachment_context: str = "") ->
         "本轮事件来源：用户对话。",
         "请理解用户当前消息，并在需要时使用工具完成任务。",
         "如果当前角色有可用立绘动作，在最终回复正文前先调用 switch_character_action，使用三个必填中文字段自主选择立绘动作、表情符号和立绘动效。",
-        "如果用户要求提醒、备忘、待办，优先调用 create_reminder 或 create_memo 保存用户可见记录；如果还需要后台未来醒来检查，再调用 set_self_awake_timer。",
+        "如果用户要求提醒、备忘或待办，先调用 activate_skill 激活 memo-management，再使用对应工具保存用户可见记录；如果还需要后台未来醒来检查，再激活 self-awake。",
     ]
     if text.strip():
         sections.append(f"用户消息：\n{text.strip()}")
@@ -324,6 +372,10 @@ def build_user_chat_task_prompt(text: str = "", attachment_context: str = "") ->
 
 
 def build_self_awake_task_prompt(context: dict[str, Any] | None = None) -> str:
+    context = context or {}
+    event = context.get("event") if isinstance(context.get("event"), dict) else {}
+    memo_due = str(event.get("reason") or context.get("trigger") or "").strip().lower() == "memo_due"
+    due_memos_checked = context.get("due_memos_checked") is True
     schema = {
         "mood": "安静、专注",
         "current_desire": "想先确认提醒、系统状态和连续工作线索。",
@@ -340,7 +392,16 @@ def build_self_awake_task_prompt(context: dict[str, Any] | None = None) -> str:
             "把这次醒来当作短暂后台自检：先读薄唤醒上下文，再按需要调用工具观察提醒、自醒状态和最近自醒历史。",
             "当前观察上下文中的 user_activity 是桌面端上报的原始事实快照，不是行为判断：先看 captured_at 判断新鲜度；null、available=false 和 collection_errors 只表示相应事实不可用，不要把它们推断成用户离开、空闲或正在进行某类工作。",
             "每次自醒都必须且只能调用一次 notify_user。没有异常时也发送一条简短的普通状态通知，使用 channel=auto、priority=normal，由 QQ 优先送达；只有严重故障、安全或数据风险、重要截止事项才使用 priority=high，由邮件优先送达。",
-            "最终 JSON 前必须至少调用一次 list_due_memos 检查到期提醒；如果返回有到期项，需要按优先级决定是否 notify_user。",
+            (
+                "MonOs 已完成到期查询并在 context.memo/context.due_memos 中提供了精确任务；不要再调用 list_due_memos 重复查询。"
+                if due_memos_checked
+                else "最终 JSON 前必须至少调用一次 list_due_memos 检查到期提醒；如果返回有到期项，需要按优先级决定是否 notify_user。"
+            ),
+            (
+                "本轮是 memo_due 精准唤醒：必须把 context.memo 和 context.due_memos 视为唤醒原因，通知文字必须明确说出到期任务标题与内容，不得改成泛化的系统自检通知。调用 notify_user 时使用 source_type=memo，source_id 使用主提醒 id。通知成功后的 mark-triggered 和一次性提醒完成由运行时统一处理；不要调用 mark_memo_triggered、complete_memo、archive_memo 或 snooze_memo。"
+                if memo_due
+                else "本轮不是 memo_due 精准唤醒，按普通自醒规则处理。"
+            ),
             "完成到期提醒检查后，如果上下文足够可以直接输出最终 JSON；上下文不足时再调用 get_self_awake_state、list_self_awake_diaries 等工具补充观察；如果使用 dispatch_due_memos 观察，请保持 mark_dispatched=false。",
             "需要延续之前工作线索时，先看 list_self_awake_diaries 的标题、摘要、标签和 continuity_key，再选择是否 read_self_awake_diary。",
             "当前观察上下文包含本地时区、城市、日期和当天节日摘要；只有节日细节或未来节日会影响判断时才调用 get_calendar_context，只有天气会影响提醒、出行或判断时才调用 get_weather。",
@@ -355,6 +416,6 @@ def build_self_awake_task_prompt(context: dict[str, Any] | None = None) -> str:
             "最终 JSON schema 如下：",
             json.dumps(schema, ensure_ascii=False, indent=2),
             "当前观察上下文：",
-            json.dumps(context or {}, ensure_ascii=False, indent=2),
+            json.dumps(context, ensure_ascii=False, indent=2),
         ]
     )

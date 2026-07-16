@@ -16,7 +16,7 @@ logger = get_logger("MonAgent", "SelfAwake")
 SELF_AWAKE_EVENT_TYPES = {"startup", "scheduled", "manual", "retry"}
 
 
-def normalize_self_awake_event(context: dict[str, Any], occurred_at: str) -> dict[str, str]:
+def normalize_self_awake_event(context: dict[str, Any], occurred_at: str) -> dict[str, Any]:
     raw_event = context.get("event") if isinstance(context.get("event"), dict) else {}
     wake = context.get("wake") if isinstance(context.get("wake"), dict) else {}
     raw_type = str(raw_event.get("type") or "").strip().lower()
@@ -36,13 +36,17 @@ def normalize_self_awake_event(context: dict[str, Any], occurred_at: str) -> dic
     if source in {"monagent_server", "agent", "agent-api"}:
         source = "monagent"
     reason = str(raw_event.get("reason") or wake.get("reason") or context.get("trigger") or raw_type).strip()
-    return {
+    event: dict[str, Any] = {
         "type": raw_type,
         "source": source or "monagent",
         "reason": reason,
         "occurred_at": str(raw_event.get("occurred_at") or context.get("current_time") or occurred_at),
         "event_id": str(raw_event.get("event_id") or create_id("selfawakeevent")),
     }
+    for key in ("subject_type", "subject_id", "scheduler_reason"):
+        if raw_event.get(key) not in (None, ""):
+            event[key] = str(raw_event[key])
+    return event
 
 
 def self_awake_now(app: AppState, env_context: dict[str, Any] | None = None) -> datetime:

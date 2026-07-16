@@ -39,9 +39,44 @@ def tool_pattern(tool_name: str, args: Any) -> str:
     return tool_name
 
 
+def memo_due_notification_args(context_data: dict[str, Any] | None) -> dict[str, Any] | None:
+    data = context_data or {}
+    event = data.get("event") if isinstance(data.get("event"), dict) else {}
+    if str(event.get("reason") or data.get("trigger") or "").strip().lower() != "memo_due":
+        return None
+    raw_memos = data.get("due_memos") if isinstance(data.get("due_memos"), list) else []
+    memos = [memo for memo in raw_memos if isinstance(memo, dict)]
+    if not memos and isinstance(data.get("memo"), dict):
+        memos = [data["memo"]]
+    if not memos:
+        return None
+    primary = memos[0]
+    titles = [str(memo.get("title") or f"备忘录 #{memo.get('id')}").strip() for memo in memos]
+    lines = [
+        f"· {title}：{str(memo.get('content') or '已到设定的提醒时间。').strip()}"
+        for memo, title in zip(memos, titles)
+    ]
+    return {
+        "title": f"提醒：{titles[0]}" if len(titles) == 1 else f"{len(titles)} 项提醒已到时间",
+        "message": "\n".join(lines),
+        "channel": "auto",
+        "priority": "high" if any(str(memo.get("priority") or "").lower() == "high" for memo in memos) else "normal",
+        "source_type": "memo",
+        "source_id": str(primary.get("id") or ""),
+        "metadata": {"memo_ids": [memo.get("id") for memo in memos if memo.get("id") is not None]},
+    }
+
+
+def is_memo_due_context(context_data: dict[str, Any] | None) -> bool:
+    data = context_data or {}
+    event = data.get("event") if isinstance(data.get("event"), dict) else {}
+    return str(event.get("reason") or data.get("trigger") or "").strip().lower() == "memo_due"
+
+
 def self_awake_before_tool_call(context_data: dict[str, Any] | None):
     notification_calls = 0
     allowed_tools = {
+        "activate_skill",
         "loaded_tools",
         "get_self_awake_state",
         "list_self_awake_diaries",
@@ -74,7 +109,25 @@ def self_awake_before_tool_call(context_data: dict[str, Any] | None):
         tool_name = str(tool_call.get("name") or "")
         args = context.get("args")
         pattern = tool_pattern(tool_name, args)
+        if tool_name == "dispatch_due_memos" and isinstance(args, dict):
+            args["mark_dispatched"] = False
+        if is_memo_due_context(context_data) and tool_name in {
+            "mark_memo_triggered",
+            "complete_memo",
+            "archive_memo",
+            "snooze_memo",
+        }:
+            logger.info("memo_due 状态回写已交给通知成功后的运行时收尾: %s", tool_name)
+            return {
+                "block": True,
+                "reason": "精准提醒的状态只能在通知真实成功后由运行时统一回写；本轮不要直接修改该提醒。",
+            }
         if tool_name == "notify_user":
+            forced_memo_args = memo_due_notification_args(context_data)
+            if forced_memo_args and isinstance(args, dict):
+                args.clear()
+                args.update(forced_memo_args)
+                logger.info("已将 memo_due 通知参数固定为唤醒任务内容")
             if notification_calls >= 1:
                 logger.warning("本轮重复通知已拦截")
                 return {

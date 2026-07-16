@@ -7,6 +7,7 @@ class RuntimePermissionMixin:
     @staticmethod
     def is_safe_tool(tool_name: str) -> bool:
         return tool_name in {
+            "activate_skill",
             "read",
             "ls",
             "grep",

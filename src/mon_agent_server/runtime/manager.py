@@ -23,8 +23,9 @@ from ..ids import create_id, now_ms
 from ..logging import get_logger
 from ..model_stream import core_model, env_model, stream_openai_compatible
 from ..prompts import attachment_context, build_agent_system_prompt, build_user_chat_task_prompt
+from ..skills import create_skill_runtime
 from ..store import SessionStore
-from ..tools import MonToolContext, create_mon_agent_tools
+from ..tools import MonToolContext
 from .compaction import RuntimeCompactionModels, messages_to_compaction_entries, runtime_compaction_settings, timestamp_iso
 from .config import RuntimeModelConfig, runtime_context_window
 from .emitters import RuntimeEmitterMixin
@@ -314,38 +315,48 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 current_character_action = _default_character_action_state(session_id, character)
                 if current_character_action:
                     self.store.set_character_action(session_id, current_character_action)
-            tools = create_mon_agent_tools(
-                self.workspace_root,
-                MonToolContext(
-                    session_id=session_id,
-                    core_client=self.core_client,
-                    core_token=auth_token,
-                    permissions=self.permissions,
-                    questions=self.questions,
-                    screen_captures=self.screen_captures,
-                    current_model_supports_images=runtime_config.supports_images,
-                    vision_config=(runtime_config.core or {}).get("visionConfig") if runtime_config.core else None,
-                    environment=environment,
-                    character=character,
-                    current_character_action=current_character_action,
-                    emit_event=self.events.emit,
-                    set_character_action=lambda state: self.store.set_character_action(session_id, state),
-                    get_message_id=lambda: run_state.assistant_message_id,
-                    get_current_files=lambda: files,
-                ),
-                "user_chat",
+            tool_context = MonToolContext(
+                session_id=session_id,
+                core_client=self.core_client,
+                core_token=auth_token,
+                permissions=self.permissions,
+                questions=self.questions,
+                screen_captures=self.screen_captures,
+                current_model_supports_images=runtime_config.supports_images,
+                vision_config=(runtime_config.core or {}).get("visionConfig") if runtime_config.core else None,
+                environment=environment,
+                character=character,
+                current_character_action=current_character_action,
+                emit_event=self.events.emit,
+                set_character_action=lambda state: self.store.set_character_action(session_id, state),
+                get_message_id=lambda: run_state.assistant_message_id,
+                get_current_files=lambda: files,
             )
-            self.emit_runtime_thinking(session_id, run_state, f"已注册 Python Mon 工具：{len(tools)} 个。")
+            skill_runtime = create_skill_runtime(
+                self.workspace_root,
+                tool_context,
+                profile="user_chat",
+            )
+            tools = skill_runtime.active_tools()
+            self.emit_runtime_thinking(
+                session_id,
+                run_state,
+                f"已加载按需技能目录，首轮暴露 {len(tools)} 个基础工具。",
+            )
             attachment_details = attachment_context(files, runtime_config.supports_images)
             if automatic_vision_context:
                 attachment_details = "\n\n".join(filter(None, [attachment_details, automatic_vision_context]))
             task_prompt = build_user_chat_task_prompt(content_text(parts), attachment_details)
-            system_prompt = build_agent_system_prompt(
-                runtime_config.core,
-                current_character_action=current_character_action,
-                supports_images=runtime_config.supports_images,
-                environment=environment,
-            )
+            def system_prompt_for(active_skill_ids: tuple[str, ...]) -> str:
+                return build_agent_system_prompt(
+                    runtime_config.core,
+                    current_character_action=self.store.get_character_action(session_id) or current_character_action,
+                    supports_images=runtime_config.supports_images,
+                    environment=environment,
+                    active_skill_ids=active_skill_ids,
+                )
+
+            system_prompt = system_prompt_for(skill_runtime.active_skill_ids)
             agent_messages = await self.compact_agent_messages_if_needed(
                 session_id,
                 run_state,
@@ -369,6 +380,10 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     },
                     get_api_key=lambda _provider: runtime_config.api_key,
                     before_tool_call=self._before_tool_call(session_id, run_state),
+                    prepare_next_turn_with_context=lambda turn, _signal: skill_runtime.prepare_next_turn(
+                        turn,
+                        system_prompt_for,
+                    ),
                 )
             )
             agent.subscribe(lambda event, _signal: self.handle_agent_event(session_id, event, run_state))

@@ -11,13 +11,18 @@ from mon_agent_server.self_awake import (
     SelfAwakeRuntimeConfig,
     build_self_awake_environment,
     ensure_self_awake_notification,
+    finalize_memo_due_notification,
     final_assistant_usage,
+    memo_due_items,
+    normalize_self_awake_event,
     render_self_awake_decision,
     render_self_awake_request,
     run_self_awake_and_persist_sync,
     run_self_awake_agent,
+    self_awake_notification_payload,
     start_self_awake_run_async,
 )
+from mon_agent_server.self_awake.permissions import self_awake_before_tool_call
 
 
 class FakeConfig:
@@ -28,6 +33,8 @@ class FakeConfig:
 class FakeCoreClient:
     def __init__(self):
         self.persisted = []
+        self.marked_memos = []
+        self.completed_memos = []
 
     def persist_self_awake_pending(self, token, context, external_run_id):
         self.pending = (token, context, external_run_id)
@@ -36,6 +43,14 @@ class FakeCoreClient:
     def persist_self_awake_run(self, token, decision, context, *, external_run_id=None):
         self.persisted.append((token, decision, context, external_run_id))
         return {"id": 123}
+
+    def mark_memo_triggered(self, token, memo_id):
+        self.marked_memos.append((token, memo_id))
+        return {"id": memo_id, "kind": "reminder", "status": "active"}
+
+    def complete_memo(self, token, memo_id):
+        self.completed_memos.append((token, memo_id))
+        return {"id": memo_id, "kind": "reminder", "status": "done"}
 
 
 class FakeApp:
@@ -230,6 +245,41 @@ class SelfAwakePromptTest(unittest.TestCase):
         self.assertEqual(decision["action"]["type"], "observe_only")
         self.assertEqual(decision["next_wake"]["after_minutes"], 60)
         self.assertEqual(decision["source"], "agent")
+
+    def test_memo_due_prompt_uses_precise_context_without_duplicate_lookup(self):
+        prompt = build_self_awake_task_prompt(
+            {
+                "trigger": "memo_due",
+                "due_memos_checked": True,
+                "event": {"type": "scheduled", "source": "monos", "reason": "memo_due"},
+                "memo": {"id": 12, "title": "检查服务器", "content": "确认服务状态"},
+                "due_memos": [{"id": 12, "title": "检查服务器", "content": "确认服务状态"}],
+            }
+        )
+
+        self.assertIn("memo_due 精准唤醒", prompt)
+        self.assertIn("不要再调用 list_due_memos", prompt)
+        self.assertIn("由运行时统一处理", prompt)
+        self.assertIn("检查服务器", prompt)
+
+    def test_memo_event_preserves_subject_identity(self):
+        event = normalize_self_awake_event(
+            {
+                "event": {
+                    "type": "scheduled",
+                    "source": "monos",
+                    "reason": "memo_due",
+                    "subject_type": "memo",
+                    "subject_id": 12,
+                    "scheduler_reason": "timer_due",
+                }
+            },
+            "2026-07-16T18:30:00+08:00",
+        )
+
+        self.assertEqual(event["reason"], "memo_due")
+        self.assertEqual(event["subject_type"], "memo")
+        self.assertEqual(event["subject_id"], "12")
 
     def test_fallback_self_awake_decision_shape(self):
         decision = fallback_self_awake_decision({"user_activity": "服务启动"}, "模型不可用", {"name": "小蒙"})
@@ -577,6 +627,95 @@ class SelfAwakePromptTest(unittest.TestCase):
 
 
 class SelfAwakeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_memo_due_permission_hook_forces_exact_notification_arguments(self):
+        context = {
+            "event": {"type": "scheduled", "source": "monos", "reason": "memo_due"},
+            "due_memos": [
+                {
+                    "id": 12,
+                    "title": "检查服务器",
+                    "content": "确认服务状态",
+                    "priority": "normal",
+                }
+            ],
+        }
+        args = {"title": "普通自醒", "message": "系统一切正常"}
+        hook = self_awake_before_tool_call(context)
+
+        result = await hook({"toolCall": {"name": "notify_user"}, "args": args})
+
+        self.assertIsNone(result)
+        self.assertEqual(args["title"], "提醒：检查服务器")
+        self.assertIn("确认服务状态", args["message"])
+        self.assertEqual(args["source_type"], "memo")
+        self.assertEqual(args["source_id"], "12")
+
+    async def test_memo_due_permission_hook_reserves_state_finalization_for_runtime(self):
+        hook = self_awake_before_tool_call(
+            {
+                "event": {"type": "scheduled", "source": "monos", "reason": "memo_due"},
+                "due_memos": [{"id": 12, "title": "检查服务器"}],
+            }
+        )
+
+        blocked = await hook(
+            {"toolCall": {"name": "mark_memo_triggered"}, "args": {"id": 12}}
+        )
+        dispatch_args = {"mark_dispatched": True}
+        dispatch_result = await hook(
+            {"toolCall": {"name": "dispatch_due_memos"}, "args": dispatch_args}
+        )
+
+        self.assertTrue(blocked["block"])
+        self.assertIn("通知真实成功后", blocked["reason"])
+        self.assertIsNone(dispatch_result)
+        self.assertFalse(dispatch_args["mark_dispatched"])
+
+    async def test_memo_due_runtime_notification_names_task_and_finalizes_it(self):
+        core = FakeCoreClient()
+        app = SimpleNamespace(config=FakeConfig(), core_client=core)
+        context = {
+            "event": {"type": "scheduled", "source": "monos", "reason": "memo_due"},
+            "due_memos": [
+                {
+                    "id": 12,
+                    "title": "检查服务器",
+                    "content": "确认重启后是否正常",
+                    "kind": "reminder",
+                    "status": "active",
+                    "priority": "high",
+                    "repeat_rule": "",
+                }
+            ],
+        }
+        decision = {
+            "should_interrupt_user": False,
+            "action": {"message": "普通自醒"},
+            "next_wake": {},
+            "diary": {},
+            "observations": [],
+        }
+
+        payload = self_awake_notification_payload(decision, context)
+        self.assertEqual(payload["title"], "提醒：检查服务器")
+        self.assertIn("确认重启后是否正常", payload["message"])
+        self.assertEqual(payload["priority"], "high")
+        self.assertEqual(payload["source_type"], "memo")
+        self.assertEqual([item["id"] for item in memo_due_items(context)], [12])
+
+        with patch("mon_agent_server.self_awake.runner.submit_memo_schedule_refresh") as refresh:
+            finalized = await finalize_memo_due_notification(
+                app,
+                "token-1",
+                context,
+                {"succeeded": True},
+            )
+
+        self.assertEqual(core.marked_memos, [("token-1", 12)])
+        self.assertEqual(core.completed_memos, [("token-1", 12)])
+        self.assertEqual(finalized["completed"], [{"id": 12, "auto_completed": True}])
+        refresh.assert_called_once()
+
     async def test_duplicate_block_does_not_overwrite_successful_notification(self):
         runtime_config = SelfAwakeRuntimeConfig(
             model={"id": "minimax-m2.7", "provider": "opencode-go", "input": ["text"], "reasoning": False},

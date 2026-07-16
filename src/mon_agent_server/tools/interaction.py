@@ -22,7 +22,7 @@ def create_interaction_tools(context: MonToolContext) -> list[AgentTool]:
                         "header": params.get("header") or "需要确认",
                         "question": params["question"],
                         "options": [
-                            {"label": option.get("label"), "description": option.get("description") or option.get("label")}
+                            {"label": option.get("label"), "description": option.get("description") or ""}
                             for option in params.get("options", [])
                         ],
                         "multiple": bool(params.get("multiple")),

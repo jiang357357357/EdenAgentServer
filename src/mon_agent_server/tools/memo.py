@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 from mon_agent_core import AgentTool
@@ -9,6 +10,7 @@ from .context import MonToolContext
 from .core_access import core_call, require_core_access
 from .datetime_utils import format_local_datetime, normalize_memo_date
 from .memo_format import format_memo_list, memo_line, memo_with_local_time
+from .memo_schedule import submit_memo_schedule_refresh
 from .result import text_result
 
 
@@ -21,7 +23,7 @@ def should_auto_complete_triggered_memo(memo: dict[str, Any]) -> bool:
     )
 
 
-def create_memo_tools(context: MonToolContext) -> list[AgentTool]:
+def create_memo_tools(workspace_root: Path, context: MonToolContext) -> list[AgentTool]:
     async def create_memo_execute(_tool_call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
         core, token = require_core_access(context)
         memo = await asyncio.to_thread(
@@ -41,6 +43,7 @@ def create_memo_tools(context: MonToolContext) -> list[AgentTool]:
                 "metadata": params.get("metadata") or {},
             },
         )
+        submit_memo_schedule_refresh(workspace_root, reason="memo_created", memo=memo)
         return text_result(f"已创建备忘录。\n\n{memo_line(memo)}", {"memo": memo_with_local_time(memo)})
 
     async def create_reminder_execute(_tool_call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
@@ -60,6 +63,7 @@ def create_memo_tools(context: MonToolContext) -> list[AgentTool]:
                 "metadata": params.get("metadata") or {},
             },
         )
+        submit_memo_schedule_refresh(workspace_root, reason="reminder_created", memo=memo)
         return text_result(f"已创建提醒。\n\n{memo_line(memo)}", {"memo": memo_with_local_time(memo)})
 
     async def list_memos_execute(_tool_call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
@@ -103,6 +107,8 @@ def create_memo_tools(context: MonToolContext) -> list[AgentTool]:
                 "mark_dispatched": bool(params.get("mark_dispatched")),
             },
         )
+        if result.get("mark_dispatched"):
+            submit_memo_schedule_refresh(workspace_root, reason="memos_dispatched")
         body = "\n\n".join(
             [
                 format_memo_list("到期派发结果：", result.get("memos") or []),
@@ -127,11 +133,13 @@ def create_memo_tools(context: MonToolContext) -> list[AgentTool]:
     async def complete_memo_execute(_tool_call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
         core, token = require_core_access(context)
         memo = await asyncio.to_thread(core_call, core.complete_memo, token, int(params["id"]))
+        submit_memo_schedule_refresh(workspace_root, reason="memo_completed", memo=memo)
         return text_result(f"已完成备忘录。\n\n{memo_line(memo)}", {"memo": memo_with_local_time(memo)})
 
     async def archive_memo_execute(_tool_call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
         core, token = require_core_access(context)
         memo = await asyncio.to_thread(core_call, core.update_memo, token, int(params["id"]), {"status": "archived"})
+        submit_memo_schedule_refresh(workspace_root, reason="memo_archived", memo=memo)
         return text_result(f"已归档备忘录。\n\n{memo_line(memo)}", {"memo": memo_with_local_time(memo)})
 
     async def snooze_memo_execute(_tool_call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
@@ -143,6 +151,7 @@ def create_memo_tools(context: MonToolContext) -> list[AgentTool]:
             int(params["id"]),
             {"until": normalize_memo_date(params.get("until"), "until"), "minutes": params.get("minutes")},
         )
+        submit_memo_schedule_refresh(workspace_root, reason="memo_snoozed", memo=memo)
         return text_result(f"已设置稍后提醒。\n\n{memo_line(memo)}", {"memo": memo_with_local_time(memo)})
 
     async def mark_memo_triggered_execute(_tool_call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
@@ -153,6 +162,7 @@ def create_memo_tools(context: MonToolContext) -> list[AgentTool]:
         if auto_complete and should_auto_complete_triggered_memo(memo):
             completed_memo = await asyncio.to_thread(core_call, core.complete_memo, token, int(params["id"]))
             memo = completed_memo
+        submit_memo_schedule_refresh(workspace_root, reason="memo_triggered", memo=memo)
         action_text = "已标记提醒触发，并完成一次性提醒。" if completed_memo else "已标记提醒触发。"
         return text_result(
             f"{action_text}\n\n{memo_line(memo)}",
