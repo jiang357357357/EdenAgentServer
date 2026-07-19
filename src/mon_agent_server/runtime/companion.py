@@ -144,7 +144,10 @@ def actor_task_prompt(
         f"用户消息：\n{user_text}",
     ]
     if companion_context:
-        sections.append(f"本轮其他伙伴已经说过：\n{companion_context}\n请承接或补充，不要复述同样内容。")
+        sections.append(
+            f"本轮其他伙伴已经说过：\n{companion_context}\n"
+            "请承接或补充，不要复述同样内容，也不要重复执行已经产生副作用的工具操作。"
+        )
     if attachment_details:
         sections.append(attachment_details)
     return "\n\n".join(sections)

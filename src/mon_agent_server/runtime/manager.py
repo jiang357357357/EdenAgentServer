@@ -22,7 +22,7 @@ from ..events import EventBus
 from ..ids import create_id, now_ms
 from ..logging import get_logger
 from ..model_stream import core_model, env_model, stream_openai_compatible
-from ..prompts import attachment_context, build_agent_system_prompt, build_user_chat_task_prompt
+from ..prompts import attachment_context, build_agent_system_prompt
 from ..skills import create_skill_runtime
 from ..store import SessionStore
 from ..tools import MonToolContext
@@ -217,13 +217,15 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         auth_token: str | None,
     ) -> None:
         started = now_ms()
-        run_state = RunState()
+        session = self.store.require_session(session_id)
+        participants = session.get("info", {}).get("participants") or []
+        primary_participant = participants[0] if participants else {}
+        run_state = RunState(speaker=primary_participant)
         self.events.emit({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "busy"}}})
         self.emit_runtime_thinking(session_id, run_state, "正在读取当前模型配置并准备主动压缩上下文。")
         try:
-            runtime_config = await self._resolve_runtime_config(auth_token)
+            runtime_config = await self._resolve_runtime_config(auth_token, primary_participant.get("assistantID"))
             await self.sync_core_session(session_id, auth_token, runtime_config.core)
-            session = self.store.require_session(session_id)
             messages = list(session.get("agentMessages") or [])
             before_tokens = int(estimate_context_tokens(messages).get("tokens") or 0)
             compacted_messages = await self.compact_agent_messages_if_needed(
@@ -498,6 +500,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         started = now_ms()
         active_run_state: RunState | None = None
         active_config: RuntimeModelConfig | None = None
+        participants: list[dict[str, Any]] = []
         self.events.emit({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "busy"}}})
         user_message = self.store.append_user_message(session_id, content_text(parts), prompt_files(parts))
         self.emit_message(session_id, user_message["info"])
@@ -573,6 +576,8 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             logger.info(f"session {session_id} companion turn completed in {now_ms() - started}ms")
         except Exception as error:
             logger.error(f"session {session_id} 运行失败: {error}", exc_info=True)
+            if active_run_state is None:
+                active_run_state = RunState(speaker=participants[0] if participants else {})
             if active_run_state:
                 self.emit_runtime_thinking(session_id, active_run_state, runtime_error_summary(error), done=True)
                 self.finish_runtime_message(session_id, active_run_state, error=error)
