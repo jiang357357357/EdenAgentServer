@@ -80,6 +80,27 @@ def session_from_map(item: dict[str, Any]) -> dict[str, Any]:
         for index, participant in enumerate(raw_participants)
         if participant.get("assistant") is not None and participant.get("enabled", True)
     ]
+    raw_director_runs = item.get("director_runs") if isinstance(item.get("director_runs"), list) else []
+    director_runs = [
+        {
+            "planID": run.get("external_plan_id"),
+            "userMessageID": run.get("external_user_message_id"),
+            "source": run.get("source") or "",
+            "diagnostic": run.get("diagnostic") or None,
+            "scene": run.get("scene_payload") or None,
+            "execution": run.get("execution_payload") or None,
+            "beats": run.get("beats_payload") or [],
+            "status": run.get("status") or "planned",
+            "activeBeatIndex": run.get("active_beat_index"),
+            "completedBeatIndexes": run.get("completed_beat_indexes") or [],
+            "participantCount": run.get("participant_count") or 0,
+            "error": run.get("error") or None,
+            "createdAt": to_millis(run.get("created_at")),
+            "updatedAt": to_millis(run.get("updated_at")),
+        }
+        for run in raw_director_runs
+        if run.get("external_plan_id")
+    ]
     return {
         "id": item.get("external_session_id"),
         "title": item.get("title") or (payload or {}).get("title") or "新会话",
@@ -89,6 +110,7 @@ def session_from_map(item: dict[str, Any]) -> dict[str, Any]:
         "participantAssistantIDs": [participant["assistantID"] for participant in participants]
         or (payload or {}).get("participantAssistantIDs")
         or ([item.get("assistant")] if item.get("assistant") else []),
+        "directorRuns": director_runs or (payload or {}).get("directorRuns") or [],
         "time": {"created": created, "updated": updated},
     }
 

@@ -22,6 +22,11 @@ def call_openai_compatible(model: dict[str, Any], context: dict[str, Any], optio
     }
     if options.get("maxTokens"):
         payload["max_tokens"] = options.get("maxTokens")
+    thinking = options.get("thinking")
+    if thinking is not None:
+        if not isinstance(thinking, dict) or thinking.get("type") not in {"enabled", "disabled"}:
+            raise ValueError("thinking 必须是包含 enabled/disabled type 的对象")
+        payload["thinking"] = {"type": thinking["type"]}
     tools = tool_payload(context.get("tools", []))
     if tools:
         payload["tools"] = tools

@@ -205,6 +205,37 @@ class CoreClient:
             payload=payload,
         )
 
+    def sync_agent_director_run(
+        self,
+        token: str | None,
+        session: dict[str, Any],
+        director_run: dict[str, Any],
+        core: dict[str, Any] | None = None,
+    ) -> Any:
+        session_map = self.sync_agent_session(token, session, core)
+        if not token or not session_map:
+            return None
+        payload = {
+            "external_plan_id": director_run["planID"],
+            "external_user_message_id": director_run["userMessageID"],
+            "source": director_run.get("source") or "",
+            "diagnostic": director_run.get("diagnostic") or "",
+            "scene_payload": director_run.get("scene") or {},
+            "execution_payload": director_run.get("execution") or {},
+            "beats_payload": director_run.get("beats") or [],
+            "status": director_run.get("status") or "planned",
+            "active_beat_index": director_run.get("activeBeatIndex"),
+            "completed_beat_indexes": director_run.get("completedBeatIndexes") or [],
+            "participant_count": director_run.get("participantCount") or 0,
+            "error": director_run.get("error") or "",
+        }
+        return self._request(
+            f"/api/agent/sessions/{urllib.parse.quote(str(session_map['id']))}/director-runs/",
+            token,
+            method="POST",
+            payload=payload,
+        )
+
     def synthesize_speech(self, token: str, text: str, config_id: int) -> dict[str, Any]:
         raw = self._request(
             "/api/tts/configs/synthesize/",

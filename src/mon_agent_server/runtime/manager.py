@@ -25,9 +25,10 @@ from ..model_stream import core_model, env_model, stream_openai_compatible
 from ..prompts import attachment_context, build_agent_system_prompt
 from ..skills import create_skill_runtime
 from ..store import SessionStore
+from ..store.serializers import is_hidden_message, message_text
 from ..tools import MonToolContext
 from .compaction import RuntimeCompactionModels, messages_to_compaction_entries, runtime_compaction_settings, timestamp_iso
-from .companion import actor_task_prompt, create_director_plan
+from .companion import DirectorBeat, DirectorExecution, DirectorScene, actor_task_prompt, create_director_plan
 from .config import RuntimeModelConfig, runtime_context_window
 from .emitters import RuntimeEmitterMixin, runtime_error_summary
 from .messages import content_text, images_from_parts, prompt_files
@@ -41,6 +42,33 @@ _MANUAL_COMPACTION_KEEP_RECENT_TOKENS = 8_000
 
 def _as_dict_list(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _director_conversation_context(
+    messages: list[dict[str, Any]],
+    current_user_message_id: str,
+    *,
+    max_messages: int = 10,
+    max_chars: int = 6_000,
+) -> str:
+    lines: list[str] = []
+    for message in reversed(messages):
+        info = message.get("info") if isinstance(message.get("info"), dict) else {}
+        if info.get("id") == current_user_message_id or is_hidden_message(message):
+            continue
+        text = message_text(message)
+        if not text:
+            continue
+        if info.get("role") == "assistant":
+            speaker = info.get("speaker") if isinstance(info.get("speaker"), dict) else {}
+            label = speaker.get("assistantName") or speaker.get("characterName") or "助手"
+        else:
+            label = "用户"
+        lines.append(f"{label}：{text}")
+        if len(lines) >= max_messages:
+            break
+    context = "\n".join(reversed(lines))
+    return context[-max_chars:]
 
 
 def _vision_inputs_from_parts(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -382,8 +410,10 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         auth_token: str | None,
         runtime_config: RuntimeModelConfig,
         run_state: RunState,
-        intent: str,
-        previous_replies: list[tuple[str, str]],
+        beat: DirectorBeat,
+        scene: DirectorScene | None,
+        execution: DirectorExecution | None,
+        previous_replies: list[dict[str, Any]],
         environment: dict[str, Any] | None,
     ) -> tuple[dict[str, Any] | None, str]:
         files = prompt_files(parts)
@@ -433,7 +463,14 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         attachment_details = attachment_context(files, runtime_config.supports_images)
         if automatic_vision_context:
             attachment_details = "\n\n".join(filter(None, [attachment_details, automatic_vision_context]))
-        task_prompt = actor_task_prompt(content_text(parts), intent, previous_replies, attachment_details)
+        task_prompt = actor_task_prompt(
+            content_text(parts),
+            beat,
+            previous_replies,
+            attachment_details,
+            scene=scene,
+            execution=execution,
+        )
 
         def system_prompt_for(active_skill_ids: tuple[str, ...]) -> str:
             return build_agent_system_prompt(
@@ -500,6 +537,8 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         started = now_ms()
         active_run_state: RunState | None = None
         active_config: RuntimeModelConfig | None = None
+        director_config: RuntimeModelConfig | None = None
+        active_director_run: dict[str, Any] | None = None
         participants: list[dict[str, Any]] = []
         self.events.emit({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "busy"}}})
         user_message = self.store.append_user_message(session_id, content_text(parts), prompt_files(parts))
@@ -518,40 +557,125 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 raise RuntimeError("当前会话没有可用的参与助手。")
             await self.sync_core_session(session_id, auth_token, director_config.core)
             await self.sync_core_message(session_id, user_message, auth_token, director_config.core)
+            director_enabled = len(participants) > 1
+            if director_enabled:
+                self.events.emit(
+                    {
+                        "type": "companion.director.started",
+                        "properties": {
+                            "sessionID": session_id,
+                            "participantCount": len(participants),
+                            "userMessageID": user_message["info"]["id"],
+                        },
+                    }
+                )
             plan = await create_director_plan(
                 user_text=content_text(parts),
                 participants=participants,
                 director_config=director_config,
                 policy=session["info"].get("directorPolicy") or {},
+                conversation_context=_director_conversation_context(
+                    session.get("messages") or [],
+                    user_message["info"]["id"],
+                ),
+                attachment_context=attachment_context(prompt_files(parts), director_config.supports_images),
             )
-            self.events.emit(
-                {
-                    "type": "companion.plan",
-                    "properties": {
-                        "sessionID": session_id,
+            if director_enabled:
+                active_director_run = self.store.upsert_director_run(
+                    session_id,
+                    {
+                        "planID": plan.plan_id,
+                        "userMessageID": user_message["info"]["id"],
                         "source": plan.source,
-                        "turns": [turn.__dict__ for turn in plan.turns],
+                        "diagnostic": plan.diagnostic,
+                        "scene": plan.scene.to_payload(),
+                        "execution": plan.execution.to_payload(),
+                        "beats": [beat.to_payload() for beat in plan.beats],
+                        "status": "planned",
+                        "activeBeatIndex": None,
+                        "completedBeatIndexes": [],
+                        "participantCount": len(participants),
+                        "error": None,
                     },
-                }
-            )
-            environment = await self._resolve_environment(auth_token)
-            previous_replies: list[tuple[str, str]] = []
-            for turn_index, turn in enumerate(plan.turns):
-                participant = next(
-                    item for item in participants if str(item.get("assistantID")) == str(turn.assistant_id)
                 )
-                active_config = await self._resolve_runtime_config(auth_token, turn.assistant_id)
-                speaker = {
-                    **participant,
-                    "turnIndex": turn_index,
-                }
-                active_run_state = RunState(speaker=speaker)
+                await self.sync_core_director_run(
+                    session_id,
+                    active_director_run,
+                    auth_token,
+                    director_config.core,
+                )
                 self.events.emit(
                     {
-                        "type": "companion.speaker.started",
-                        "properties": {"sessionID": session_id, "speaker": speaker, "intent": turn.intent},
+                        "type": "companion.plan",
+                        "properties": {
+                            "sessionID": session_id,
+                            "planID": plan.plan_id,
+                            "userMessageID": user_message["info"]["id"],
+                            "source": plan.source,
+                            "diagnostic": plan.diagnostic,
+                            "scene": plan.scene.to_payload(),
+                            "execution": plan.execution.to_payload(),
+                            "beats": [beat.to_payload() for beat in plan.beats],
+                        },
                     }
                 )
+            environment = await self._resolve_environment(auth_token)
+            previous_replies: list[dict[str, Any]] = []
+            for beat_index, beat in enumerate(plan.beats):
+                participant = next(
+                    item for item in participants if str(item.get("assistantID")) == str(beat.assistant_id)
+                )
+                active_config = await self._resolve_runtime_config(auth_token, beat.assistant_id)
+                speaker = {
+                    **participant,
+                    "turnIndex": beat_index,
+                    "beatIndex": beat_index,
+                }
+                orchestration = (
+                    {
+                        "planID": plan.plan_id,
+                        "directorSource": plan.source,
+                        "directorDiagnostic": plan.diagnostic,
+                        "scene": plan.scene.to_payload(),
+                        "execution": plan.execution.to_payload(),
+                        "beatIndex": beat_index,
+                        "speechAct": beat.speech_act,
+                        "addressTo": beat.address_to,
+                        "replyToBeat": beat.reply_to_beat,
+                        "intent": beat.intent,
+                    }
+                    if director_enabled
+                    else {}
+                )
+                active_run_state = RunState(speaker=speaker, orchestration=orchestration)
+                if director_enabled:
+                    active_director_run = self.store.upsert_director_run(
+                        session_id,
+                        {
+                            **(active_director_run or {}),
+                            "planID": plan.plan_id,
+                            "status": "running",
+                            "activeBeatIndex": beat_index,
+                        },
+                    )
+                    await self.sync_core_director_run(
+                        session_id,
+                        active_director_run,
+                        auth_token,
+                        director_config.core,
+                    )
+                    self.events.emit(
+                        {
+                            "type": "companion.speaker.started",
+                            "properties": {
+                                "sessionID": session_id,
+                                "planID": plan.plan_id,
+                                "beatIndex": beat_index,
+                                "speaker": speaker,
+                                "beat": beat.to_payload(),
+                            },
+                        }
+                    )
                 _, reply = await self._run_actor(
                     session_id=session_id,
                     parts=parts,
@@ -559,23 +683,79 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     auth_token=auth_token,
                     runtime_config=active_config,
                     run_state=active_run_state,
-                    intent=turn.intent,
+                    beat=beat,
+                    scene=plan.scene if director_enabled else None,
+                    execution=plan.execution if director_enabled else None,
                     previous_replies=previous_replies,
                     environment=environment,
                 )
-                previous_replies.append((str(participant.get("assistantName") or "助手"), reply))
-                self.events.emit(
+                previous_replies.append(
                     {
-                        "type": "companion.speaker.finished",
-                        "properties": {"sessionID": session_id, "speaker": speaker},
+                        "beatIndex": beat_index,
+                        "assistantID": participant.get("assistantID"),
+                        "assistantName": str(participant.get("assistantName") or "助手"),
+                        "reply": reply,
+                        "speechAct": beat.speech_act,
                     }
                 )
+                if director_enabled:
+                    completed_beat_indexes = sorted(
+                        set([*(active_director_run or {}).get("completedBeatIndexes", []), beat_index])
+                    )
+                    active_director_run = self.store.upsert_director_run(
+                        session_id,
+                        {
+                            **(active_director_run or {}),
+                            "planID": plan.plan_id,
+                            "status": "completed" if len(completed_beat_indexes) >= len(plan.beats) else "running",
+                            "activeBeatIndex": None,
+                            "completedBeatIndexes": completed_beat_indexes,
+                        },
+                    )
+                    await self.sync_core_director_run(
+                        session_id,
+                        active_director_run,
+                        auth_token,
+                        director_config.core,
+                    )
+                    self.events.emit(
+                        {
+                            "type": "companion.speaker.finished",
+                            "properties": {
+                                "sessionID": session_id,
+                                "planID": plan.plan_id,
+                                "beatIndex": beat_index,
+                                "speaker": speaker,
+                            },
+                        }
+                    )
             await self.sync_core_session(session_id, auth_token, director_config.core)
             self.events.emit({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "idle"}}})
             self.emit_session(session_id)
             logger.info(f"session {session_id} companion turn completed in {now_ms() - started}ms")
         except Exception as error:
             logger.error(f"session {session_id} 运行失败: {error}", exc_info=True)
+            if active_director_run:
+                active_director_run = self.store.upsert_director_run(
+                    session_id,
+                    {
+                        **active_director_run,
+                        "status": "failed",
+                        "activeBeatIndex": None,
+                        "error": runtime_error_summary(error),
+                    },
+                )
+                if auth_token and director_config:
+                    try:
+                        await self.sync_core_director_run(
+                            session_id,
+                            active_director_run,
+                            auth_token,
+                            director_config.core,
+                        )
+                    except Exception:
+                        logger.exception("导演运行失败状态持久化到 Core 失败")
+                self.emit_session(session_id)
             if active_run_state is None:
                 active_run_state = RunState(speaker=participants[0] if participants else {})
             if active_run_state:
@@ -829,3 +1009,36 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 f"attempt={attempt + 1}, delay={delay}s"
             )
             await asyncio.sleep(delay)
+
+    async def sync_core_director_run(
+        self,
+        session_id: str,
+        director_run: dict[str, Any],
+        auth_token: str | None,
+        core: dict[str, Any] | None,
+    ) -> None:
+        if not auth_token:
+            return
+        session = self.store.require_session(session_id)
+        plan_id = str(director_run.get("planID") or "unknown")
+        for attempt in range(len(_CORE_SYNC_RETRY_DELAYS) + 1):
+            try:
+                await asyncio.to_thread(
+                    self.core_client.sync_agent_director_run,
+                    auth_token,
+                    session["info"],
+                    director_run,
+                    core,
+                )
+                return
+            except CoreAuthenticationExpiredError:
+                raise
+            except Exception as error:
+                if attempt >= len(_CORE_SYNC_RETRY_DELAYS):
+                    raise
+                delay = _CORE_SYNC_RETRY_DELAYS[attempt]
+                logger.warning(
+                    f"Core 导演运行同步失败，准备重试: session={session_id}, plan={plan_id}, "
+                    f"attempt={attempt + 1}, delay={delay}s, error={error}"
+                )
+                await asyncio.sleep(delay)

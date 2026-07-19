@@ -98,6 +98,41 @@ class RuntimePersistenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message["info"]["error"]["message"], error_message)
         self.assertFalse(any(event["type"] == "session.error" for event in emitter.events.events))
 
+    def test_companion_speaker_and_orchestration_are_kept_on_message(self):
+        store = SessionStore()
+        session = store.create_session("多人编排")
+        emitter = EmitterHarness(store)
+        run_state = RunState(
+            speaker={"assistantID": 2, "assistantName": "莉莉安", "turnIndex": 1, "beatIndex": 1},
+            orchestration={
+                "planID": "plan_1",
+                "beatIndex": 1,
+                "speechAct": "react",
+                "addressTo": "assistant:1",
+                "replyToBeat": 0,
+            },
+        )
+
+        emitter.handle_agent_event(
+            session["id"],
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "timestamp": 1,
+                    "provider": "provider",
+                    "model": "model",
+                    "content": [{"type": "text", "text": "接住上一位助手的话。"}],
+                },
+            },
+            run_state,
+        )
+
+        info = store.list_messages(session["id"])[0]["info"]
+        self.assertEqual(info["speaker"]["assistantID"], 2)
+        self.assertEqual(info["orchestration"]["planID"], "plan_1")
+        self.assertEqual(info["orchestration"]["replyToBeat"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

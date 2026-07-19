@@ -12,7 +12,16 @@ from .tools.memo_format import (
 )
 from .tools.result import compact_text, text_result, truncate
 from .tools.self_awake_state import find_mon_root, read_ini_value, resolve_wake_time
-from .tools.web import fetch_web_page, html_title, html_to_text, normalize_duck_url, parse_duck_results, web_search
+from .tools.web import (
+    fetch_web_page,
+    html_title,
+    html_to_text,
+    normalize_bing_url,
+    normalize_duck_url,
+    parse_bing_results,
+    parse_duck_results,
+    web_search,
+)
 from .tools.workspace import maybe_ask_outside_workspace
 
 __all__ = [
@@ -28,8 +37,10 @@ __all__ = [
     "maybe_ask_outside_workspace",
     "memo_line",
     "memo_with_local_time",
+    "normalize_bing_url",
     "normalize_duck_url",
     "normalize_memo_date",
+    "parse_bing_results",
     "parse_duck_results",
     "parse_local_datetime",
     "read_ini_value",

@@ -4,7 +4,11 @@ from typing import Any
 
 
 class RunState:
-    def __init__(self, speaker: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        speaker: dict[str, Any] | None = None,
+        orchestration: dict[str, Any] | None = None,
+    ) -> None:
         self.assistant_message_id: str | None = None
         self.assistant_created_at: int | None = None
         self.assistant_current_segment_index: int | None = None
@@ -16,3 +20,4 @@ class RunState:
         self.finished_tool_calls: set[str] = set()
         self.text_part_snapshots: dict[str, str] = {}
         self.speaker = dict(speaker or {})
+        self.orchestration = dict(orchestration or {})

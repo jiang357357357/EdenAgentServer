@@ -24,9 +24,15 @@ class SessionStore:
             "id": create_id("ses"),
             "title": title or "新会话",
             "mode": "companion",
-            "directorPolicy": {"maxSpeakersPerTurn": 2, "allowInterAssistantReplies": True},
+            "directorPolicy": {
+                "maxBeatsPerTurn": 3,
+                "maxReturnsPerAssistant": 1,
+                "allowInterAssistantReplies": True,
+                "directorMaxTokens": 2000,
+            },
             "participants": selected,
             "participantAssistantIDs": [item.get("assistantID") for item in selected if item.get("assistantID") is not None],
+            "directorRuns": [],
             "time": {"created": current, "updated": current},
         }
         with self._lock:
@@ -60,6 +66,26 @@ class SessionStore:
             ]
             self._touch(session)
             return dict(session["info"])
+
+    def upsert_director_run(self, session_id: str, director_run: dict[str, Any]) -> dict[str, Any]:
+        plan_id = str(director_run.get("planID") or "").strip()
+        if not plan_id:
+            raise ValueError("导演运行缺少 planID")
+        with self._lock:
+            session = self.require_session(session_id)
+            runs = list(session["info"].get("directorRuns") or [])
+            existing_index = next(
+                (index for index, item in enumerate(runs) if str(item.get("planID") or "") == plan_id),
+                None,
+            )
+            if existing_index is None:
+                saved = dict(director_run)
+                runs.append(saved)
+            else:
+                saved = {**runs[existing_index], **director_run}
+                runs[existing_index] = saved
+            session["info"]["directorRuns"] = runs
+            return dict(saved)
 
     def require_session(self, session_id: str) -> dict[str, Any]:
         with self._lock:

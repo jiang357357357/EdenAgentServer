@@ -31,7 +31,14 @@ class RuntimeEmitterMixin:
         created = run_state.assistant_created_at or now_ms()
         run_state.assistant_message_id = message_id
         run_state.assistant_created_at = created
-        info = {"id": message_id, "role": "assistant", "agent": "python-agent-core", "speaker": run_state.speaker, "time": {"created": created}}
+        info = {
+            "id": message_id,
+            "role": "assistant",
+            "agent": "python-agent-core",
+            "speaker": run_state.speaker,
+            "orchestration": run_state.orchestration,
+            "time": {"created": created},
+        }
         self.store.upsert_message(session_id, info)
         self.emit_message(session_id, info)
         return message_id
@@ -66,6 +73,7 @@ class RuntimeEmitterMixin:
             "role": "assistant",
             "agent": "python-agent-core",
             "speaker": run_state.speaker,
+            "orchestration": run_state.orchestration,
             "time": {
                 "created": run_state.assistant_created_at or completed,
                 "completed": completed,
@@ -144,6 +152,7 @@ class RuntimeEmitterMixin:
             "role": "assistant",
             "agent": "python-agent-core",
             "speaker": run_state.speaker,
+            "orchestration": run_state.orchestration,
             "modelID": message.get("model"),
             "providerID": message.get("provider"),
             "time": {"created": created, "completed": now_ms() if done else None},

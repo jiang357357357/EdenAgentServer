@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+from datetime import date
 import html
+import os
 import re
 import urllib.parse
 import urllib.request
@@ -10,6 +13,43 @@ from typing import Any
 from mon_agent_core import AgentTool
 
 from .result import text_result, truncate
+
+
+DEFAULT_SEARCH_PROVIDER = "bing"
+SEARCH_PROVIDER_LABELS = {
+    "bing": "必应",
+    "duckduckgo": "DuckDuckGo",
+}
+
+
+def search_timeout_seconds() -> float:
+    raw = os.environ.get("MON_AGENT_SEARCH_TIMEOUT_MS", "10000").strip()
+    try:
+        timeout_ms = int(raw)
+    except ValueError:
+        timeout_ms = 10_000
+    return min(max(timeout_ms, 1_000), 60_000) / 1_000
+
+
+def search_provider_order(provider: str | None = None) -> list[str]:
+    preferred = (provider or os.environ.get("MON_AGENT_SEARCH_PROVIDER") or DEFAULT_SEARCH_PROVIDER).strip().lower()
+    aliases = {"cn-bing": "bing", "ddg": "duckduckgo", "duck": "duckduckgo"}
+    preferred = aliases.get(preferred, preferred)
+    if preferred not in SEARCH_PROVIDER_LABELS:
+        preferred = DEFAULT_SEARCH_PROVIDER
+    return [preferred, *[name for name in SEARCH_PROVIDER_LABELS if name != preferred]]
+
+
+def bing_freshness_filter(time_range: str | None, today: date | None = None) -> str | None:
+    fixed = {"day": 'ex1:"ez1"', "week": 'ex1:"ez2"', "month": 'ex1:"ez3"'}
+    if time_range in fixed:
+        return fixed[time_range]
+    if time_range != "year":
+        return None
+    current = today or date.today()
+    epoch = date(1970, 1, 1)
+    end_day = (current - epoch).days
+    return f'ex1:"ez5_{end_day - 365}_{end_day}"'
 
 
 def html_to_text(value: str) -> str:
@@ -44,6 +84,48 @@ def normalize_duck_url(raw_url: str) -> str:
     return decoded
 
 
+def normalize_bing_url(raw_url: str) -> str:
+    decoded = html.unescape(raw_url.strip())
+    try:
+        parsed = urllib.parse.urlparse(decoded)
+        query = urllib.parse.parse_qs(parsed.query)
+        encoded = (query.get("u") or [""])[0]
+        if encoded.startswith("a1"):
+            value = encoded[2:]
+            value += "=" * (-len(value) % 4)
+            target = base64.urlsafe_b64decode(value).decode("utf-8", errors="replace")
+            if urllib.parse.urlparse(target).scheme in {"http", "https"}:
+                return target
+    except (ValueError, UnicodeDecodeError):
+        pass
+    return decoded
+
+
+def parse_bing_results(raw: str, max_results: int) -> list[dict[str, str]]:
+    results: list[dict[str, str]] = []
+    for block in re.split(r'<li\b[^>]*class="[^"]*\bb_algo\b[^"]*"[^>]*>', raw, flags=re.I)[1:]:
+        title_match = re.search(r'<h2\b[^>]*>\s*<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>\s*</h2>', block, re.I)
+        if not title_match:
+            continue
+        title = re.sub(r"\s+", " ", html_to_text(title_match.group(2))).strip()
+        url = normalize_bing_url(title_match.group(1))
+        if not title or urllib.parse.urlparse(url).scheme not in {"http", "https"}:
+            continue
+        snippet_match = re.search(r'<div\b[^>]*class="[^"]*\bb_caption\b[^"]*"[^>]*>[\s\S]*?<p\b[^>]*>([\s\S]*?)</p>', block, re.I)
+        host_match = re.search(r'<cite\b[^>]*>([\s\S]*?)</cite>', block, re.I)
+        results.append(
+            {
+                "title": title,
+                "url": url,
+                "snippet": re.sub(r"\s+", " ", html_to_text(snippet_match.group(1))).strip() if snippet_match else "",
+                "hostname": re.sub(r"\s+", " ", html_to_text(host_match.group(1))).strip() if host_match else (urllib.parse.urlparse(url).hostname or ""),
+            }
+        )
+        if len(results) >= max_results:
+            break
+    return results
+
+
 def parse_duck_results(raw: str, max_results: int) -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
     for block in re.split(r'<div class="result results_links', raw, flags=re.I)[1:]:
@@ -69,7 +151,29 @@ def parse_duck_results(raw: str, max_results: int) -> list[dict[str, str]]:
     return results
 
 
-def web_search(query: str, max_results: int = 5, language: str | None = None, time_range: str | None = None) -> dict[str, Any]:
+def search_bing(query: str, max_results: int, language: str | None, time_range: str | None) -> dict[str, Any]:
+    normalized_language = (language or "zh-CN").strip()
+    if normalized_language.lower() in {"cn-zh", "zh-cn", "zh-hans"}:
+        normalized_language = "zh-Hans"
+    params = {"q": query, "count": str(max_results), "setlang": normalized_language, "cc": "CN"}
+    freshness = bing_freshness_filter(time_range)
+    if freshness:
+        params["filters"] = freshness
+    url = f"https://cn.bing.com/search?{urllib.parse.urlencode(params)}"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "accept": "text/html,application/xhtml+xml",
+            "accept-language": normalized_language,
+            "user-agent": "Mozilla/5.0 MonAgent/1.0",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=search_timeout_seconds()) as response:
+        raw = response.read().decode("utf-8", errors="replace")
+    return {"provider": "bing", "endpoint": url, "results": parse_bing_results(raw, max_results)}
+
+
+def search_duckduckgo(query: str, max_results: int, language: str | None, time_range: str | None) -> dict[str, Any]:
     params = {"q": query, "kl": language or "cn-zh", "kp": "-1"}
     if time_range:
         mapping = {"day": "d", "week": "w", "month": "m", "year": "y"}
@@ -83,11 +187,32 @@ def web_search(query: str, max_results: int = 5, language: str | None = None, ti
             "user-agent": "Mozilla/5.0 MonAgent/1.0",
         },
     )
-    with urllib.request.urlopen(request, timeout=20) as response:
+    with urllib.request.urlopen(request, timeout=search_timeout_seconds()) as response:
         raw = response.read().decode("utf-8", errors="replace")
     if re.search(r"anomalyDetectionBlock|detected an anomaly|captcha", raw, re.I):
         raise RuntimeError("DuckDuckGo 拒绝了本次搜索请求，可能是短时间请求过多或网络出口被限制。")
-    return {"endpoint": url, "results": parse_duck_results(raw, max_results)}
+    return {"provider": "duckduckgo", "endpoint": url, "results": parse_duck_results(raw, max_results)}
+
+
+def web_search(
+    query: str,
+    max_results: int = 5,
+    language: str | None = None,
+    time_range: str | None = None,
+    provider: str | None = None,
+) -> dict[str, Any]:
+    attempts: list[dict[str, str]] = []
+    searchers = {"bing": search_bing, "duckduckgo": search_duckduckgo}
+    for provider_name in search_provider_order(provider):
+        try:
+            result = searchers[provider_name](query, max_results, language, time_range)
+            if not result["results"]:
+                raise RuntimeError("搜索服务未返回可解析结果")
+            return {**result, "attempts": attempts}
+        except Exception as error:
+            attempts.append({"provider": provider_name, "error": str(error)})
+    details = "; ".join(f"{SEARCH_PROVIDER_LABELS[item['provider']]}: {item['error']}" for item in attempts)
+    raise RuntimeError(f"所有网页搜索入口均不可用：{details}")
 
 
 def fetch_web_page(url_text: str) -> dict[str, Any]:
@@ -110,7 +235,8 @@ def create_web_tools() -> list[AgentTool]:
     async def web_search_execute(_tool_call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
         max_results = min(max(int(round(float(params.get("max_results") or 5))), 1), 10)
         result = await asyncio.to_thread(web_search, str(params["query"]), max_results, params.get("language"), params.get("time_range"))
-        lines = [f"DuckDuckGo 搜索结果：{params['query']}"]
+        provider_label = SEARCH_PROVIDER_LABELS.get(result["provider"], result["provider"])
+        lines = [f"{provider_label}搜索结果：{params['query']}"]
         for index, item in enumerate(result["results"], start=1):
             lines.append(
                 "\n".join(
@@ -122,7 +248,7 @@ def create_web_tools() -> list[AgentTool]:
                     ]
                 ).strip()
             )
-        return text_result(truncate("\n\n".join(lines), 20_000), {"provider": "duckduckgo", **result})
+        return text_result(truncate("\n\n".join(lines), 20_000), result)
 
     async def web_fetch_execute(_tool_call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
         max_chars = min(max(int(round(float(params.get("max_chars") or 28_000))), 2_000), 60_000)
@@ -134,7 +260,7 @@ def create_web_tools() -> list[AgentTool]:
         AgentTool(
             name="web_search",
             label="网页搜索",
-            description="使用 DuckDuckGo 搜索实时网页信息，不需要本地搜索服务。",
+            description="搜索实时网页信息，默认使用必应，失败时自动回退到 DuckDuckGo，不需要本地搜索服务。",
             parameters={
                 "type": "object",
                 "properties": {

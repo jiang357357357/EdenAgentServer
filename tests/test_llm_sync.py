@@ -1,0 +1,67 @@
+from __future__ import annotations
+
+import json
+import unittest
+from unittest.mock import patch
+
+from mon_agent_server.llm.sync import call_openai_compatible
+
+
+class FakeResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        return False
+
+    def read(self) -> bytes:
+        return b'{"choices":[{"message":{"content":"ok"}}]}'
+
+
+class SyncModelRequestTests(unittest.TestCase):
+    def test_thinking_disabled_is_forwarded_to_provider(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_urlopen(request, timeout):
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        model = {
+            "id": "mimo-v2.5",
+            "provider": "opencode-go",
+            "baseUrl": "https://opencode.ai/zen/go/v1",
+        }
+        context = {
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "route"}]}],
+            "tools": [],
+        }
+        with patch("mon_agent_server.llm.sync.urllib.request.urlopen", fake_urlopen):
+            call_openai_compatible(
+                model,
+                context,
+                {
+                    "apiKey": "sk-test",
+                    "maxTokens": 1200,
+                    "thinking": {"type": "disabled"},
+                },
+            )
+
+        body = captured["body"]
+        self.assertEqual(body["thinking"], {"type": "disabled"})
+        self.assertEqual(body["max_tokens"], 1200)
+        self.assertNotIn("reasoning_effort", body)
+
+    def test_invalid_thinking_option_is_rejected_before_request(self) -> None:
+        model = {"id": "test", "provider": "openai", "baseUrl": "https://example.test/v1"}
+        context = {"messages": [], "tools": []}
+        with self.assertRaisesRegex(ValueError, "thinking"):
+            call_openai_compatible(
+                model,
+                context,
+                {"apiKey": "sk-test", "thinking": {"type": "sometimes"}},
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()
