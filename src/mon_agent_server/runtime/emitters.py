@@ -8,6 +8,23 @@ from .messages import text_from_tool_result
 from .state import RunState
 
 
+def runtime_error_summary(error: Any) -> str:
+    message = str(error).strip() or "未知错误"
+    normalized = message.lower()
+    if "ssl" in normalized and ("unexpected_eof" in normalized or "eof occurred" in normalized):
+        return "模型连接失败：安全连接被远端提前断开。"
+    if "timed out" in normalized or "timeout" in normalized:
+        return "模型请求超时：服务在限定时间内没有返回结果。"
+    if "401" in normalized or "unauthorized" in normalized or "invalid api key" in normalized:
+        return "模型鉴权失败：请检查当前模型的 API Key。"
+    if "429" in normalized or "too many requests" in normalized or "rate limit" in normalized:
+        return "模型服务繁忙：请求受到频率限制，请稍后重试。"
+    if "connection refused" in normalized or "name or service not known" in normalized:
+        return "模型连接失败：当前无法连接模型服务。"
+    concise = message if len(message) <= 240 else f"{message[:237]}..."
+    return f"运行失败：{concise}"
+
+
 class RuntimeEmitterMixin:
     def ensure_assistant_message(self, session_id: str, run_state: RunState) -> str:
         message_id = run_state.assistant_message_id or create_id("msg")
@@ -40,6 +57,23 @@ class RuntimeEmitterMixin:
             },
         )
 
+    def finish_runtime_message(self, session_id: str, run_state: RunState, error: Any | None = None) -> None:
+        if not run_state.assistant_message_id:
+            return
+        completed = now_ms()
+        info = {
+            "id": run_state.assistant_message_id,
+            "role": "assistant",
+            "agent": "python-agent-core",
+            "time": {
+                "created": run_state.assistant_created_at or completed,
+                "completed": completed,
+            },
+            "error": {"name": "AgentError", "message": str(error)} if error is not None else None,
+        }
+        self.store.upsert_message(session_id, info)
+        self.emit_message(session_id, info)
+
     def begin_assistant_segment(self, run_state: RunState) -> int:
         index = run_state.assistant_next_segment_index
         run_state.assistant_current_segment_index = index
@@ -66,7 +100,7 @@ class RuntimeEmitterMixin:
         if event_type == "message_end" and message.get("role") == "assistant":
             self.upsert_assistant(session_id, message, run_state, done=True)
             if message.get("errorMessage"):
-                self.emit_session_error(session_id, message.get("errorMessage"))
+                run_state.error_message = str(message.get("errorMessage"))
             return
         if event_type == "tool_execution_start":
             call_id = event.get("toolCallId")

@@ -147,10 +147,10 @@ async def _load_character_action_data(context: MonToolContext) -> tuple[dict[str
     character = context.character if isinstance(context.character, dict) else None
     if not character or not character.get("id"):
         core, token = require_core_access(context)
-        assistant = await asyncio.to_thread(core_call, core.get_default_assistant, token)
+        assistant = await asyncio.to_thread(core_call, core.get_current_assistant, token)
         character = assistant.get("character") if isinstance(assistant, dict) and isinstance(assistant.get("character"), dict) else None
     if not character or not character.get("id"):
-        raise RuntimeError("当前默认助手没有绑定可读取的角色。")
+        raise RuntimeError("当前助手没有绑定可读取的角色。")
 
     actions = _as_list(character.get("visual_actions"))
     if context.core_client and context.core_token:
@@ -272,7 +272,7 @@ def create_character_action_tools(context: MonToolContext) -> list[AgentTool]:
         AgentTool(
             "list_character_actions",
             "读取角色动作",
-            "读取当前默认助手绑定角色的可用立绘动作和动作组。",
+            "读取当前助手绑定角色的可用立绘动作和动作组。",
             {"type": "object", "properties": {}},
             list_character_actions_execute,
         ),

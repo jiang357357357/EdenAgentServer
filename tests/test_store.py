@@ -75,6 +75,7 @@ class StoreTest(unittest.TestCase):
             session["id"],
             summary="旧消息已经摘要。",
             tokens_before=120000,
+            tokens_after=18000,
             first_kept_entry_id="runtime_000010",
             created_at=2,
         )
@@ -85,6 +86,10 @@ class StoreTest(unittest.TestCase):
         store.hydrate_messages(session["id"], [old_message, compaction_message, new_message])
 
         self.assertEqual([message["info"]["id"] for message in store.list_messages(session["id"], 10)], ["msg_old", "msg_new"])
+        self.assertEqual(
+            [message["info"]["id"] for message in store.list_messages(session["id"], 10, include_compactions=True)],
+            ["msg_old", compaction_message["info"]["id"], "msg_new"],
+        )
         stored = store.require_session(session["id"])
         self.assertEqual([message["role"] for message in stored["agentMessages"]], ["compactionSummary", "user"])
         self.assertEqual(stored["agentMessages"][0]["summary"], "旧消息已经摘要。")

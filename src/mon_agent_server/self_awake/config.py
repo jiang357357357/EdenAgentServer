@@ -49,5 +49,5 @@ async def resolve_self_awake_runtime_config(app: AppState, token: str | None) ->
             if core:
                 return runtime_config_from_model(*core_model(core), core)
         except Exception as error:
-            logger.warning(f"解析 Core 默认助手配置失败，将使用环境模型: {error}")
+            logger.warning(f"解析 Core 当前助手配置失败，将使用环境模型: {error}")
     return runtime_config_from_model(*env_model(), None)

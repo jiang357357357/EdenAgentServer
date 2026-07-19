@@ -35,7 +35,14 @@ def handle_sessions(handler: Any, path: str, query: dict[str, list[str]], method
             handler.app.hydrate(token, session_id)
         else:
             handler.app.ensure_hydrated(token, session_id)
-        handler.json_response(handler.app.store.list_messages(session_id, handler.query_int(query, "limit", 100)))
+        include_compactions = (query.get("includeCompactions") or [""])[0].strip().lower() in {"1", "true", "yes"}
+        handler.json_response(
+            handler.app.store.list_messages(
+                session_id,
+                handler.query_int(query, "limit", 100),
+                include_compactions=include_compactions,
+            )
+        )
         return True
 
     if message_match and method == "POST":
@@ -56,6 +63,16 @@ def handle_sessions(handler: Any, path: str, query: dict[str, list[str]], method
         handler.app.ensure_hydrated(token, session_id)
         handler.app.runtime.prompt_async(session_id, body.get("parts") or [], token)
         handler.json_response(True)
+        return True
+
+    compact_match = re.match(r"^/session/([^/]+)/compact$", path)
+    if compact_match and method == "POST":
+        session_id = urllib.parse.unquote(compact_match.group(1))
+        token = require_core_token(handler.headers)
+        body = handler.read_json_body()
+        handler.app.ensure_hydrated(token, session_id)
+        handler.app.runtime.compact_async(session_id, body.get("instructions"), token)
+        handler.json_response({"accepted": True, "sessionID": session_id}, status=202)
         return True
 
     return False

@@ -28,13 +28,14 @@ from ..store import SessionStore
 from ..tools import MonToolContext
 from .compaction import RuntimeCompactionModels, messages_to_compaction_entries, runtime_compaction_settings, timestamp_iso
 from .config import RuntimeModelConfig, runtime_context_window
-from .emitters import RuntimeEmitterMixin
+from .emitters import RuntimeEmitterMixin, runtime_error_summary
 from .messages import content_text, images_from_parts, prompt_files
 from .permissions import RuntimePermissionMixin
 from .state import RunState
 
 logger = get_logger("MonAgent", "Runtime")
 _CORE_SYNC_RETRY_DELAYS = (0.15, 0.5, 1.5)
+_MANUAL_COMPACTION_KEEP_RECENT_TOKENS = 8_000
 
 
 def _as_dict_list(value: Any) -> list[dict[str, Any]]:
@@ -152,9 +153,36 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             self._running[session_id] = thread
             thread.start()
 
+    def compact_async(self, session_id: str, custom_instructions: str | None, auth_token: str | None) -> None:
+        instructions = str(custom_instructions or "").strip()
+        if len(instructions) > 2_000:
+            raise RuntimeError("压缩要求不能超过 2000 个字符。")
+        session = self.store.require_session(session_id)
+        if not session.get("agentMessages"):
+            raise RuntimeError("当前会话没有可压缩的上下文。")
+        with self._lock:
+            if session_id in self._running:
+                raise RuntimeError("Session is already running")
+            thread = threading.Thread(
+                target=self._compact_thread_main,
+                args=(session_id, instructions or None, auth_token),
+                daemon=True,
+            )
+            self._running[session_id] = thread
+            thread.start()
+
     def _thread_main(self, session_id: str, parts: list[dict[str, Any]], auth_token: str | None) -> None:
         try:
             asyncio.run(self._run_prompt(session_id, parts, auth_token))
+        except Exception as error:
+            self.emit_session_error(session_id, error)
+        finally:
+            with self._lock:
+                self._running.pop(session_id, None)
+
+    def _compact_thread_main(self, session_id: str, custom_instructions: str | None, auth_token: str | None) -> None:
+        try:
+            asyncio.run(self._run_manual_compaction(session_id, custom_instructions, auth_token))
         except Exception as error:
             self.emit_session_error(session_id, error)
         finally:
@@ -169,6 +197,56 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 return RuntimeModelConfig(model, api_key, label, source, core)
         model, api_key, label, source = env_model()
         return RuntimeModelConfig(model, api_key, label, source, None)
+
+    async def _run_manual_compaction(
+        self,
+        session_id: str,
+        custom_instructions: str | None,
+        auth_token: str | None,
+    ) -> None:
+        started = now_ms()
+        run_state = RunState()
+        self.events.emit({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "busy"}}})
+        self.emit_runtime_thinking(session_id, run_state, "正在读取当前模型配置并准备主动压缩上下文。")
+        try:
+            runtime_config = await self._resolve_runtime_config(auth_token)
+            await self.sync_core_session(session_id, auth_token, runtime_config.core)
+            session = self.store.require_session(session_id)
+            messages = list(session.get("agentMessages") or [])
+            before_tokens = int(estimate_context_tokens(messages).get("tokens") or 0)
+            compacted_messages = await self.compact_agent_messages_if_needed(
+                session_id,
+                run_state,
+                runtime_config,
+                messages,
+                now_ms(),
+                auth_token,
+                force=True,
+                custom_instructions=custom_instructions,
+            )
+            after_tokens = int(estimate_context_tokens(compacted_messages).get("tokens") or 0)
+            self.emit_runtime_thinking(
+                session_id,
+                run_state,
+                f"主动压缩完成：上下文约从 {before_tokens} 降至 {after_tokens} tokens。",
+                done=True,
+            )
+            self.finish_runtime_message(session_id, run_state)
+            await self.sync_core_session(session_id, auth_token, runtime_config.core)
+            self.events.emit({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "idle"}}})
+            self.emit_session(session_id)
+            logger.info(
+                "session {} manual compaction completed: before={} after={} duration={}ms",
+                session_id,
+                before_tokens,
+                after_tokens,
+                now_ms() - started,
+            )
+        except Exception as error:
+            logger.error(f"session {session_id} 主动压缩失败: {error}", exc_info=True)
+            self.emit_runtime_thinking(session_id, run_state, runtime_error_summary(error), done=True)
+            self.finish_runtime_message(session_id, run_state, error=error)
+            self.emit_session_error(session_id, error)
 
     async def _resolve_environment(self, auth_token: str | None) -> dict[str, Any] | None:
         if not auth_token:
@@ -275,7 +353,8 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         for part in user_message["parts"]:
             self.emit_part(session_id, part)
         self.emit_session(session_id)
-        self.emit_runtime_thinking(session_id, run_state, "正在读取 Core 默认助手、角色与模型配置。")
+        self.emit_runtime_thinking(session_id, run_state, "正在读取 Core 当前助手、角色与模型配置。")
+        runtime_config: RuntimeModelConfig | None = None
 
         try:
             runtime_config = await self._resolve_runtime_config(auth_token)
@@ -395,6 +474,8 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             self.emit_runtime_thinking(session_id, run_state, "正在发送给 Python AgentCore，并等待模型回复。")
             await agent.prompt({"role": "user", "timestamp": user_message["info"]["time"]["created"], "content": content})
             self.store.set_agent_messages(session_id, list(agent.state.messages))
+            if run_state.error_message:
+                raise RuntimeError(run_state.error_message)
             self.emit_runtime_thinking(session_id, run_state, "回复生成完成。", done=True)
             if run_state.assistant_message_id:
                 assistant_message = next(
@@ -422,8 +503,27 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             logger.info(f"session {session_id} completed in {duration}ms")
         except Exception as error:
             logger.error(f"session {session_id} 运行失败: {error}", exc_info=True)
-            self.emit_runtime_thinking(session_id, run_state, f"运行失败：{error}", done=True)
+            self.emit_runtime_thinking(session_id, run_state, runtime_error_summary(error), done=True)
+            self.finish_runtime_message(session_id, run_state, error=error)
             self.emit_session_error(session_id, error)
+            if auth_token and runtime_config and run_state.assistant_message_id:
+                assistant_message = next(
+                    (
+                        item
+                        for item in self.store.require_session(session_id)["messages"]
+                        if item["info"]["id"] == run_state.assistant_message_id
+                    ),
+                    None,
+                )
+                if assistant_message:
+                    try:
+                        await self.sync_core_message(session_id, assistant_message, auth_token, runtime_config.core)
+                        await self.sync_core_session(session_id, auth_token, runtime_config.core)
+                    except Exception as persist_error:
+                        logger.error(
+                            f"失败消息持久化到 Core 失败: session={session_id}, error={persist_error}",
+                            exc_info=True,
+                        )
 
     async def compact_agent_messages_if_needed(
         self,
@@ -433,41 +533,84 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         messages: list[dict[str, Any]],
         current_user_created_at: int,
         auth_token: str | None,
+        *,
+        force: bool = False,
+        custom_instructions: str | None = None,
     ) -> list[dict[str, Any]]:
         settings = runtime_compaction_settings()
-        if not messages or not settings.get("enabled", True):
+        if not messages:
+            if force:
+                raise RuntimeError("当前会话没有可压缩的上下文。")
+            return messages
+        if force:
+            last_user_index = next(
+                (index for index in range(len(messages) - 1, -1, -1) if messages[index].get("role") == "user"),
+                len(messages) - 1,
+            )
+            recent_turn_tokens = int(estimate_context_tokens(messages[last_user_index:]).get("tokens") or 1)
+            configured_keep_recent = int(
+                settings.get("keepRecentTokens") or _MANUAL_COMPACTION_KEEP_RECENT_TOKENS
+            )
+            settings = {
+                **settings,
+                "enabled": True,
+                "keepRecentTokens": min(
+                    configured_keep_recent,
+                    _MANUAL_COMPACTION_KEEP_RECENT_TOKENS,
+                    max(1, recent_turn_tokens),
+                ),
+            }
+        if not force and not settings.get("enabled", True):
             return messages
         estimate = estimate_context_tokens(messages)
         context_tokens = int(estimate.get("tokens") or 0)
         context_window = runtime_context_window(runtime_config.model)
-        if not should_compact(context_tokens, context_window, settings):
+        if not force and not should_compact(context_tokens, context_window, settings):
             return messages
         if not runtime_config.api_key:
+            if force:
+                raise RuntimeError("当前模型缺少 API Key，无法生成压缩摘要。")
             logger.warning("上下文达到压缩阈值，但当前模型缺少 API Key，跳过压缩。")
             return messages
 
         self.emit_runtime_thinking(
             session_id,
             run_state,
-            f"上下文约 {context_tokens} tokens，超过压缩阈值，正在压缩旧对话。",
+            (
+                f"正在按用户要求压缩上下文；当前约 {context_tokens} tokens。"
+                if force
+                else f"上下文约 {context_tokens} tokens，超过压缩阈值，正在压缩旧对话。"
+            ),
         )
         entries = messages_to_compaction_entries(messages)
         preparation = prepare_compaction(entries, settings)
         if not preparation.ok:
+            if force:
+                raise RuntimeError(f"上下文压缩准备失败：{preparation.error}")
             logger.warning(f"上下文压缩准备失败: {preparation.error}")
             return messages
         if not preparation.value:
+            if force:
+                raise RuntimeError("当前会话刚完成压缩，没有新增内容可继续压缩。")
             return messages
+        if force and not (
+            preparation.value.get("messagesToSummarize")
+            or preparation.value.get("turnPrefixMessages")
+            or preparation.value.get("previousSummary")
+        ):
+            raise RuntimeError("当前上下文仍在保留范围内，没有可压缩的旧对话。")
 
         result = await compact_context(
             preparation.value,
             RuntimeCompactionModels(runtime_config.api_key),
             runtime_config.model,
-            None,
+            custom_instructions,
             None,
             runtime_config.thinking_level,
         )
         if not result.ok or not result.value:
+            if force:
+                raise RuntimeError(f"上下文压缩失败：{result.error}")
             logger.warning(f"上下文压缩失败: {result.error}")
             return messages
 
@@ -483,26 +626,37 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             "details": compaction.get("details"),
         }
         compacted_messages = build_session_context([*entries, compaction_entry])["messages"]
+        tokens_after = int(estimate_context_tokens(compacted_messages).get("tokens") or 0)
         self.store.set_agent_messages(session_id, compacted_messages)
         hidden_message = self.store.append_compaction_message(
             session_id,
             summary=compaction_entry["summary"],
             tokens_before=compaction_entry["tokensBefore"],
+            tokens_after=tokens_after,
             first_kept_entry_id=compaction_entry.get("firstKeptEntryId"),
             details=compaction_entry.get("details"),
             created_at=max(0, current_user_created_at - 1),
+            automatic=not force,
+            overflow=not force,
         )
+        self.emit_message(session_id, hidden_message["info"])
+        for part in hidden_message["parts"]:
+            self.emit_part(session_id, part)
         await self.sync_core_message(session_id, hidden_message, auth_token, runtime_config.core)
         self.emit_runtime_thinking(
             session_id,
             run_state,
-            f"上下文压缩完成：保留最近约 {settings.get('keepRecentTokens')} tokens，并写入压缩摘要。",
+            (
+                f"主动压缩摘要已写入：保留最近约 {settings.get('keepRecentTokens')} tokens。"
+                if force
+                else f"上下文压缩完成：保留最近约 {settings.get('keepRecentTokens')} tokens，并写入压缩摘要。"
+            ),
         )
         logger.info(
             "session {} compacted context: before={} after={} kept={}",
             session_id,
             context_tokens,
-            estimate_context_tokens(compacted_messages).get("tokens"),
+            tokens_after,
             compaction_entry.get("firstKeptEntryId"),
         )
         return compacted_messages

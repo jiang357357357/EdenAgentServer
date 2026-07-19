@@ -23,7 +23,7 @@ class FakeVisionCoreClient:
 class CoreRuntimeVisionConfigTest(unittest.TestCase):
     def test_runtime_config_uses_character_bound_vision_config(self):
         client = CoreClient("http://core.test")
-        client.get_default_assistant = Mock(
+        client.get_current_assistant = Mock(
             return_value={
                 "id": 1,
                 "character": {
@@ -48,7 +48,7 @@ class CoreRuntimeVisionConfigTest(unittest.TestCase):
 
     def test_runtime_config_does_not_choose_unbound_active_vision_config(self):
         client = CoreClient("http://core.test")
-        client.get_default_assistant = Mock(
+        client.get_current_assistant = Mock(
             return_value={
                 "id": 1,
                 "character": {"id": 7, "name": "雪音", "ai_talk_entity_id": 11},
@@ -66,7 +66,7 @@ class CoreRuntimeVisionConfigTest(unittest.TestCase):
 
     def test_bound_vision_lookup_failure_does_not_break_text_runtime_or_fallback(self):
         client = CoreClient("http://core.test")
-        client.get_default_assistant = Mock(
+        client.get_current_assistant = Mock(
             return_value={
                 "id": 1,
                 "character": {

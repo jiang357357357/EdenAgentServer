@@ -31,10 +31,10 @@ class CoreClient:
     def resolve_runtime_config(self, token: str | None) -> dict[str, Any] | None:
         if not token:
             return None
-        assistant = self.get_default_assistant(token)
+        assistant = self.get_current_assistant(token)
         character = assistant.get("character") if isinstance(assistant, dict) else None
         if not character:
-            raise RuntimeError("默认助手没有绑定角色，请先在 Core 助手管理中绑定角色。")
+            raise RuntimeError("当前助手没有绑定角色，请先在 Core 助手管理中绑定角色。")
         ai_entity_id = character.get("ai_talk_entity_id")
         if not ai_entity_id:
             raise RuntimeError(f"角色「{character.get('name')}」没有绑定对话 AI，请先在角色配置中设置 AI 实体。")
@@ -61,6 +61,10 @@ class CoreClient:
 
     def get_default_assistant(self, token: str) -> dict[str, Any]:
         raw = self._request("/api/assistants/default/", token)
+        return raw if isinstance(raw, dict) else {}
+
+    def get_current_assistant(self, token: str) -> dict[str, Any]:
+        raw = self._request("/api/assistants/current/", token)
         return raw if isinstance(raw, dict) else {}
 
     def list_ai_entities(self, token: str) -> list[dict[str, Any]]:

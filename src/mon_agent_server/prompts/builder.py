@@ -121,7 +121,7 @@ def build_assistant_context_section(core: dict[str, Any] | None = None) -> str:
     lines: list[str] = []
     name = _clean_prompt_text(assistant.get("name"), 400)
     if name:
-        lines.append(f"默认助手：{name}")
+        lines.append(f"当前助手：{name}")
     description = _clean_prompt_text(assistant.get("description"), 1200)
     if description:
         lines.append(f"助手描述：{description}")

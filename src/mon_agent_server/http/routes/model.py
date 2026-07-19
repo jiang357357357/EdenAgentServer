@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 from ...core import require_core_token
+from ...runtime.config import runtime_context_window
+
+
 def _compact_label(entity: dict[str, Any]) -> str:
     name = str(entity.get("ai_name") or "").strip()
     model_id = str(entity.get("ai_model") or "").strip()
@@ -33,15 +36,16 @@ def _model_option(entity: dict[str, Any], current_id: Any, vendors: dict[str, An
         "modelID": model_id,
         "status": entity.get("status") or "",
         "isMultimodal": bool(entity.get("is_multimodal")),
+        "contextWindow": runtime_context_window(entity),
         "selected": str(entity_id) == str(current_id),
     }
 
 
 def _model_payload(handler: Any, token: str) -> dict[str, Any]:
-    assistant = handler.app.core_client.get_default_assistant(token)
+    assistant = handler.app.core_client.get_current_assistant(token)
     character = assistant.get("character") if isinstance(assistant, dict) else None
     if not isinstance(character, dict) or not character.get("id"):
-        raise RuntimeError("默认助手没有绑定角色，请先在 Core 助手管理中绑定角色。")
+        raise RuntimeError("当前助手没有绑定角色，请先在 Core 助手管理中绑定角色。")
 
     current_id = character.get("ai_talk_entity_id")
     vendors = handler.app.core_client.list_service_vendors(token, "ai")
@@ -90,7 +94,7 @@ def handle_model(handler: Any, path: str, _query: dict[str, list[str]], method: 
         payload = _model_payload(handler, token)
         character_id = (payload.get("character") or {}).get("id")
         if not character_id:
-            raise RuntimeError("默认助手没有绑定角色，请先在 Core 助手管理中绑定角色。")
+            raise RuntimeError("当前助手没有绑定角色，请先在 Core 助手管理中绑定角色。")
 
         handler.app.core_client.update_character(token, character_id, {"ai_talk_entity_id": int(ai_entity_id)})
         handler.json_response(_model_payload(handler, token))

@@ -70,4 +70,7 @@ def core_model(core: dict[str, Any]) -> tuple[dict[str, Any], str | None, str, s
         "input": ["text", "image"] if ai_entity.get("is_multimodal") else ["text"],
         "reasoning": False,
     }
+    context_window = ai_entity.get("contextWindow") or ai_entity.get("context_window") or ai_entity.get("contextLength")
+    if context_window is not None:
+        model["contextWindow"] = context_window
     return model, ai_entity.get("api_key"), f"{provider}/{model_id}", "core"

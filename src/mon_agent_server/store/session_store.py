@@ -4,7 +4,7 @@ import threading
 from typing import Any
 
 from ..ids import create_id, now_ms
-from .serializers import is_hidden_message, message_text, title_from_messages, to_agent_messages
+from .serializers import is_hidden_message, message_compaction, message_text, title_from_messages, to_agent_messages
 
 
 class SessionStore:
@@ -48,10 +48,14 @@ class SessionStore:
                 raise KeyError(f"Session not found: {session_id}")
             return session
 
-    def list_messages(self, session_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    def list_messages(self, session_id: str, limit: int = 100, include_compactions: bool = False) -> list[dict[str, Any]]:
         session = self.require_session(session_id)
         with self._lock:
-            visible = [message for message in session["messages"] if not is_hidden_message(message)]
+            visible = [
+                message
+                for message in session["messages"]
+                if not is_hidden_message(message) or (include_compactions and message_compaction(message) is not None)
+            ]
             return list(visible[-limit:])
 
     def hydrate_messages(self, session_id: str, messages: list[dict[str, Any]]) -> None:
@@ -172,9 +176,12 @@ class SessionStore:
         *,
         summary: str,
         tokens_before: int,
+        tokens_after: int,
         first_kept_entry_id: str | None,
         details: Any | None = None,
         created_at: int | None = None,
+        automatic: bool = True,
+        overflow: bool = True,
     ) -> dict[str, Any]:
         current = created_at or now_ms()
         message_id = create_id("msg")
@@ -183,12 +190,13 @@ class SessionStore:
             "messageID": message_id,
             "sessionID": session_id,
             "type": "compaction",
-            "auto": True,
-            "overflow": True,
+            "auto": automatic,
+            "overflow": overflow,
             "tail_start_id": first_kept_entry_id,
             "firstKeptEntryId": first_kept_entry_id,
             "summary": summary,
             "tokensBefore": tokens_before,
+            "tokensAfter": tokens_after,
             "details": details,
             "time": {"start": current, "end": current},
         }
