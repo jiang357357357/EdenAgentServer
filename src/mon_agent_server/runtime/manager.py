@@ -27,6 +27,7 @@ from ..skills import create_skill_runtime
 from ..store import SessionStore
 from ..tools import MonToolContext
 from .compaction import RuntimeCompactionModels, messages_to_compaction_entries, runtime_compaction_settings, timestamp_iso
+from .companion import actor_task_prompt, create_director_plan
 from .config import RuntimeModelConfig, runtime_context_window
 from .emitters import RuntimeEmitterMixin, runtime_error_summary
 from .messages import content_text, images_from_parts, prompt_files
@@ -189,9 +190,20 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             with self._lock:
                 self._running.pop(session_id, None)
 
-    async def _resolve_runtime_config(self, auth_token: str | None) -> RuntimeModelConfig:
+    async def _resolve_runtime_config(
+        self,
+        auth_token: str | None,
+        assistant_id: int | str | None = None,
+    ) -> RuntimeModelConfig:
         if auth_token:
-            core = await asyncio.to_thread(self.core_client.resolve_runtime_config, auth_token)
+            if assistant_id is not None:
+                core = await asyncio.to_thread(
+                    self.core_client.resolve_runtime_config_for_assistant,
+                    auth_token,
+                    assistant_id,
+                )
+            else:
+                core = await asyncio.to_thread(self.core_client.resolve_runtime_config, auth_token)
             if core:
                 model, api_key, label, source = core_model(core)
                 return RuntimeModelConfig(model, api_key, label, source, core)
@@ -343,187 +355,241 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             ]
         )
 
+    @staticmethod
+    def _participant_from_core(core: dict[str, Any], position: int = 0) -> dict[str, Any]:
+        assistant = core.get("assistant") if isinstance(core.get("assistant"), dict) else {}
+        character = core.get("character") if isinstance(core.get("character"), dict) else {}
+        return {
+            "assistantID": assistant.get("id"),
+            "assistantName": assistant.get("name") or character.get("name") or "助手",
+            "characterID": character.get("id"),
+            "characterName": character.get("name") or assistant.get("name") or "助手",
+            "signature": character.get("signature") or "",
+            "avatarUrl": character.get("avatar_url") or "",
+            "standingImageUrl": character.get("default_standing_image_url") or "",
+            "ttsConfigID": character.get("tts_config_id"),
+            "position": position,
+        }
+
+    async def _run_actor(
+        self,
+        *,
+        session_id: str,
+        parts: list[dict[str, Any]],
+        user_message: dict[str, Any],
+        auth_token: str | None,
+        runtime_config: RuntimeModelConfig,
+        run_state: RunState,
+        intent: str,
+        previous_replies: list[tuple[str, str]],
+        environment: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any] | None, str]:
+        files = prompt_files(parts)
+        character = (runtime_config.core or {}).get("character") if runtime_config.core else None
+        self.emit_runtime_thinking(
+            session_id,
+            run_state,
+            f"已选择模型：{runtime_config.label}；正在由{run_state.speaker.get('assistantName') or '助手'}接续本轮。",
+        )
+        automatic_vision_context = await self._analyze_non_multimodal_images(
+            session_id=session_id,
+            message_id=user_message["info"]["id"],
+            parts=parts,
+            user_text=content_text(parts),
+            auth_token=auth_token,
+            runtime_config=runtime_config,
+        )
+        current_character_action = self.store.get_character_action(session_id)
+        if not current_character_action or (
+            isinstance(character, dict)
+            and character.get("id") is not None
+            and current_character_action.get("characterID") != character.get("id")
+        ):
+            current_character_action = _default_character_action_state(session_id, character)
+            if current_character_action:
+                self.store.set_character_action(session_id, current_character_action)
+        tool_context = MonToolContext(
+            session_id=session_id,
+            core_client=self.core_client,
+            core_token=auth_token,
+            permissions=self.permissions,
+            questions=self.questions,
+            screen_captures=self.screen_captures,
+            current_model_supports_images=runtime_config.supports_images,
+            vision_config=(runtime_config.core or {}).get("visionConfig") if runtime_config.core else None,
+            environment=environment,
+            character=character,
+            current_character_action=current_character_action,
+            emit_event=self.events.emit,
+            set_character_action=lambda state: self.store.set_character_action(session_id, state),
+            get_message_id=lambda: run_state.assistant_message_id,
+            get_current_files=lambda: files,
+        )
+        skill_runtime = create_skill_runtime(self.workspace_root, tool_context, profile="user_chat")
+        tools = skill_runtime.active_tools()
+        self.emit_runtime_thinking(session_id, run_state, f"已加载按需技能目录，首轮暴露 {len(tools)} 个基础工具。")
+        attachment_details = attachment_context(files, runtime_config.supports_images)
+        if automatic_vision_context:
+            attachment_details = "\n\n".join(filter(None, [attachment_details, automatic_vision_context]))
+        task_prompt = actor_task_prompt(content_text(parts), intent, previous_replies, attachment_details)
+
+        def system_prompt_for(active_skill_ids: tuple[str, ...]) -> str:
+            return build_agent_system_prompt(
+                runtime_config.core,
+                current_character_action=self.store.get_character_action(session_id) or current_character_action,
+                supports_images=runtime_config.supports_images,
+                environment=environment,
+                active_skill_ids=active_skill_ids,
+            )
+
+        agent_messages = await self.compact_agent_messages_if_needed(
+            session_id,
+            run_state,
+            runtime_config,
+            list(self.store.require_session(session_id).get("agentMessages") or []),
+            user_message["info"]["time"]["created"],
+            auth_token,
+        )
+        agent = Agent(
+            AgentOptions(
+                session_id=session_id,
+                tool_execution="sequential",
+                convert_to_llm=convert_to_llm,
+                stream_fn=stream_openai_compatible,
+                initial_state={
+                    "model": runtime_config.model,
+                    "thinkingLevel": runtime_config.thinking_level,
+                    "systemPrompt": system_prompt_for(skill_runtime.active_skill_ids),
+                    "tools": tools,
+                    "messages": agent_messages,
+                },
+                get_api_key=lambda _provider: runtime_config.api_key,
+                before_tool_call=self._before_tool_call(session_id, run_state),
+                prepare_next_turn_with_context=lambda turn, _signal: skill_runtime.prepare_next_turn(turn, system_prompt_for),
+            )
+        )
+        agent.subscribe(lambda event, _signal: self.handle_agent_event(session_id, event, run_state))
+        content: list[dict[str, Any]] = []
+        if runtime_config.supports_images:
+            content.extend(images_from_parts(parts))
+        content.append({"type": "text", "text": task_prompt})
+        self.emit_runtime_thinking(session_id, run_state, "正在发送给 Python AgentCore，并等待模型回复。")
+        await agent.prompt({"role": "user", "timestamp": now_ms(), "content": content})
+        if run_state.error_message:
+            raise RuntimeError(run_state.error_message)
+        self.emit_runtime_thinking(session_id, run_state, "回复生成完成。", done=True)
+        message = next(
+            (
+                item for item in self.store.require_session(session_id)["messages"]
+                if item["info"]["id"] == run_state.assistant_message_id
+            ),
+            None,
+        )
+        if message:
+            await self.sync_core_message(session_id, message, auth_token, runtime_config.core)
+        text = "\n".join(
+            str(part.get("text") or "") for part in (message or {}).get("parts", []) if part.get("type") == "text"
+        ).strip()
+        self.store.rebuild_agent_messages(session_id)
+        return message, text
+
     async def _run_prompt(self, session_id: str, parts: list[dict[str, Any]], auth_token: str | None) -> None:
         session = self.store.require_session(session_id)
         started = now_ms()
-        run_state = RunState()
+        active_run_state: RunState | None = None
+        active_config: RuntimeModelConfig | None = None
         self.events.emit({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "busy"}}})
         user_message = self.store.append_user_message(session_id, content_text(parts), prompt_files(parts))
         self.emit_message(session_id, user_message["info"])
         for part in user_message["parts"]:
             self.emit_part(session_id, part)
         self.emit_session(session_id)
-        self.emit_runtime_thinking(session_id, run_state, "正在读取 Core 当前助手、角色与模型配置。")
-        runtime_config: RuntimeModelConfig | None = None
-
         try:
-            runtime_config = await self._resolve_runtime_config(auth_token)
-            await self.sync_core_session(session_id, auth_token, runtime_config.core)
-            await self.sync_core_message(session_id, user_message, auth_token, runtime_config.core)
-            self.emit_runtime_thinking(
-                session_id,
-                run_state,
-                f"已选择模型：{runtime_config.label}，配置来源：{'Core' if runtime_config.source == 'core' else '环境变量'}。",
-            )
-            files = prompt_files(parts)
-            environment = await self._resolve_environment(auth_token)
-            character = (runtime_config.core or {}).get("character") if runtime_config.core else None
-            automatic_vision_context = await self._analyze_non_multimodal_images(
-                session_id=session_id,
-                message_id=user_message["info"]["id"],
-                parts=parts,
+            participants = [item for item in session["info"].get("participants", []) if item.get("assistantID") is not None]
+            primary_id = participants[0].get("assistantID") if participants else None
+            director_config = await self._resolve_runtime_config(auth_token, primary_id)
+            if not participants and director_config.core:
+                participants = [self._participant_from_core(director_config.core)]
+                self.store.update_participants(session_id, participants)
+            if not participants:
+                raise RuntimeError("当前会话没有可用的参与助手。")
+            await self.sync_core_session(session_id, auth_token, director_config.core)
+            await self.sync_core_message(session_id, user_message, auth_token, director_config.core)
+            plan = await create_director_plan(
                 user_text=content_text(parts),
-                auth_token=auth_token,
-                runtime_config=runtime_config,
+                participants=participants,
+                director_config=director_config,
+                policy=session["info"].get("directorPolicy") or {},
             )
-            if automatic_vision_context:
-                self.emit_runtime_thinking(
-                    session_id,
-                    run_state,
-                    "当前对话模型不支持图片，已使用角色绑定的 Vision 配置完成自动分析。",
-                )
-            current_character_action = self.store.get_character_action(session_id)
-            if (
-                not current_character_action
-                or (
-                    isinstance(character, dict)
-                    and character.get("id") is not None
-                    and current_character_action.get("characterID") != character.get("id")
-                )
-            ):
-                current_character_action = _default_character_action_state(session_id, character)
-                if current_character_action:
-                    self.store.set_character_action(session_id, current_character_action)
-            tool_context = MonToolContext(
-                session_id=session_id,
-                core_client=self.core_client,
-                core_token=auth_token,
-                permissions=self.permissions,
-                questions=self.questions,
-                screen_captures=self.screen_captures,
-                current_model_supports_images=runtime_config.supports_images,
-                vision_config=(runtime_config.core or {}).get("visionConfig") if runtime_config.core else None,
-                environment=environment,
-                character=character,
-                current_character_action=current_character_action,
-                emit_event=self.events.emit,
-                set_character_action=lambda state: self.store.set_character_action(session_id, state),
-                get_message_id=lambda: run_state.assistant_message_id,
-                get_current_files=lambda: files,
-            )
-            skill_runtime = create_skill_runtime(
-                self.workspace_root,
-                tool_context,
-                profile="user_chat",
-            )
-            tools = skill_runtime.active_tools()
-            self.emit_runtime_thinking(
-                session_id,
-                run_state,
-                f"已加载按需技能目录，首轮暴露 {len(tools)} 个基础工具。",
-            )
-            attachment_details = attachment_context(files, runtime_config.supports_images)
-            if automatic_vision_context:
-                attachment_details = "\n\n".join(filter(None, [attachment_details, automatic_vision_context]))
-            task_prompt = build_user_chat_task_prompt(content_text(parts), attachment_details)
-            def system_prompt_for(active_skill_ids: tuple[str, ...]) -> str:
-                return build_agent_system_prompt(
-                    runtime_config.core,
-                    current_character_action=self.store.get_character_action(session_id) or current_character_action,
-                    supports_images=runtime_config.supports_images,
-                    environment=environment,
-                    active_skill_ids=active_skill_ids,
-                )
-
-            system_prompt = system_prompt_for(skill_runtime.active_skill_ids)
-            agent_messages = await self.compact_agent_messages_if_needed(
-                session_id,
-                run_state,
-                runtime_config,
-                list(session.get("agentMessages") or []),
-                user_message["info"]["time"]["created"],
-                auth_token,
-            )
-            agent = Agent(
-                AgentOptions(
-                    session_id=session_id,
-                    tool_execution="sequential",
-                    convert_to_llm=convert_to_llm,
-                    stream_fn=stream_openai_compatible,
-                    initial_state={
-                        "model": runtime_config.model,
-                        "thinkingLevel": runtime_config.thinking_level,
-                        "systemPrompt": system_prompt,
-                        "tools": tools,
-                        "messages": agent_messages,
+            self.events.emit(
+                {
+                    "type": "companion.plan",
+                    "properties": {
+                        "sessionID": session_id,
+                        "source": plan.source,
+                        "turns": [turn.__dict__ for turn in plan.turns],
                     },
-                    get_api_key=lambda _provider: runtime_config.api_key,
-                    before_tool_call=self._before_tool_call(session_id, run_state),
-                    prepare_next_turn_with_context=lambda turn, _signal: skill_runtime.prepare_next_turn(
-                        turn,
-                        system_prompt_for,
-                    ),
-                )
+                }
             )
-            agent.subscribe(lambda event, _signal: self.handle_agent_event(session_id, event, run_state))
-            content: list[dict[str, Any]] = []
-            if runtime_config.supports_images:
-                content.extend(images_from_parts(parts))
-            if task_prompt:
-                content.append({"type": "text", "text": task_prompt})
-            self.emit_runtime_thinking(session_id, run_state, "正在发送给 Python AgentCore，并等待模型回复。")
-            await agent.prompt({"role": "user", "timestamp": user_message["info"]["time"]["created"], "content": content})
-            self.store.set_agent_messages(session_id, list(agent.state.messages))
-            if run_state.error_message:
-                raise RuntimeError(run_state.error_message)
-            self.emit_runtime_thinking(session_id, run_state, "回复生成完成。", done=True)
-            if run_state.assistant_message_id:
-                assistant_message = next(
-                    (
-                        item
-                        for item in self.store.require_session(session_id)["messages"]
-                        if item["info"]["id"] == run_state.assistant_message_id
-                    ),
-                    None,
+            environment = await self._resolve_environment(auth_token)
+            previous_replies: list[tuple[str, str]] = []
+            for turn_index, turn in enumerate(plan.turns):
+                participant = next(
+                    item for item in participants if str(item.get("assistantID")) == str(turn.assistant_id)
                 )
-                if assistant_message:
-                    try:
-                        await self.sync_core_message(session_id, assistant_message, auth_token, runtime_config.core)
-                    except Exception as error:
-                        logger.error(
-                            f"助手消息已生成但持久化到 Core 失败: session={session_id}, "
-                            f"message={assistant_message['info']['id']}, error={error}",
-                            exc_info=True,
-                        )
-                        self.emit_session_error(session_id, f"助手回复已生成，但保存历史记录失败：{error}")
-            await self.sync_core_session(session_id, auth_token, runtime_config.core)
+                active_config = await self._resolve_runtime_config(auth_token, turn.assistant_id)
+                speaker = {
+                    **participant,
+                    "turnIndex": turn_index,
+                }
+                active_run_state = RunState(speaker=speaker)
+                self.events.emit(
+                    {
+                        "type": "companion.speaker.started",
+                        "properties": {"sessionID": session_id, "speaker": speaker, "intent": turn.intent},
+                    }
+                )
+                _, reply = await self._run_actor(
+                    session_id=session_id,
+                    parts=parts,
+                    user_message=user_message,
+                    auth_token=auth_token,
+                    runtime_config=active_config,
+                    run_state=active_run_state,
+                    intent=turn.intent,
+                    previous_replies=previous_replies,
+                    environment=environment,
+                )
+                previous_replies.append((str(participant.get("assistantName") or "助手"), reply))
+                self.events.emit(
+                    {
+                        "type": "companion.speaker.finished",
+                        "properties": {"sessionID": session_id, "speaker": speaker},
+                    }
+                )
+            await self.sync_core_session(session_id, auth_token, director_config.core)
             self.events.emit({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "idle"}}})
             self.emit_session(session_id)
-            duration = now_ms() - started
-            logger.info(f"session {session_id} completed in {duration}ms")
+            logger.info(f"session {session_id} companion turn completed in {now_ms() - started}ms")
         except Exception as error:
             logger.error(f"session {session_id} 运行失败: {error}", exc_info=True)
-            self.emit_runtime_thinking(session_id, run_state, runtime_error_summary(error), done=True)
-            self.finish_runtime_message(session_id, run_state, error=error)
+            if active_run_state:
+                self.emit_runtime_thinking(session_id, active_run_state, runtime_error_summary(error), done=True)
+                self.finish_runtime_message(session_id, active_run_state, error=error)
+                if auth_token and active_config and active_run_state.assistant_message_id:
+                    message = next(
+                        (
+                            item for item in self.store.require_session(session_id)["messages"]
+                            if item["info"]["id"] == active_run_state.assistant_message_id
+                        ),
+                        None,
+                    )
+                    if message:
+                        try:
+                            await self.sync_core_message(session_id, message, auth_token, active_config.core)
+                        except Exception:
+                            logger.exception("多人会话失败消息持久化到 Core 失败")
             self.emit_session_error(session_id, error)
-            if auth_token and runtime_config and run_state.assistant_message_id:
-                assistant_message = next(
-                    (
-                        item
-                        for item in self.store.require_session(session_id)["messages"]
-                        if item["info"]["id"] == run_state.assistant_message_id
-                    ),
-                    None,
-                )
-                if assistant_message:
-                    try:
-                        await self.sync_core_message(session_id, assistant_message, auth_token, runtime_config.core)
-                        await self.sync_core_session(session_id, auth_token, runtime_config.core)
-                    except Exception as persist_error:
-                        logger.error(
-                            f"失败消息持久化到 Core 失败: session={session_id}, error={persist_error}",
-                            exc_info=True,
-                        )
 
     async def compact_agent_messages_if_needed(
         self,

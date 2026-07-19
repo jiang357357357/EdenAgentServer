@@ -64,9 +64,31 @@ def session_from_map(item: dict[str, Any]) -> dict[str, Any]:
         to_millis(item.get("updated_at"), created),
         created,
     )
+    raw_participants = item.get("participants") if isinstance(item.get("participants"), list) else []
+    participants = [
+        {
+            "assistantID": participant.get("assistant"),
+            "assistantName": participant.get("assistant_name") or "",
+            "characterID": participant.get("character"),
+            "characterName": participant.get("character_name") or "",
+            "signature": participant.get("character_signature") or "",
+            "avatarUrl": participant.get("character_avatar_url") or "",
+            "standingImageUrl": participant.get("standing_image_url") or "",
+            "ttsConfigID": participant.get("tts_config_id"),
+            "position": participant.get("position", index),
+        }
+        for index, participant in enumerate(raw_participants)
+        if participant.get("assistant") is not None and participant.get("enabled", True)
+    ]
     return {
         "id": item.get("external_session_id"),
         "title": item.get("title") or (payload or {}).get("title") or "新会话",
+        "mode": item.get("mode") or (payload or {}).get("mode") or "companion",
+        "directorPolicy": item.get("director_policy") or (payload or {}).get("directorPolicy") or {},
+        "participants": participants or (payload or {}).get("participants") or [],
+        "participantAssistantIDs": [participant["assistantID"] for participant in participants]
+        or (payload or {}).get("participantAssistantIDs")
+        or ([item.get("assistant")] if item.get("assistant") else []),
         "time": {"created": created, "updated": updated},
     }
 
@@ -74,6 +96,12 @@ def session_from_map(item: dict[str, Any]) -> dict[str, Any]:
 def message_from_map(item: dict[str, Any]) -> dict[str, Any]:
     payload = item.get("message_payload")
     if is_api_message_payload(payload):
+        if payload.get("info", {}).get("role") == "assistant" and not payload["info"].get("speaker"):
+            payload["info"]["speaker"] = {
+                "assistantID": item.get("speaker_assistant"),
+                "characterID": item.get("speaker_character"),
+                "turnIndex": item.get("turn_index"),
+            }
         return payload
     created = to_millis(item.get("created_at"))
     return {

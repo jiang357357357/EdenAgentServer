@@ -5,6 +5,22 @@ import urllib.parse
 from typing import Any
 
 from ...core import require_core_token
+from ...core.serializers import session_from_map
+
+
+def _participant_from_assistant(assistant: dict[str, Any], position: int = 0) -> dict[str, Any]:
+    character = assistant.get("character") if isinstance(assistant.get("character"), dict) else {}
+    return {
+        "assistantID": assistant.get("id"),
+        "assistantName": assistant.get("name") or character.get("name") or "助手",
+        "characterID": character.get("id"),
+        "characterName": character.get("name") or assistant.get("name") or "助手",
+        "signature": character.get("signature") or "",
+        "avatarUrl": character.get("avatar_url") or "",
+        "standingImageUrl": character.get("default_standing_image_url") or "",
+        "ttsConfigID": character.get("tts_config_id"),
+        "position": position,
+    }
 
 
 def handle_sessions(handler: Any, path: str, query: dict[str, list[str]], method: str) -> bool:
@@ -20,11 +36,49 @@ def handle_sessions(handler: Any, path: str, query: dict[str, list[str]], method
     if method == "POST" and path == "/session":
         token = require_core_token(handler.headers)
         body = handler.read_json_body()
-        session = handler.app.store.create_session(str(body.get("title") or ""))
+        assistant_ids = body.get("assistantIDs") if isinstance(body.get("assistantIDs"), list) else []
+        if assistant_ids:
+            assistants = [handler.app.core_client.get_assistant(token, assistant_id) for assistant_id in assistant_ids]
+        else:
+            assistants = [handler.app.core_client.get_current_assistant(token)]
+        participants = [
+            _participant_from_assistant(assistant, position)
+            for position, assistant in enumerate(assistants)
+            if assistant.get("id") is not None
+        ]
+        session = handler.app.store.create_session(str(body.get("title") or ""), participants)
         handler.app.mark_hydrated(session["id"])
         handler.app.core_client.sync_agent_session(token, session)
+        if participants:
+            handler.app.core_client.update_agent_session_participants(
+                token,
+                session,
+                [participant["assistantID"] for participant in participants],
+            )
         handler.app.events.emit({"type": "session.created", "properties": {"sessionID": session["id"], "info": session}})
         handler.json_response(session)
+        return True
+
+    participants_match = re.match(r"^/session/([^/]+)/participants$", path)
+    if participants_match and method == "PUT":
+        session_id = urllib.parse.unquote(participants_match.group(1))
+        token = require_core_token(handler.headers)
+        body = handler.read_json_body()
+        assistant_ids = body.get("assistantIDs")
+        if not isinstance(assistant_ids, list) or not assistant_ids:
+            handler.json_response({"error": "至少选择一个参与助手。"}, status=400)
+            return True
+        if len(assistant_ids) > 8 or len({str(item) for item in assistant_ids}) != len(assistant_ids):
+            handler.json_response({"error": "参与助手不能重复，且最多选择 8 个。"}, status=400)
+            return True
+        handler.app.ensure_hydrated(token, session_id)
+        assistants = [handler.app.core_client.get_assistant(token, assistant_id) for assistant_id in assistant_ids]
+        participants = [_participant_from_assistant(assistant, index) for index, assistant in enumerate(assistants)]
+        session = handler.app.store.update_participants(session_id, participants)
+        mapped = handler.app.core_client.update_agent_session_participants(token, session, assistant_ids)
+        info = handler.app.store.upsert_session_info(session_from_map(mapped))
+        handler.app.events.emit({"type": "session.updated", "properties": {"sessionID": session_id, "info": info}})
+        handler.json_response(info)
         return True
 
     message_match = re.match(r"^/session/([^/]+)/message$", path)

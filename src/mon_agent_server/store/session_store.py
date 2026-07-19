@@ -17,9 +17,18 @@ class SessionStore:
             sessions = [session["info"] for session in self._sessions.values()]
         return sorted(sessions, key=lambda item: item["time"]["updated"], reverse=True)[:limit]
 
-    def create_session(self, title: str = "") -> dict[str, Any]:
+    def create_session(self, title: str = "", participants: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         current = now_ms()
-        info = {"id": create_id("ses"), "title": title or "新会话", "time": {"created": current, "updated": current}}
+        selected = list(participants or [])
+        info = {
+            "id": create_id("ses"),
+            "title": title or "新会话",
+            "mode": "companion",
+            "directorPolicy": {"maxSpeakersPerTurn": 2, "allowInterAssistantReplies": True},
+            "participants": selected,
+            "participantAssistantIDs": [item.get("assistantID") for item in selected if item.get("assistantID") is not None],
+            "time": {"created": current, "updated": current},
+        }
         with self._lock:
             self._sessions[info["id"]] = {"info": info, "messages": [], "agentMessages": [], "characterAction": None}
         return info
@@ -40,6 +49,17 @@ class SessionStore:
                 "characterAction": existing.get("characterAction"),
             }
             return merged
+
+    def update_participants(self, session_id: str, participants: list[dict[str, Any]]) -> dict[str, Any]:
+        with self._lock:
+            session = self.require_session(session_id)
+            session["info"]["mode"] = "companion"
+            session["info"]["participants"] = list(participants)
+            session["info"]["participantAssistantIDs"] = [
+                item.get("assistantID") for item in participants if item.get("assistantID") is not None
+            ]
+            self._touch(session)
+            return dict(session["info"])
 
     def require_session(self, session_id: str) -> dict[str, Any]:
         with self._lock:
@@ -222,6 +242,14 @@ class SessionStore:
             session = self.require_session(session_id)
             session["agentMessages"] = messages
             self._touch(session)
+
+    def rebuild_agent_messages(self, session_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            session = self.require_session(session_id)
+            messages = to_agent_messages(session["messages"])
+            session["agentMessages"] = messages
+            self._touch(session)
+            return list(messages)
 
     def get_character_action(self, session_id: str) -> dict[str, Any] | None:
         with self._lock:

@@ -57,11 +57,14 @@ def to_agent_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if role == "user":
             output.append({"role": "user", "timestamp": info.get("time", {}).get("created"), "content": [{"type": "text", "text": text}]})
         elif role == "assistant":
+            speaker = info.get("speaker") if isinstance(info.get("speaker"), dict) else {}
+            speaker_name = speaker.get("assistantName") or speaker.get("characterName")
+            assistant_text = f"{speaker_name}：{text}" if speaker_name else text
             output.append(
                 {
                     "role": "assistant",
                     "timestamp": info.get("time", {}).get("created"),
-                    "content": [{"type": "text", "text": text}],
+                    "content": [{"type": "text", "text": assistant_text}],
                     "api": "openai-completions",
                     "provider": info.get("providerID") or "openai",
                     "model": info.get("modelID") or "unknown",

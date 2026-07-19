@@ -20,7 +20,7 @@ core_logger = get_logger("MonAgent", "Core")
 CORS_HEADERS = {
     "access-control-allow-origin": "*",
     "access-control-allow-headers": "content-type, authorization",
-    "access-control-allow-methods": "GET,POST,PATCH,DELETE,OPTIONS",
+    "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
 }
 
 
@@ -45,6 +45,9 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         self.handle_request()
 
     def do_PATCH(self) -> None:
+        self.handle_request()
+
+    def do_PUT(self) -> None:
         self.handle_request()
 
     def log_message(self, format: str, *args: Any) -> None:

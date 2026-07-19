@@ -32,6 +32,18 @@ class CoreClient:
         if not token:
             return None
         assistant = self.get_current_assistant(token)
+        return self._runtime_config_from_assistant(token, assistant)
+
+    def resolve_runtime_config_for_assistant(
+        self,
+        token: str | None,
+        assistant_id: int | str,
+    ) -> dict[str, Any] | None:
+        if not token:
+            return None
+        return self._runtime_config_from_assistant(token, self.get_assistant(token, assistant_id))
+
+    def _runtime_config_from_assistant(self, token: str, assistant: dict[str, Any]) -> dict[str, Any]:
         character = assistant.get("character") if isinstance(assistant, dict) else None
         if not character:
             raise RuntimeError("当前助手没有绑定角色，请先在 Core 助手管理中绑定角色。")
@@ -58,6 +70,10 @@ class CoreClient:
                     "error": str(error),
                 }
         return {"assistant": assistant, "character": character, "aiEntity": ai_entity, "visionConfig": vision_config}
+
+    def get_assistant(self, token: str, assistant_id: int | str) -> dict[str, Any]:
+        raw = self._request(f"/api/assistants/{urllib.parse.quote(str(assistant_id))}/", token)
+        return raw if isinstance(raw, dict) else {}
 
     def get_default_assistant(self, token: str) -> dict[str, Any]:
         raw = self._request("/api/assistants/default/", token)
@@ -97,17 +113,46 @@ class CoreClient:
     def sync_agent_session(self, token: str | None, session: dict[str, Any], core: dict[str, Any] | None = None) -> Any:
         if not token:
             return None
+        participant_ids = [
+            item for item in session.get("participantAssistantIDs", [])
+            if isinstance(item, (int, str)) and str(item).strip()
+        ]
+        primary_assistant_id = participant_ids[0] if participant_ids else ((core or {}).get("assistant") or {}).get("id")
+        primary_character_id = None
+        for participant in session.get("participants", []):
+            if participant.get("assistantID") == primary_assistant_id:
+                primary_character_id = participant.get("characterID")
+                break
+        if primary_character_id is None:
+            primary_character_id = ((core or {}).get("character") or {}).get("id")
         payload = {
             "source": "monagent",
             "external_session_id": session["id"],
-            "assistant": ((core or {}).get("assistant") or {}).get("id"),
-            "character": ((core or {}).get("character") or {}).get("id"),
+            "assistant": primary_assistant_id,
+            "character": primary_character_id,
             "title": session.get("title"),
+            "mode": session.get("mode") or "companion",
+            "director_policy": session.get("directorPolicy") or {},
             "session_payload": session,
             "status": "active",
             "last_message_at": to_storage_iso(session.get("time", {}).get("updated", now_ms())),
         }
         return self._request("/api/agent/sessions/", token, method="POST", payload=payload)
+
+    def update_agent_session_participants(
+        self,
+        token: str,
+        session: dict[str, Any],
+        assistant_ids: list[int | str],
+    ) -> dict[str, Any]:
+        session_map = self.sync_agent_session(token, session)
+        raw = self._request(
+            f"/api/agent/sessions/{urllib.parse.quote(str(session_map['id']))}/participants/",
+            token,
+            method="PUT",
+            payload={"assistant_ids": assistant_ids, "mode": "companion"},
+        )
+        return raw if isinstance(raw, dict) else {}
 
     def list_agent_session_maps(self, token: str, limit: int = 50) -> list[dict[str, Any]]:
         raw = self._request(f"/api/agent/sessions/?limit={urllib.parse.quote(str(limit))}", token)
@@ -146,6 +191,10 @@ class CoreClient:
             "external_parent_message_id": "",
             "kind": "user" if message["info"].get("role") == "user" else "assistant",
             "message_payload": message,
+            "speaker_assistant": ((message.get("info") or {}).get("speaker") or {}).get("assistantID"),
+            "speaker_character": ((message.get("info") or {}).get("speaker") or {}).get("characterID"),
+            "turn_index": ((message.get("info") or {}).get("speaker") or {}).get("turnIndex"),
+            "orchestration_payload": ((message.get("info") or {}).get("orchestration") or {}),
             "tool_call_id": (first_tool_part or {}).get("id") or "",
             "sync_status": "synced",
         }
