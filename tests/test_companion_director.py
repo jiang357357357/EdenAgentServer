@@ -284,6 +284,8 @@ class CompanionDirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("domain=game", prompt)
         self.assertIn("observationStrategy=independent", prompt)
         self.assertIn("是否读取屏幕仍由你根据任务需要自行判断", prompt)
+        self.assertIn('<assistant-message speaker="莉莉安" beat="1">', prompt)
+        self.assertNotIn("莉莉安：那我想出去散步", prompt)
 
     def test_single_actor_prompt_has_no_director_or_multi_assistant_language(self) -> None:
         prompt = actor_task_prompt(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from html import escape
 from typing import Any
 
 
@@ -28,6 +29,21 @@ def message_compaction(message: dict[str, Any]) -> dict[str, Any] | None:
 
 def is_hidden_message(message: dict[str, Any]) -> bool:
     return bool(message.get("info", {}).get("hidden"))
+
+
+def assistant_context_text(
+    text: str,
+    speaker_name: str | None,
+    *,
+    beat_index: int | None = None,
+) -> str:
+    """Keep speaker identity as metadata without creating a dialogue prefix to imitate."""
+    if not speaker_name:
+        return text
+    attributes = [f'speaker="{escape(str(speaker_name), quote=True)}"']
+    if beat_index is not None:
+        attributes.append(f'beat="{beat_index}"')
+    return f"<assistant-message {' '.join(attributes)}>\n{text}\n</assistant-message>"
 
 
 def title_from_messages(messages: list[dict[str, Any]]) -> str | None:
@@ -59,7 +75,7 @@ def to_agent_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         elif role == "assistant":
             speaker = info.get("speaker") if isinstance(info.get("speaker"), dict) else {}
             speaker_name = speaker.get("assistantName") or speaker.get("characterName")
-            assistant_text = f"{speaker_name}：{text}" if speaker_name else text
+            assistant_text = assistant_context_text(text, speaker_name)
             output.append(
                 {
                     "role": "assistant",

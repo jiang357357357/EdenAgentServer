@@ -64,6 +64,33 @@ class StoreTest(unittest.TestCase):
         self.assertEqual([message["info"]["role"] for message in messages], ["assistant", "user"])
         self.assertEqual(messages[0]["parts"][0]["text"], "尚未同步到 Core 的助手回复")
 
+    def test_assistant_speaker_is_structured_metadata_not_dialogue_prefix(self):
+        store = SessionStore()
+        session = store.create_session("")
+        assistant_info = {
+            "id": "msg_assistant_lily",
+            "role": "assistant",
+            "speaker": {"assistantName": "莉莉安"},
+            "time": {"created": 2, "completed": 3},
+        }
+        store.upsert_message(session["id"], assistant_info)
+        store.upsert_part(
+            session["id"],
+            {
+                "id": "part_assistant_lily",
+                "messageID": "msg_assistant_lily",
+                "sessionID": session["id"],
+                "type": "text",
+                "text": "托腮，歪头想了想",
+            },
+        )
+        store.rebuild_agent_messages(session["id"])
+
+        context_text = store.require_session(session["id"])["agentMessages"][0]["content"][0]["text"]
+        self.assertIn('<assistant-message speaker="莉莉安">', context_text)
+        self.assertIn("托腮，歪头想了想", context_text)
+        self.assertNotIn("莉莉安：", context_text)
+
     def test_compaction_message_is_hidden_and_resets_agent_context(self):
         store = SessionStore()
         session = store.create_session("")

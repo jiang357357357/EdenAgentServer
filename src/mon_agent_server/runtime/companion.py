@@ -9,6 +9,7 @@ from typing import Any
 from ..ids import create_id
 from ..llm.sync import call_openai_compatible
 from ..logging import get_logger
+from ..store.serializers import assistant_context_text
 from .config import RuntimeModelConfig
 
 logger = get_logger("MonAgent", "CompanionDirector")
@@ -369,7 +370,11 @@ def actor_task_prompt(
     execution: DirectorExecution | None = None,
 ) -> str:
     companion_context = "\n".join(
-        f"[节拍 {item.get('beatIndex')}] {item.get('assistantName') or '助手'}：{item.get('reply') or ''}"
+        assistant_context_text(
+            str(item.get("reply") or ""),
+            str(item.get("assistantName") or "助手"),
+            beat_index=item.get("beatIndex") if isinstance(item.get("beatIndex"), int) else None,
+        )
         for item in previous_replies
         if str(item.get("reply") or "").strip()
     )
