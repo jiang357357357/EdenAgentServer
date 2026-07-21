@@ -54,7 +54,7 @@ def load_server_config(agent_root: Path | None = None) -> ServerConfig:
     )
 
     return ServerConfig(
-        host=os.environ.get("MON_AGENT_HOST") or config.get("server", "HOST", "0.0.0.0") or "0.0.0.0",
+        host=os.environ.get("MON_AGENT_HOST") or config.get("server", "HOST", "127.0.0.1") or "127.0.0.1",
         port=int(os.environ.get("MON_AGENT_PORT") or config.number("server", "PORT", 40092)),
         vite_port=config.number("server", "WEB_PORT", 40091),
         is_dev=not bool(os.environ.get("MON_AGENT_PROD")),

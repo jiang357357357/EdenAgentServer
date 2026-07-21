@@ -5,6 +5,7 @@ from mon_agent_server.app import is_agent_api_route
 from mon_agent_server.http.routes.model import _model_option
 from mon_agent_server.http.routes.self_awake import handle_self_awake
 from mon_agent_server.http.routes.sessions import handle_sessions
+from mon_agent_server.core import CoreAuthenticationExpiredError
 from mon_agent_server.http_server import AgentRequestHandler
 from mon_agent_server.llm.models import core_model
 
@@ -21,6 +22,13 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(AgentRequestHandler.strip_api_prefix("/api/tools/status"), "/tools/status")
         self.assertEqual(AgentRequestHandler.strip_api_prefix("/api"), "/")
         self.assertEqual(AgentRequestHandler.strip_api_prefix("/events"), "/events")
+
+    def test_event_stream_requires_core_token(self):
+        handler = object.__new__(AgentRequestHandler)
+        handler.headers = {}
+
+        with self.assertRaises(CoreAuthenticationExpiredError):
+            handler.event_stream_response()
 
     def test_internal_self_awake_rejects_non_monos_event(self):
         class Handler:

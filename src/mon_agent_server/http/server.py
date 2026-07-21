@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from ..app import AppState, is_agent_api_route
-from ..core import CoreAuthenticationExpiredError
+from ..core import CoreAuthenticationExpiredError, require_core_token
 from ..logging import get_logger
 from .routes import API_ROUTE_HANDLERS
 
@@ -93,6 +93,8 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         self.json_response({"error": "Not found"}, 404)
 
     def event_stream_response(self) -> None:
+        token = require_core_token(self.headers)
+        self.app.core_client.get_user_profile(token)
         self.send_response(HTTPStatus.OK)
         self.send_header("content-type", "text/event-stream")
         self.send_header("cache-control", "no-cache")
