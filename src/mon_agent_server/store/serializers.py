@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from html import escape
 from typing import Any
 
 
@@ -31,21 +30,6 @@ def is_hidden_message(message: dict[str, Any]) -> bool:
     return bool(message.get("info", {}).get("hidden"))
 
 
-def assistant_context_text(
-    text: str,
-    speaker_name: str | None,
-    *,
-    beat_index: int | None = None,
-) -> str:
-    """Keep speaker identity as metadata without creating a dialogue prefix to imitate."""
-    if not speaker_name:
-        return text
-    attributes = [f'speaker="{escape(str(speaker_name), quote=True)}"']
-    if beat_index is not None:
-        attributes.append(f'beat="{beat_index}"')
-    return f"<assistant-message {' '.join(attributes)}>\n{text}\n</assistant-message>"
-
-
 def title_from_messages(messages: list[dict[str, Any]]) -> str | None:
     for message in messages:
         if is_hidden_message(message):
@@ -74,13 +58,12 @@ def to_agent_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             output.append({"role": "user", "timestamp": info.get("time", {}).get("created"), "content": [{"type": "text", "text": text}]})
         elif role == "assistant":
             speaker = info.get("speaker") if isinstance(info.get("speaker"), dict) else {}
-            speaker_name = speaker.get("assistantName") or speaker.get("characterName")
-            assistant_text = assistant_context_text(text, speaker_name)
             output.append(
                 {
                     "role": "assistant",
                     "timestamp": info.get("time", {}).get("created"),
-                    "content": [{"type": "text", "text": assistant_text}],
+                    "content": [{"type": "text", "text": text}],
+                    "contextSpeaker": dict(speaker) if speaker else None,
                     "api": "openai-completions",
                     "provider": info.get("providerID") or "openai",
                     "model": info.get("modelID") or "unknown",

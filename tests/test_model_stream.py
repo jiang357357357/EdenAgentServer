@@ -134,6 +134,42 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(messages[2]["content"][1]["type"], "image_url")
         self.assertEqual(messages[2]["content"][1]["image_url"]["url"], "data:image/png;base64,YQ==")
 
+    def test_tool_continuation_replays_reasoning_in_original_provider_field(self):
+        messages = to_openai_messages(
+            {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "provider": "opencode-go",
+                        "content": [
+                            {
+                                "type": "thinking",
+                                "thinking": "I should inspect the screen.",
+                                "thinkingSignature": "reasoning_content",
+                            },
+                            {
+                                "type": "toolCall",
+                                "id": "call_1",
+                                "name": "analyze_screen",
+                                "arguments": {"question": "当前游戏是什么？"},
+                            },
+                        ],
+                    },
+                    {
+                        "role": "toolResult",
+                        "toolCallId": "call_1",
+                        "toolName": "analyze_screen",
+                        "content": [{"type": "text", "text": "Riddle Joker"}],
+                    },
+                ]
+            }
+        )
+
+        self.assertEqual(messages[0]["reasoning_content"], "I should inspect the screen.")
+        self.assertIsNone(messages[0]["content"])
+        self.assertEqual(messages[0]["tool_calls"][0]["id"], "call_1")
+        self.assertEqual(messages[1]["tool_call_id"], "call_1")
+
     async def test_openai_compatible_streams_text_deltas(self):
         captured = {}
 
@@ -199,6 +235,32 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1]["message"]["stopReason"], "tool_calls")
         self.assertEqual(events[-1]["message"]["content"][0]["name"], "read")
         self.assertEqual(events[-1]["message"]["content"][0]["arguments"], {"path": "a.txt"})
+
+    async def test_openai_compatible_preserves_reasoning_field_signature(self):
+        def fake_urlopen(_request, timeout):
+            return FakeStreamResponse(
+                [
+                    b'data: {"choices":[{"delta":{"reasoning":"inspect"},"finish_reason":null}]}\n\n',
+                    b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}\n\n',
+                    b"data: [DONE]\n\n",
+                ]
+            )
+
+        model = {
+            "id": "mimo-v2.5",
+            "api": "openai-completions",
+            "provider": "opencode-go",
+            "baseUrl": "https://opencode.ai/zen/go/v1",
+        }
+        context = {"messages": [{"role": "user", "content": [{"type": "text", "text": "read"}]}], "tools": []}
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test"})
+            events = [event async for event in stream]
+
+        thinking = events[-1]["message"]["content"][0]
+        self.assertEqual(thinking["thinking"], "inspect")
+        self.assertEqual(thinking["thinkingSignature"], "reasoning_content")
 
 
 if __name__ == "__main__":

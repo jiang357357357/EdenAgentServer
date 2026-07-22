@@ -42,6 +42,23 @@ def assistant_message_from_response(model: dict[str, Any], response: dict[str, A
     choice = (response.get("choices") or [{}])[0]
     raw_message = choice.get("message") or {}
     content_blocks: list[dict[str, Any]] = []
+    reasoning_field = next(
+        (
+            field
+            for field in ("reasoning_content", "reasoning", "reasoning_text")
+            if isinstance(raw_message.get(field), str) and raw_message.get(field)
+        ),
+        None,
+    )
+    if reasoning_field:
+        signature = "reasoning_content" if model.get("provider") == "opencode-go" and reasoning_field == "reasoning" else reasoning_field
+        content_blocks.append(
+            {
+                "type": "thinking",
+                "thinking": raw_message[reasoning_field],
+                "thinkingSignature": signature,
+            }
+        )
     text = raw_message.get("content")
     if isinstance(text, str) and text:
         content_blocks.append({"type": "text", "text": text})

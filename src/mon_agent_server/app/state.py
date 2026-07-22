@@ -54,7 +54,7 @@ class AppState:
     def hydrate(self, token: str, session_id: str) -> None:
         data = self.core_client.get_agent_session(token, session_id)
         self.store.upsert_session_info(data["info"])
-        self.store.hydrate_messages(session_id, data["messages"])
+        self.store.hydrate_messages(session_id, data["messages"], data.get("agentMessages"))
         self.hydrated_session_ids.add(session_id)
 
     def ensure_hydrated(self, token: str, session_id: str) -> None:

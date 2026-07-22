@@ -37,6 +37,72 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(stored["info"]["title"], "第一条")
         self.assertEqual(stored["agentMessages"][0]["role"], "user")
 
+    def test_structured_agent_messages_are_canonical_after_hydration(self):
+        store = SessionStore()
+        session = store.create_session("")
+        projection = {
+            "info": {"id": "msg_assistant", "role": "assistant", "time": {"created": 1, "completed": 2}},
+            "parts": [
+                {
+                    "id": "call_1",
+                    "messageID": "msg_assistant",
+                    "sessionID": session["id"],
+                    "type": "tool",
+                    "tool": "read",
+                    "state": {"status": "completed", "input": {"path": "a.txt"}, "output": "内容"},
+                },
+                {
+                    "id": "text_1",
+                    "messageID": "msg_assistant",
+                    "sessionID": session["id"],
+                    "type": "text",
+                    "text": "读取完成。",
+                },
+            ],
+        }
+        canonical = [
+            {
+                "role": "assistant",
+                "content": [{"type": "toolCall", "id": "call_1", "name": "read", "arguments": {"path": "a.txt"}}],
+                "timestamp": 1,
+            },
+            {
+                "role": "toolResult",
+                "toolCallId": "call_1",
+                "toolName": "read",
+                "content": [{"type": "text", "text": "内容"}],
+                "isError": False,
+                "timestamp": 2,
+            },
+        ]
+
+        store.hydrate_messages(session["id"], [projection], canonical)
+
+        self.assertEqual(store.require_session(session["id"])["agentMessages"], canonical)
+
+    def test_append_agent_message_keeps_tool_call_and_result_pair(self):
+        store = SessionStore()
+        session = store.create_session("")
+        assistant = {
+            "role": "assistant",
+            "content": [{"type": "toolCall", "id": "call_1", "name": "bash", "arguments": {"command": "pwd"}}],
+        }
+        result = {
+            "role": "toolResult",
+            "toolCallId": "call_1",
+            "toolName": "bash",
+            "content": [{"type": "text", "text": "/workspace"}],
+            "isError": False,
+        }
+
+        store.append_agent_message(session["id"], assistant)
+        store.append_agent_message(session["id"], result)
+
+        saved = store.require_session(session["id"])["agentMessages"]
+        self.assertEqual(saved[0]["content"][0]["id"], saved[1]["toolCallId"])
+        assistant["content"][0]["arguments"]["command"] = "mutated"
+        self.assertEqual(saved[0]["content"][0]["arguments"]["command"], "pwd")
+
     def test_hydration_preserves_local_assistant_missing_from_core(self):
         store = SessionStore()
         session = store.create_session("")
@@ -64,7 +130,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual([message["info"]["role"] for message in messages], ["assistant", "user"])
         self.assertEqual(messages[0]["parts"][0]["text"], "尚未同步到 Core 的助手回复")
 
-    def test_assistant_speaker_is_structured_metadata_not_dialogue_prefix(self):
+    def test_assistant_speaker_stays_metadata_and_does_not_modify_text(self):
         store = SessionStore()
         session = store.create_session("")
         assistant_info = {
@@ -86,10 +152,9 @@ class StoreTest(unittest.TestCase):
         )
         store.rebuild_agent_messages(session["id"])
 
-        context_text = store.require_session(session["id"])["agentMessages"][0]["content"][0]["text"]
-        self.assertIn('<assistant-message speaker="莉莉安">', context_text)
-        self.assertIn("托腮，歪头想了想", context_text)
-        self.assertNotIn("莉莉安：", context_text)
+        context_message = store.require_session(session["id"])["agentMessages"][0]
+        self.assertEqual(context_message["content"][0]["text"], "托腮，歪头想了想")
+        self.assertEqual(context_message["contextSpeaker"]["assistantName"], "莉莉安")
 
     def test_compaction_message_is_hidden_and_resets_agent_context(self):
         store = SessionStore()

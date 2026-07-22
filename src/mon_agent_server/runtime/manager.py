@@ -529,7 +529,6 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         text = "\n".join(
             str(part.get("text") or "") for part in (message or {}).get("parts", []) if part.get("type") == "text"
         ).strip()
-        self.store.rebuild_agent_messages(session_id)
         return message, text
 
     async def _run_prompt(self, session_id: str, parts: list[dict[str, Any]], auth_token: str | None) -> None:
@@ -946,9 +945,13 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         if not auth_token:
             return
         session = self.store.require_session(session_id)
+        persisted_session = {
+            **session["info"],
+            "agentMessages": list(session.get("agentMessages") or []),
+        }
         for attempt in range(len(_CORE_SYNC_RETRY_DELAYS) + 1):
             try:
-                await asyncio.to_thread(self.core_client.sync_agent_session, auth_token, session["info"], core)
+                await asyncio.to_thread(self.core_client.sync_agent_session, auth_token, persisted_session, core)
                 return
             except CoreAuthenticationExpiredError:
                 raise
@@ -972,13 +975,17 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         if not auth_token:
             return
         session = self.store.require_session(session_id)
+        persisted_session = {
+            **session["info"],
+            "agentMessages": list(session.get("agentMessages") or []),
+        }
         message_id = str(message.get("info", {}).get("id") or "unknown")
         for attempt in range(len(_CORE_SYNC_RETRY_DELAYS) + 1):
             try:
                 result = await asyncio.to_thread(
                     self.core_client.sync_agent_message,
                     auth_token,
-                    session["info"],
+                    persisted_session,
                     message,
                     core,
                 )

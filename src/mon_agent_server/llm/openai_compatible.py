@@ -104,12 +104,25 @@ def _stream_openai_compatible_sync(
                 if choice.get("finish_reason"):
                     finish_reason = choice.get("finish_reason")
 
-                reasoning_delta = delta.get("reasoning_content") or delta.get("reasoning") or delta.get("thinking")
+                reasoning_field = next(
+                    (
+                        field
+                        for field in ("reasoning_content", "reasoning", "reasoning_text")
+                        if isinstance(delta.get(field), str) and delta.get(field)
+                    ),
+                    None,
+                )
+                reasoning_delta = delta.get(reasoning_field) if reasoning_field else None
                 if isinstance(reasoning_delta, str) and reasoning_delta:
                     content = partial.setdefault("content", [])
                     if thinking_index is None:
                         thinking_index = len(content)
-                        content.append({"type": "thinking", "thinking": ""})
+                        signature = (
+                            "reasoning_content"
+                            if model.get("provider") == "opencode-go" and reasoning_field == "reasoning"
+                            else reasoning_field
+                        )
+                        content.append({"type": "thinking", "thinking": "", "thinkingSignature": signature})
                         push_partial({"type": "thinking_start", "contentIndex": thinking_index})
                     content[thinking_index]["thinking"] += reasoning_delta
                     push_partial({"type": "thinking_delta", "contentIndex": thinking_index, "delta": reasoning_delta})
@@ -186,12 +199,25 @@ def _stream_openai_compatible_sync(
                     if choice.get("finish_reason"):
                         finish_reason = choice.get("finish_reason")
 
-                    reasoning_delta = delta.get("reasoning_content") or delta.get("reasoning") or delta.get("thinking")
+                    reasoning_field = next(
+                        (
+                            field
+                            for field in ("reasoning_content", "reasoning", "reasoning_text")
+                            if isinstance(delta.get(field), str) and delta.get(field)
+                        ),
+                        None,
+                    )
+                    reasoning_delta = delta.get(reasoning_field) if reasoning_field else None
                     if isinstance(reasoning_delta, str) and reasoning_delta:
                         content = partial.setdefault("content", [])
                         if thinking_index is None:
                             thinking_index = len(content)
-                            content.append({"type": "thinking", "thinking": ""})
+                            signature = (
+                                "reasoning_content"
+                                if model.get("provider") == "opencode-go" and reasoning_field == "reasoning"
+                                else reasoning_field
+                            )
+                            content.append({"type": "thinking", "thinking": "", "thinkingSignature": signature})
                             push_partial({"type": "thinking_start", "contentIndex": thinking_index})
                         content[thinking_index]["thinking"] += reasoning_delta
                         push_partial({"type": "thinking_delta", "contentIndex": thinking_index, "delta": reasoning_delta})

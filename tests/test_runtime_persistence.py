@@ -21,6 +21,15 @@ class TransientCoreClient:
         return response
 
 
+class RecordingCoreClient:
+    def __init__(self):
+        self.session = None
+
+    def sync_agent_message(self, _token, session, _message, _core):
+        self.session = session
+        return {"sync_status": "synced"}
+
+
 class EventRecorder:
     def __init__(self):
         self.events = []
@@ -62,6 +71,31 @@ class RuntimePersistenceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(core.message_attempts, 2)
         self.assertEqual(sleep.await_count, 1)
+
+    async def test_message_sync_carries_canonical_context_to_core(self):
+        core = RecordingCoreClient()
+        runtime, session, message = self.runtime_with(core)
+        runtime.store.set_agent_messages(
+            session["id"],
+            [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "toolCall", "id": "call_1", "name": "read", "arguments": {}}],
+                },
+                {
+                    "role": "toolResult",
+                    "toolCallId": "call_1",
+                    "toolName": "read",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "isError": False,
+                },
+            ],
+        )
+
+        await runtime.sync_core_message(session["id"], message, "token", None)
+
+        self.assertEqual(core.session["agentMessages"][0]["content"][0]["id"], "call_1")
+        self.assertEqual(core.session["agentMessages"][1]["toolCallId"], "call_1")
 
     def test_ssl_eof_has_readable_runtime_summary(self):
         error = RuntimeError(
@@ -132,6 +166,40 @@ class RuntimePersistenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(info["speaker"]["assistantID"], 2)
         self.assertEqual(info["orchestration"]["planID"], "plan_1")
         self.assertEqual(info["orchestration"]["replyToBeat"], 0)
+
+    def test_agent_events_persist_structured_tool_history_independently_from_ui_parts(self):
+        store = SessionStore()
+        session = store.create_session("工具历史")
+        emitter = EmitterHarness(store)
+        run_state = RunState()
+        assistant = {
+            "role": "assistant",
+            "timestamp": 1,
+            "provider": "provider",
+            "model": "model",
+            "content": [
+                {"type": "thinking", "thinking": "需要读取文件"},
+                {"type": "toolCall", "id": "call_read", "name": "read", "arguments": {"path": "a.txt"}},
+            ],
+        }
+        tool_result = {
+            "role": "toolResult",
+            "toolCallId": "call_read",
+            "toolName": "read",
+            "content": [{"type": "text", "text": "文件内容"}],
+            "details": {"path": "a.txt"},
+            "isError": False,
+            "timestamp": 2,
+        }
+
+        emitter.handle_agent_event(session["id"], {"type": "message_end", "message": assistant}, run_state)
+        emitter.handle_agent_event(session["id"], {"type": "message_end", "message": tool_result}, run_state)
+
+        context = store.require_session(session["id"])["agentMessages"]
+        self.assertEqual([message["role"] for message in context], ["assistant", "toolResult"])
+        self.assertEqual(context[0]["content"][1]["id"], context[1]["toolCallId"])
+        visible = store.list_messages(session["id"])[0]
+        self.assertTrue(any(part["type"] == "tool" for part in visible["parts"]))
 
 
 if __name__ == "__main__":

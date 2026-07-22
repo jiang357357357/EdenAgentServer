@@ -97,6 +97,9 @@ class RuntimeEmitterMixin:
     def handle_agent_event(self, session_id: str, event: dict[str, Any], run_state: RunState) -> None:
         event_type = event.get("type")
         message = event.get("message") or {}
+        if event_type == "message_end" and message.get("role") == "user":
+            self.store.append_agent_message(session_id, message)
+            return
         if event_type == "message_start" and message.get("role") == "assistant":
             run_state.assistant_message_id = run_state.assistant_message_id or create_id("msg")
             run_state.assistant_created_at = run_state.assistant_created_at or message.get("timestamp") or now_ms()
@@ -108,8 +111,15 @@ class RuntimeEmitterMixin:
             return
         if event_type == "message_end" and message.get("role") == "assistant":
             self.upsert_assistant(session_id, message, run_state, done=True)
+            context_message = dict(message)
+            if run_state.speaker:
+                context_message["contextSpeaker"] = dict(run_state.speaker)
+            self.store.append_agent_message(session_id, context_message)
             if message.get("errorMessage"):
                 run_state.error_message = str(message.get("errorMessage"))
+            return
+        if event_type == "message_end" and message.get("role") == "toolResult":
+            self.store.append_agent_message(session_id, message)
             return
         if event_type == "tool_execution_start":
             call_id = event.get("toolCallId")

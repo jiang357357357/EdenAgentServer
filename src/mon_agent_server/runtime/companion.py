@@ -9,7 +9,6 @@ from typing import Any
 from ..ids import create_id
 from ..llm.sync import call_openai_compatible
 from ..logging import get_logger
-from ..store.serializers import assistant_context_text
 from .config import RuntimeModelConfig
 
 logger = get_logger("MonAgent", "CompanionDirector")
@@ -370,11 +369,7 @@ def actor_task_prompt(
     execution: DirectorExecution | None = None,
 ) -> str:
     companion_context = "\n".join(
-        assistant_context_text(
-            str(item.get("reply") or ""),
-            str(item.get("assistantName") or "助手"),
-            beat_index=item.get("beatIndex") if isinstance(item.get("beatIndex"), int) else None,
-        )
+        f"节拍 {item.get('beatIndex')}：{item.get('assistantName') or '助手'} 已完成发言"
         for item in previous_replies
         if str(item.get("reply") or "").strip()
     )
@@ -423,8 +418,8 @@ def actor_task_prompt(
         )
     if companion_context:
         sections.append(
-            f"本轮已经发生的公开对话：\n{companion_context}\n"
-            "请回应最新对话关系，不要复述已有内容，也不要重复执行已经产生副作用的工具操作。"
+            f"本轮发言顺序：\n{companion_context}\n"
+            "具体公开回复已经存在于标准会话历史中。请回应最新对话关系，不要复述已有内容，也不要重复执行已经产生副作用的工具操作。"
         )
     if has_spoken:
         sections.append("你本轮已经发言过；这次是再次接话，应回应伙伴刚才的新内容并推进或收束互动，不能重新回答用户一遍。")

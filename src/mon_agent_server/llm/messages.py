@@ -44,10 +44,15 @@ def to_openai_messages(context: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
         elif role == "assistant":
-            text = "\n".join(block.get("text", "") for block in message.get("content", []) if isinstance(block, dict) and block.get("type") == "text")
+            content_blocks = [block for block in message.get("content", []) if isinstance(block, dict)]
+            text = "".join(
+                str(block.get("text") or "")
+                for block in content_blocks
+                if block.get("type") == "text" and str(block.get("text") or "").strip()
+            )
             tool_calls = []
-            for block in message.get("content", []):
-                if isinstance(block, dict) and block.get("type") == "toolCall":
+            for block in content_blocks:
+                if block.get("type") == "toolCall":
                     tool_calls.append(
                         {
                             "id": block.get("id"),
@@ -59,6 +64,17 @@ def to_openai_messages(context: dict[str, Any]) -> list[dict[str, Any]]:
                         }
                     )
             item: dict[str, Any] = {"role": "assistant", "content": text or None}
+            thinking_blocks = [
+                block
+                for block in content_blocks
+                if block.get("type") == "thinking" and str(block.get("thinking") or "").strip()
+            ]
+            if thinking_blocks:
+                signature = thinking_blocks[0].get("thinkingSignature")
+                if message.get("provider") == "opencode-go" and signature == "reasoning":
+                    signature = "reasoning_content"
+                if isinstance(signature, str) and signature:
+                    item[signature] = "\n".join(str(block.get("thinking") or "") for block in thinking_blocks)
             if tool_calls:
                 item["tool_calls"] = tool_calls
             messages.append(item)

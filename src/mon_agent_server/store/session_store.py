@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import threading
 from typing import Any
 
@@ -104,7 +105,12 @@ class SessionStore:
             ]
             return list(visible[-limit:])
 
-    def hydrate_messages(self, session_id: str, messages: list[dict[str, Any]]) -> None:
+    def hydrate_messages(
+        self,
+        session_id: str,
+        messages: list[dict[str, Any]],
+        agent_messages: list[dict[str, Any]] | None = None,
+    ) -> None:
         with self._lock:
             session = self.require_session(session_id)
             merged_by_id = {
@@ -143,7 +149,11 @@ class SessionStore:
                 merged_by_id.values(),
                 key=lambda item: item.get("info", {}).get("time", {}).get("created", 0),
             )
-            session["agentMessages"] = to_agent_messages(session["messages"])
+            session["agentMessages"] = (
+                deepcopy(agent_messages)
+                if agent_messages is not None
+                else to_agent_messages(session["messages"])
+            )
             latest = max((item.get("info", {}).get("time", {}).get("created", 0) for item in session["messages"]), default=0)
             if latest:
                 session["info"]["time"]["updated"] = max(session["info"]["time"]["updated"], latest)
@@ -266,7 +276,17 @@ class SessionStore:
     def set_agent_messages(self, session_id: str, messages: list[dict[str, Any]]) -> None:
         with self._lock:
             session = self.require_session(session_id)
-            session["agentMessages"] = messages
+            session["agentMessages"] = deepcopy(messages)
+            self._touch(session)
+
+    def append_agent_message(self, session_id: str, message: dict[str, Any]) -> None:
+        """Persist one finalized AgentCore message as canonical model context."""
+        role = message.get("role")
+        if role not in {"user", "assistant", "toolResult"}:
+            return
+        with self._lock:
+            session = self.require_session(session_id)
+            session["agentMessages"].append(deepcopy(message))
             self._touch(session)
 
     def rebuild_agent_messages(self, session_id: str) -> list[dict[str, Any]]:
