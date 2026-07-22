@@ -386,11 +386,7 @@ def actor_task_prompt(
         )
     has_spoken = any(str(item.get("assistantID")) == str(beat.assistant_id) for item in previous_replies)
     if scene is None or execution is None:
-        sections = [
-            "你正在进行单助手用户会话。直接理解并完成用户当前请求，不需要进行多人编排或角色报幕。",
-            "前端已经单独显示你的头像和名字；正文直接开始说话，禁止以自己的姓名、角色名或“助手：”作为开头。",
-            f"用户消息：\n{user_text}",
-        ]
+        sections = [user_text]
     else:
         sections = [
             "你正在参与一个多人智能体会话。请保持自己的角色身份，并根据导演判断在自然互动与任务执行之间采用合适表达。",

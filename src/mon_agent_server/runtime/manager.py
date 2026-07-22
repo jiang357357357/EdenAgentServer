@@ -187,7 +187,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         if len(instructions) > 2_000:
             raise RuntimeError("压缩要求不能超过 2000 个字符。")
         session = self.store.require_session(session_id)
-        if not session.get("agentMessages"):
+        if not self.store.context_messages(session_id):
             raise RuntimeError("当前会话没有可压缩的上下文。")
         with self._lock:
             if session_id in self._running:
@@ -254,7 +254,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         try:
             runtime_config = await self._resolve_runtime_config(auth_token, primary_participant.get("assistantID"))
             await self.sync_core_session(session_id, auth_token, runtime_config.core)
-            messages = list(session.get("agentMessages") or [])
+            messages = self.store.context_messages(session_id)
             before_tokens = int(estimate_context_tokens(messages).get("tokens") or 0)
             compacted_messages = await self.compact_agent_messages_if_needed(
                 session_id,
@@ -475,9 +475,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         def system_prompt_for(active_skill_ids: tuple[str, ...]) -> str:
             return build_agent_system_prompt(
                 runtime_config.core,
-                current_character_action=self.store.get_character_action(session_id) or current_character_action,
                 supports_images=runtime_config.supports_images,
-                environment=environment,
                 active_skill_ids=active_skill_ids,
             )
 
@@ -485,7 +483,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             session_id,
             run_state,
             runtime_config,
-            list(self.store.require_session(session_id).get("agentMessages") or []),
+            self.store.context_messages(session_id),
             user_message["info"]["time"]["created"],
             auth_token,
         )
@@ -512,20 +510,39 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         if runtime_config.supports_images:
             content.extend(images_from_parts(parts))
         content.append({"type": "text", "text": task_prompt})
+        self.store.append_session_event(
+            session_id,
+            "turn_started",
+            {"speaker": run_state.speaker, "orchestration": run_state.orchestration},
+            turn_id=run_state.run_id,
+        )
         self.emit_runtime_thinking(session_id, run_state, "正在发送给 Python AgentCore，并等待模型回复。")
         await agent.prompt({"role": "user", "timestamp": now_ms(), "content": content})
         if run_state.error_message:
             raise RuntimeError(run_state.error_message)
         self.emit_runtime_thinking(session_id, run_state, "回复生成完成。", done=True)
+        self.store.append_session_event(
+            session_id,
+            "turn_completed",
+            {"finalMessageID": run_state.final_assistant_message_id},
+            turn_id=run_state.run_id,
+        )
         message = next(
             (
-                item for item in self.store.require_session(session_id)["messages"]
-                if item["info"]["id"] == run_state.assistant_message_id
+                item for item in self.store.list_messages(session_id, limit=10_000, include_compactions=True)
+                if item["info"]["id"] == run_state.final_assistant_message_id
             ),
             None,
         )
-        if message:
-            await self.sync_core_message(session_id, message, auth_token, runtime_config.core)
+        if auth_token:
+            visible_messages = self.store.list_messages(session_id, limit=10_000, include_compactions=True)
+            for assistant_message_id in run_state.assistant_message_ids:
+                persisted = next(
+                    (item for item in visible_messages if item["info"]["id"] == assistant_message_id),
+                    None,
+                )
+                if persisted:
+                    await self.sync_core_message(session_id, persisted, auth_token, runtime_config.core)
         text = "\n".join(
             str(part.get("text") or "") for part in (message or {}).get("parts", []) if part.get("type") == "text"
         ).strip()
@@ -574,7 +591,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 director_config=director_config,
                 policy=session["info"].get("directorPolicy") or {},
                 conversation_context=_director_conversation_context(
-                    session.get("messages") or [],
+                    self.store.list_messages(session_id, limit=10_000),
                     user_message["info"]["id"],
                 ),
                 attachment_context=attachment_context(prompt_files(parts), director_config.supports_images),
@@ -758,13 +775,19 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             if active_run_state is None:
                 active_run_state = RunState(speaker=participants[0] if participants else {})
             if active_run_state:
+                self.store.append_session_event(
+                    session_id,
+                    "turn_failed",
+                    {"error": runtime_error_summary(error)},
+                    turn_id=active_run_state.run_id,
+                )
                 self.emit_runtime_thinking(session_id, active_run_state, runtime_error_summary(error), done=True)
                 self.finish_runtime_message(session_id, active_run_state, error=error)
-                if auth_token and active_config and active_run_state.assistant_message_id:
+                if auth_token and active_config and active_run_state.final_assistant_message_id:
                     message = next(
                         (
-                            item for item in self.store.require_session(session_id)["messages"]
-                            if item["info"]["id"] == active_run_state.assistant_message_id
+                            item for item in self.store.list_messages(session_id, limit=10_000, include_compactions=True)
+                            if item["info"]["id"] == active_run_state.final_assistant_message_id
                         ),
                         None,
                     )
@@ -877,7 +900,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         }
         compacted_messages = build_session_context([*entries, compaction_entry])["messages"]
         tokens_after = int(estimate_context_tokens(compacted_messages).get("tokens") or 0)
-        self.store.set_agent_messages(session_id, compacted_messages)
+        self.store.replace_context_messages(session_id, compacted_messages)
         hidden_message = self.store.append_compaction_message(
             session_id,
             summary=compaction_entry["summary"],
@@ -947,7 +970,8 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         session = self.store.require_session(session_id)
         persisted_session = {
             **session["info"],
-            "agentMessages": list(session.get("agentMessages") or []),
+            "modelEvents": self.store.model_events(session_id),
+            "characterRuntime": self.store.get_character_action(session_id),
         }
         for attempt in range(len(_CORE_SYNC_RETRY_DELAYS) + 1):
             try:
@@ -977,7 +1001,8 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         session = self.store.require_session(session_id)
         persisted_session = {
             **session["info"],
-            "agentMessages": list(session.get("agentMessages") or []),
+            "modelEvents": self.store.model_events(session_id),
+            "characterRuntime": self.store.get_character_action(session_id),
         }
         message_id = str(message.get("info", {}).get("id") or "unknown")
         for attempt in range(len(_CORE_SYNC_RETRY_DELAYS) + 1):

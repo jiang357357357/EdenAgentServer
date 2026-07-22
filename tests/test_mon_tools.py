@@ -293,7 +293,7 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(core.action_args, ("token-character", 9))
             self.assertIsNone(core.group_args)
             self.assertIn("当前角色：江梦晚", listing["content"][0]["text"])
-            self.assertIn("当前前端显示动作：思考", listing["content"][0]["text"])
+            self.assertIn("当前角色动作：思考", listing["content"][0]["text"])
             self.assertIn("开心", listing["content"][0]["text"])
             self.assertIn("思考 [当前]", listing["content"][0]["text"])
 

@@ -294,7 +294,7 @@ class CompanionDirectorTests(unittest.IsolatedAsyncioTestCase):
             DirectorBeat(1, "直接回应用户"),
             [],
         )
-        self.assertIn("单助手用户会话", prompt)
+        self.assertEqual(prompt, "请帮我修复代码")
         self.assertNotIn("导演意图", prompt)
         self.assertNotIn("多人智能体会话", prompt)
 

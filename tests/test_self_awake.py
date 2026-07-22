@@ -336,19 +336,13 @@ class SelfAwakePromptTest(unittest.TestCase):
                 },
             },
             source="user_chat",
-            current_character_action={
-                "action": {"name": "思考", "intent": "think", "static_image_url": "/media/actions/think.png"},
-                "imageUrl": "/media/actions/think.png",
-                "source": "default",
-            },
         )
 
         self.assertIn("视觉偏好：static", prompt)
         self.assertIn("可用视觉动作", prompt)
         self.assertNotIn("视觉动作组", prompt)
-        self.assertIn("当前前端显示动作：思考", prompt)
-        self.assertIn("当前动作意图：think", prompt)
-        self.assertIn("每轮生成最终正文前必须先调用 switch_character_action 一次", prompt)
+        self.assertNotIn("当前前端显示动作", prompt)
+        self.assertIn("只有期望动作、表情或动效与当前角色状态不同时", prompt)
         self.assertIn("立绘动作、表情符号、立绘动效", prompt)
         self.assertIn("生气、叹气、无语、低落、困倦", prompt)
 
@@ -375,10 +369,6 @@ class SelfAwakePromptTest(unittest.TestCase):
         prompt = build_agent_system_prompt(
             {"character": {"name": "江梦晚", "visual_actions": actions}},
             source="user_chat",
-            current_character_action={
-                "action": {"name": "动作1", "intent": "intent_1"},
-                "imageUrl": "http://127.0.0.1:40011/media/actions/1.png",
-            },
         )
 
         for index in range(1, 14):
@@ -390,10 +380,10 @@ class SelfAwakePromptTest(unittest.TestCase):
         self.assertNotIn("已截断", prompt)
         self.assertNotIn("当前动作图片", prompt)
 
-    def test_user_chat_task_prompt_requires_character_action_adjustment(self):
+    def test_user_chat_task_prompt_preserves_original_text(self):
         prompt = build_user_chat_task_prompt("你好")
 
-        self.assertIn("在最终回复正文前先调用 switch_character_action", prompt)
+        self.assertEqual(prompt, "你好")
 
     def test_self_awake_prompt_requires_exactly_one_notification(self):
         prompt = build_self_awake_task_prompt({"trigger": "test"})
@@ -404,31 +394,11 @@ class SelfAwakePromptTest(unittest.TestCase):
         self.assertIn("priority=high", prompt)
         self.assertIn("user_activity 是桌面端上报的原始事实快照，不是行为判断", prompt)
 
-    def test_agent_system_prompt_includes_current_runtime_environment(self):
-        prompt = build_agent_system_prompt(
-            {"character": {"name": "江梦晚"}},
-            environment={
-                "timezone": "Asia/Shanghai",
-                "locale": "zh-CN",
-                "location": {"country": "中国", "region": "湖北省", "city": "武汉市", "district": "江夏区"},
-                "runtime": {
-                    "operating_system": "Linux",
-                    "distribution": "Linux Mint 22.1",
-                    "os_release": "6.14.0-37-generic",
-                    "architecture": "x86_64",
-                    "desktop_environment": "X-Cinnamon",
-                    "desktop_session": "cinnamon",
-                    "session_type": "x11",
-                },
-            },
-        )
+    def test_agent_system_prompt_does_not_repeat_runtime_environment(self):
+        prompt = build_agent_system_prompt({"character": {"name": "江梦晚"}})
 
-        self.assertIn("# 当前环境感知", prompt)
-        self.assertIn("操作系统：Linux Mint 22.1（Linux），内核 6.14.0-37-generic", prompt)
-        self.assertIn("桌面环境：X-Cinnamon，桌面会话：cinnamon", prompt)
-        self.assertIn("图形会话类型：x11", prompt)
-        self.assertIn("配置位置：中国 湖北省 武汉市 江夏区", prompt)
-        self.assertIn("不要根据界面外观猜测冲突的操作系统", prompt)
+        self.assertNotIn("# 当前环境感知", prompt)
+        self.assertNotIn("Linux Mint", prompt)
 
     def test_start_self_awake_run_async_returns_accepted_without_running_inline(self):
         with patch("mon_agent_server.self_awake.threading.Thread") as thread_cls:

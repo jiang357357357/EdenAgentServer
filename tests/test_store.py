@@ -18,7 +18,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(len(message["parts"]), 2)
         self.assertEqual(store.list_messages(session["id"], 10)[0]["info"]["id"], message["info"]["id"])
 
-    def test_session_store_hydrates_agent_messages(self):
+    def test_ui_hydration_does_not_create_model_context(self):
         store = SessionStore()
         session = store.create_session("")
         store.hydrate_messages(
@@ -35,7 +35,7 @@ class StoreTest(unittest.TestCase):
 
         stored = store.require_session(session["id"])
         self.assertEqual(stored["info"]["title"], "第一条")
-        self.assertEqual(stored["agentMessages"][0]["role"], "user")
+        self.assertEqual(store.context_messages(session["id"]), [])
 
     def test_structured_agent_messages_are_canonical_after_hydration(self):
         store = SessionStore()
@@ -76,11 +76,13 @@ class StoreTest(unittest.TestCase):
             },
         ]
 
-        store.hydrate_messages(session["id"], [projection], canonical)
+        store.replace_context_messages(session["id"], canonical)
+        events = store.model_events(session["id"])
+        store.hydrate_messages(session["id"], [projection], events)
 
-        self.assertEqual(store.require_session(session["id"])["agentMessages"], canonical)
+        self.assertEqual(store.context_messages(session["id"]), canonical)
 
-    def test_append_agent_message_keeps_tool_call_and_result_pair(self):
+    def test_append_context_message_keeps_tool_call_and_result_pair(self):
         store = SessionStore()
         session = store.create_session("")
         assistant = {
@@ -95,10 +97,10 @@ class StoreTest(unittest.TestCase):
             "isError": False,
         }
 
-        store.append_agent_message(session["id"], assistant)
-        store.append_agent_message(session["id"], result)
+        store.append_context_message(session["id"], assistant)
+        store.append_context_message(session["id"], result)
 
-        saved = store.require_session(session["id"])["agentMessages"]
+        saved = store.context_messages(session["id"])
         self.assertEqual(saved[0]["content"][0]["id"], saved[1]["toolCallId"])
         assistant["content"][0]["arguments"]["command"] = "mutated"
         self.assertEqual(saved[0]["content"][0]["arguments"]["command"], "pwd")
@@ -130,7 +132,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual([message["info"]["role"] for message in messages], ["assistant", "user"])
         self.assertEqual(messages[0]["parts"][0]["text"], "尚未同步到 Core 的助手回复")
 
-    def test_assistant_speaker_stays_metadata_and_does_not_modify_text(self):
+    def test_ui_assistant_text_does_not_enter_context(self):
         store = SessionStore()
         session = store.create_session("")
         assistant_info = {
@@ -150,11 +152,7 @@ class StoreTest(unittest.TestCase):
                 "text": "托腮，歪头想了想",
             },
         )
-        store.rebuild_agent_messages(session["id"])
-
-        context_message = store.require_session(session["id"])["agentMessages"][0]
-        self.assertEqual(context_message["content"][0]["text"], "托腮，歪头想了想")
-        self.assertEqual(context_message["contextSpeaker"]["assistantName"], "莉莉安")
+        self.assertEqual(store.context_messages(session["id"]), [])
 
     def test_compaction_message_is_hidden_and_resets_agent_context(self):
         store = SessionStore()
@@ -175,16 +173,22 @@ class StoreTest(unittest.TestCase):
             "info": {"id": "msg_new", "role": "user", "time": {"created": 3, "completed": 3}},
             "parts": [{"id": "part_new", "messageID": "msg_new", "sessionID": session["id"], "type": "text", "text": "新消息"}],
         }
-        store.hydrate_messages(session["id"], [old_message, compaction_message, new_message])
+        canonical = [
+            {"role": "compactionSummary", "summary": "旧消息已经摘要。"},
+            {"role": "user", "content": [{"type": "text", "text": "新消息"}]},
+        ]
+        store.replace_context_messages(session["id"], canonical)
+        events = store.model_events(session["id"])
+        store.hydrate_messages(session["id"], [old_message, compaction_message, new_message], events)
 
         self.assertEqual([message["info"]["id"] for message in store.list_messages(session["id"], 10)], ["msg_old", "msg_new"])
         self.assertEqual(
             [message["info"]["id"] for message in store.list_messages(session["id"], 10, include_compactions=True)],
             ["msg_old", compaction_message["info"]["id"], "msg_new"],
         )
-        stored = store.require_session(session["id"])
-        self.assertEqual([message["role"] for message in stored["agentMessages"]], ["compactionSummary", "user"])
-        self.assertEqual(stored["agentMessages"][0]["summary"], "旧消息已经摘要。")
+        stored = store.context_messages(session["id"])
+        self.assertEqual([message["role"] for message in stored], ["compactionSummary", "user"])
+        self.assertEqual(stored[0]["summary"], "旧消息已经摘要。")
 
 
 if __name__ == "__main__":

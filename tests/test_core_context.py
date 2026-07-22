@@ -8,7 +8,7 @@ class CoreContextTest(unittest.TestCase):
         client = CoreClient("http://core.test")
         captured = {}
         client._request = lambda _path, _token, **kwargs: captured.update(kwargs["payload"]) or {"id": 1}
-        context = [{"role": "toolResult", "toolCallId": "call_1", "content": [], "isError": False}]
+        context = [{"id": "evt_1", "sequence": 1, "type": "turn_started", "payload": {"runID": "run_1"}}]
 
         client.sync_agent_session(
             "token",
@@ -16,26 +16,29 @@ class CoreContextTest(unittest.TestCase):
                 "id": "ses_1",
                 "title": "测试",
                 "time": {"updated": 1},
-                "agentMessages": context,
+                "modelEvents": context,
+                "characterRuntime": {"characterID": 7, "imageUrl": "/media/action.png"},
             },
         )
 
-        self.assertEqual(captured["agent_context_payload"], context)
-        self.assertNotIn("agentMessages", captured["session_payload"])
+        self.assertEqual(captured["session_events_payload"], context)
+        self.assertNotIn("modelEvents", captured["session_payload"])
+        self.assertEqual(captured["session_payload"]["characterRuntime"]["characterID"], 7)
 
     def test_session_restore_returns_canonical_context(self):
         client = CoreClient("http://core.test")
         context = [
             {
-                "role": "assistant",
-                "content": [{"type": "toolCall", "id": "call_1", "name": "read", "arguments": {}}],
+                "id": "evt_1",
+                "sequence": 1,
+                "type": "assistant_message",
+                "payload": {"role": "assistant", "content": [{"type": "toolCall", "id": "call_1", "name": "read"}]},
             },
             {
-                "role": "toolResult",
-                "toolCallId": "call_1",
-                "toolName": "read",
-                "content": [{"type": "text", "text": "ok"}],
-                "isError": False,
+                "id": "evt_2",
+                "sequence": 2,
+                "type": "tool_result",
+                "payload": {"role": "toolResult", "toolCallId": "call_1", "content": "ok"},
             },
         ]
         client._request = lambda _path, _token, **_kwargs: {
@@ -47,16 +50,23 @@ class CoreContextTest(unittest.TestCase):
                     "created_at": "2026-01-01T00:00:00+00:00",
                     "updated_at": "2026-01-01T00:00:00+00:00",
                     "messages": [],
-                    "agent_context_payload": context,
+                    "session_payload": {
+                        "id": "ses_1",
+                        "title": "测试",
+                        "time": {"created": 1, "updated": 1},
+                        "characterRuntime": {"characterID": 7, "imageUrl": "/media/action.png"},
+                    },
+                    "session_events_payload": context,
                 }
             ]
         }
 
         restored = client.get_agent_session("token", "ses_1")
 
-        self.assertEqual(restored["agentMessages"], context)
+        self.assertEqual(restored["modelEvents"], context)
+        self.assertEqual(restored["info"]["characterRuntime"]["imageUrl"], "/media/action.png")
 
-    def test_empty_context_uses_legacy_projection_fallback(self):
+    def test_empty_event_stream_stays_empty(self):
         client = CoreClient("http://core.test")
         client._request = lambda _path, _token, **_kwargs: {
             "results": [
@@ -67,14 +77,14 @@ class CoreContextTest(unittest.TestCase):
                     "created_at": "2026-01-01T00:00:00+00:00",
                     "updated_at": "2026-01-01T00:00:00+00:00",
                     "messages": [],
-                    "agent_context_payload": [],
+                    "session_events_payload": [],
                 }
             ]
         }
 
         restored = client.get_agent_session("token", "ses_old")
 
-        self.assertIsNone(restored["agentMessages"])
+        self.assertEqual(restored["modelEvents"], [])
 
 
 if __name__ == "__main__":

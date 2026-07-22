@@ -122,79 +122,11 @@ def build_assistant_context_section(core: dict[str, Any] | None = None) -> str:
     name = _clean_prompt_text(assistant.get("name"), 400)
     if name:
         lines.append(f"当前助手：{name}")
-    description = _clean_prompt_text(assistant.get("description"), 1200)
-    if description:
-        lines.append(f"助手描述：{description}")
-    for key, label in [("instructions", "助手指令"), ("system_prompt", "助手补充提示"), ("prompt", "助手提示词"), ("role_prompt", "助手角色提示")]:
-        text = _clean_prompt_text(assistant.get(key), 1600)
-        if text:
-            lines.append(f"{label}：{text}")
-    return "\n".join(lines)
-
-
-def build_environment_awareness_section(environment: dict[str, Any] | None = None) -> str:
-    if not isinstance(environment, dict):
-        return ""
-    runtime = environment.get("runtime") if isinstance(environment.get("runtime"), dict) else {}
-    lines = [
-        "以下内容由本地运行时提供，是当前环境事实。分析屏幕时优先使用这些事实，不要根据界面外观猜测冲突的操作系统或桌面环境。"
-    ]
-    operating_system = _clean_prompt_text(runtime.get("operating_system"), 80)
-    distribution = _clean_prompt_text(runtime.get("distribution"), 160)
-    os_release = _clean_prompt_text(runtime.get("os_release"), 120)
-    if operating_system or distribution:
-        os_text = distribution or operating_system
-        if operating_system and operating_system.lower() != os_text.lower():
-            os_text = f"{os_text}（{operating_system}）"
-        if os_release:
-            os_text += f"，内核 {os_release}"
-        lines.append(f"操作系统：{os_text}")
-    architecture = _clean_prompt_text(runtime.get("architecture"), 80)
-    if architecture:
-        lines.append(f"系统架构：{architecture}")
-    desktop_environment = _clean_prompt_text(runtime.get("desktop_environment"), 120)
-    desktop_session = _clean_prompt_text(runtime.get("desktop_session"), 120)
-    if desktop_environment or desktop_session:
-        lines.append(f"桌面环境：{desktop_environment or desktop_session}，桌面会话：{desktop_session or '-'}")
-    session_type = _clean_prompt_text(runtime.get("session_type"), 80)
-    if session_type:
-        lines.append(f"图形会话类型：{session_type}")
-    timezone = _clean_prompt_text(environment.get("timezone"), 100)
-    locale = _clean_prompt_text(environment.get("locale"), 80)
-    if timezone or locale:
-        lines.append(f"时区：{timezone or '-'}，语言区域：{locale or '-'}")
-    location = environment.get("location") if isinstance(environment.get("location"), dict) else {}
-    location_text = " ".join(
-        str(location.get(key) or "").strip()
-        for key in ("country", "region", "city", "district")
-        if str(location.get(key) or "").strip()
-    )
-    if location_text:
-        lines.append(f"配置位置：{location_text}")
-    return "\n".join(lines) if len(lines) > 1 else ""
-
-
-def build_current_character_action_section(current_action: dict[str, Any] | None = None) -> str:
-    if not isinstance(current_action, dict):
-        return ""
-    action = current_action.get("action") if isinstance(current_action.get("action"), dict) else {}
-    group = current_action.get("group") if isinstance(current_action.get("group"), dict) else {}
-    lines: list[str] = []
-    action_name = _clean_prompt_text(action.get("name") or action.get("action_label") or current_action.get("actionName"), 300)
-    action_intent = _clean_prompt_text(action.get("intent") or current_action.get("intent"), 200)
-    if action_name or action_intent:
-        lines.append(f"当前前端显示动作：{action_name or '-'}")
-        if action_intent:
-            lines.append(f"当前动作意图：{action_intent}")
-        if group.get("name") or group.get("trigger"):
-            lines.append(f"当前动作组：{_clean_prompt_text(group.get('name') or '-', 300)} / 触发 {_clean_prompt_text(group.get('trigger') or '-', 200)}")
-        source = _clean_prompt_text(current_action.get("source"), 120)
-        if source:
-            lines.append(f"当前动作来源：{source}")
-        motion = _clean_prompt_text(current_action.get("motion"), 120)
-        effect = _clean_prompt_text(current_action.get("effect"), 120)
-        if motion or effect:
-            lines.append(f"最近角色演出：motion={motion or 'none'}，effect={effect or 'none'}")
+    # One authoritative instruction field. Multiple overlapping prompt fields
+    # made the same policy appear several times in every request.
+    text = _clean_prompt_text(assistant.get("instructions"), 2400)
+    if text:
+        lines.append(f"助手指令：{text}")
     return "\n".join(lines)
 
 
@@ -226,8 +158,7 @@ def _build_skill_aware_tool_section(
             "activate_skill 返回的技能说明是当前任务必须遵循的工作流；相关工具会从同一轮的下一次模型调用开始可用。不要猜测或直接调用尚未激活的工具。",
             "你可以直接使用 read、ls、grep、find 读取和搜索当前工作区；写文件、编辑或执行命令前先激活 workspace-development。",
             vision_instruction,
-            "如果当前角色有可用立绘动作，每轮生成最终正文前必须且只能调用一次 switch_character_action；需要确认准确动作名称时先调用 list_character_actions。",
-            "switch_character_action 的立绘动作、表情符号和立绘动效三个中文字段全部必填；平静表达时自主选择“无”，不需要换图时填写“保持当前”。",
+            "只有表达所需的角色动作与当前状态不同，才调用 switch_character_action；状态相同时不要重复调用。需要确认准确动作名称时先调用 list_character_actions。",
             "缺少继续执行所必需的信息、需要用户选择或确认边界时，使用 ask_user 展示问题卡片；闲聊或不影响继续的小问题可以直接回复。",
             "技能激活不等同于授权；写文件、执行命令和其他受控操作仍必须经过权限系统。",
             "工具被拒绝、拦截或失败后先调整方案，不重复调用完全相同的失败工具。",
@@ -278,14 +209,13 @@ def build_agent_tool_section(
             vision_instruction,
             "你可以使用 get_calendar_context 查询节日、农历和近期特殊日期；可以使用 get_weather 查询实时天气。",
             "当用户询问天气、温度、降水或出行影响时优先使用 get_weather；询问节日、农历、今天是什么日子时优先使用 get_calendar_context。",
-            "在用户对话中，角色表现是回复表达的一部分：如果当前角色有可用立绘动作，每轮生成最终正文前必须先调用 switch_character_action 一次；不需要向用户解释这次选择。",
-            "你会在上下文中看到当前前端显示动作；选择新动作时应参考当前动作，只有确实适合保持当前姿态时才重复选择同一个动作。",
+            "角色动作是可选表达能力。只有期望动作、表情或动效与当前角色状态不同时才调用 switch_character_action；普通回复不需要切换动作。",
             "switch_character_action 只接受三个必填中文字段：立绘动作、表情符号、立绘动效。你必须自主明确选择三项，不能省略，也不能使用英文内部代码。",
             "立绘动作填写角色实际拥有的动作名称，或明确填写“保持当前”；表情符号从“无、疑问、惊讶、汗滴、爱心、生气、叹气、无语、低落、困倦”中选择。",
             "立绘动效从“无、上下跳动、向前靠近、向后退开、左右摇晃、连续弹跳、轻微上下浮动、快速颤抖、垂直震动、轻微下沉、强调放大”中选择，它用于让静态立绘整体运动。",
             "表情符号和立绘动效都是短暂演出；普通平静表达应自主选择“无”，明显情绪或反应时再选择符合语境的效果。",
             "如果系统提示提供的可用立绘动作不足以确定准确名称，先调用 list_character_actions 查看，再调用 switch_character_action。",
-            "除非用户明确要求连续表演或动作测试，一轮对话只做一次常规角色动作切换。",
+            "除非用户明确要求连续表演或动作测试，同一轮不要重复提交相同角色状态。",
             "你可以使用 ask_user 向用户确认关键信息；如果本轮任务声明为后台或非交互任务，不要调用 ask_user 等待用户。",
             "你可以使用 create_memo/create_reminder/list_memos/complete_memo/archive_memo/snooze_memo 管理用户备忘录、提醒和待办；当用户说“提醒我”“记一下”“待办”时优先使用这些工具。",
             "你可以使用 notify_user 主动通知当前用户，通道只有 QQ 和外部邮件；channel=auto 时，priority=high 的重要事件优先发邮件，其他普通事件优先使用默认 QQBot/超级管理员。首选通道失败时会自动回退。",
@@ -308,9 +238,7 @@ def build_agent_tool_section(
 def build_agent_system_prompt(
     core: dict[str, Any] | None = None,
     source: str = "user_chat",
-    current_character_action: dict[str, Any] | None = None,
     supports_images: bool | None = None,
-    environment: dict[str, Any] | None = None,
     active_skill_ids: Iterable[str] | None = None,
 ) -> str:
     character = (core or {}).get("character")
@@ -321,12 +249,6 @@ def build_agent_system_prompt(
     assistant_context = build_assistant_context_section(core)
     if assistant_context:
         sections.extend(["# 助手配置", assistant_context])
-    environment_context = build_environment_awareness_section(environment)
-    if environment_context:
-        sections.extend(["# 当前环境感知", environment_context])
-    current_action_context = build_current_character_action_section(current_character_action)
-    if current_action_context and source != "self_awake":
-        sections.extend(["# 当前前端动作", current_action_context])
     sections.extend(
         [
             "# 语言",
@@ -358,16 +280,9 @@ def build_agent_system_prompt(
 
 
 def build_user_chat_task_prompt(text: str = "", attachment_context: str = "") -> str:
-    sections = [
-        "本轮事件来源：用户对话。",
-        "请理解用户当前消息，并在需要时使用工具完成任务。",
-        "如果当前角色有可用立绘动作，在最终回复正文前先调用 switch_character_action，使用三个必填中文字段自主选择立绘动作、表情符号和立绘动效。",
-        "如果用户要求提醒、备忘或待办，先调用 activate_skill 激活 memo-management，再使用对应工具保存用户可见记录；如果还需要后台未来醒来检查，再激活 self-awake。",
-    ]
-    if text.strip():
-        sections.append(f"用户消息：\n{text.strip()}")
+    sections = [text.strip()] if text.strip() else []
     if attachment_context.strip():
-        sections.append(f"附件上下文：\n{attachment_context.strip()}")
+        sections.append(attachment_context.strip())
     return "\n\n".join(sections)
 
 

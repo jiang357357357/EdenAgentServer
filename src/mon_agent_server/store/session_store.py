@@ -4,8 +4,9 @@ from copy import deepcopy
 import threading
 from typing import Any
 
+from ..context import ContextManager
 from ..ids import create_id, now_ms
-from .serializers import is_hidden_message, message_compaction, message_text, title_from_messages, to_agent_messages
+from .serializers import is_hidden_message, message_compaction, message_text, title_from_messages
 
 
 class SessionStore:
@@ -37,13 +38,19 @@ class SessionStore:
             "time": {"created": current, "updated": current},
         }
         with self._lock:
-            self._sessions[info["id"]] = {"info": info, "messages": [], "agentMessages": [], "characterAction": None}
+            self._sessions[info["id"]] = {
+                "info": info,
+                "messages": [],
+                "modelEvents": [],
+                "characterRuntime": None,
+            }
         return info
 
     def upsert_session_info(self, info: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             existing = self._sessions.get(info["id"], {})
             existing_info = existing.get("info", {})
+            incoming_runtime = info.get("characterRuntime") if isinstance(info.get("characterRuntime"), dict) else None
             merged = {
                 **existing_info,
                 **info,
@@ -52,8 +59,8 @@ class SessionStore:
             self._sessions[info["id"]] = {
                 "info": merged,
                 "messages": existing.get("messages", []),
-                "agentMessages": existing.get("agentMessages", []),
-                "characterAction": existing.get("characterAction"),
+                "modelEvents": existing.get("modelEvents", []),
+                "characterRuntime": incoming_runtime or existing.get("characterRuntime"),
             }
             return merged
 
@@ -109,7 +116,7 @@ class SessionStore:
         self,
         session_id: str,
         messages: list[dict[str, Any]],
-        agent_messages: list[dict[str, Any]] | None = None,
+        model_events: list[dict[str, Any]] | None = None,
     ) -> None:
         with self._lock:
             session = self.require_session(session_id)
@@ -149,11 +156,9 @@ class SessionStore:
                 merged_by_id.values(),
                 key=lambda item: item.get("info", {}).get("time", {}).get("created", 0),
             )
-            session["agentMessages"] = (
-                deepcopy(agent_messages)
-                if agent_messages is not None
-                else to_agent_messages(session["messages"])
-            )
+            # Display messages are only a UI projection. They must never be
+            # converted back into model context.
+            session["modelEvents"] = deepcopy(model_events or [])
             latest = max((item.get("info", {}).get("time", {}).get("created", 0) for item in session["messages"]), default=0)
             if latest:
                 session["info"]["time"]["updated"] = max(session["info"]["time"]["updated"], latest)
@@ -273,39 +278,75 @@ class SessionStore:
             self._touch(session)
         return message
 
-    def set_agent_messages(self, session_id: str, messages: list[dict[str, Any]]) -> None:
+    def context_messages(self, session_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return ContextManager.compile(self.require_session(session_id).get("modelEvents") or [])
+
+    def replace_context_messages(self, session_id: str, messages: list[dict[str, Any]]) -> None:
         with self._lock:
             session = self.require_session(session_id)
-            session["agentMessages"] = deepcopy(messages)
+            session["modelEvents"] = [
+                ContextManager.event_for_message(message, sequence=index + 1).dump()
+                for index, message in enumerate(messages)
+            ]
             self._touch(session)
 
-    def append_agent_message(self, session_id: str, message: dict[str, Any]) -> None:
-        """Persist one finalized AgentCore message as canonical model context."""
-        role = message.get("role")
-        if role not in {"user", "assistant", "toolResult"}:
-            return
+    def append_context_message(
+        self,
+        session_id: str,
+        message: dict[str, Any],
+        *,
+        turn_id: str | None = None,
+    ) -> dict[str, Any]:
         with self._lock:
             session = self.require_session(session_id)
-            session["agentMessages"].append(deepcopy(message))
+            sequence = len(session["modelEvents"]) + 1
+            event = ContextManager.event_for_message(message, sequence=sequence, turn_id=turn_id).dump()
+            session["modelEvents"].append(event)
             self._touch(session)
+            return deepcopy(event)
 
-    def rebuild_agent_messages(self, session_id: str) -> list[dict[str, Any]]:
+    def append_session_event(
+        self,
+        session_id: str,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        turn_id: str | None = None,
+    ) -> dict[str, Any]:
         with self._lock:
             session = self.require_session(session_id)
-            messages = to_agent_messages(session["messages"])
-            session["agentMessages"] = messages
+            event = {
+                "id": create_id("evt"),
+                "sequence": len(session["modelEvents"]) + 1,
+                "type": event_type,
+                "turnID": turn_id,
+                "payload": deepcopy(payload or {}),
+                "createdAt": now_ms(),
+            }
+            session["modelEvents"].append(event)
             self._touch(session)
-            return list(messages)
+            return deepcopy(event)
+
+    def model_events(self, session_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return deepcopy(self.require_session(session_id).get("modelEvents") or [])
 
     def get_character_action(self, session_id: str) -> dict[str, Any] | None:
         with self._lock:
-            state = self.require_session(session_id).get("characterAction")
+            state = self.require_session(session_id).get("characterRuntime")
             return dict(state) if isinstance(state, dict) else None
 
     def set_character_action(self, session_id: str, state: dict[str, Any] | None) -> dict[str, Any] | None:
         with self._lock:
             session = self.require_session(session_id)
-            session["characterAction"] = dict(state) if isinstance(state, dict) else None
+            previous = session.get("characterRuntime") if isinstance(session.get("characterRuntime"), dict) else {}
+            next_state = dict(state) if isinstance(state, dict) else None
+            if next_state is not None:
+                next_state["revision"] = int(previous.get("revision") or 0) + 1
+                next_state["updatedAt"] = now_ms()
+            session["characterRuntime"] = next_state
+            session["info"]["characterRuntime"] = deepcopy(next_state)
             self._touch(session)
             return self.get_character_action(session_id)
 

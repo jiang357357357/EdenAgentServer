@@ -125,7 +125,7 @@ class CoreClient:
                 break
         if primary_character_id is None:
             primary_character_id = ((core or {}).get("character") or {}).get("id")
-        session_payload = {key: value for key, value in session.items() if key != "agentMessages"}
+        session_payload = {key: value for key, value in session.items() if key != "modelEvents"}
         payload = {
             "source": "monagent",
             "external_session_id": session["id"],
@@ -135,7 +135,7 @@ class CoreClient:
             "mode": session.get("mode") or "companion",
             "director_policy": session.get("directorPolicy") or {},
             "session_payload": session_payload,
-            "agent_context_payload": session.get("agentMessages") or [],
+            "session_events_payload": session.get("modelEvents") or [],
             "status": "active",
             "last_message_at": to_storage_iso(session.get("time", {}).get("updated", now_ms())),
         }
@@ -175,11 +175,11 @@ class CoreClient:
                 self._request(f"/api/agent/sessions/{urllib.parse.quote(str(session_map['id']))}/messages/", token)
             )
         messages = sorted([message_from_map(item) for item in message_maps], key=lambda item: item["info"]["time"]["created"])
-        agent_messages = session_map.get("agent_context_payload")
+        model_events = session_map.get("session_events_payload")
         return {
             "info": info,
             "messages": messages,
-            "agentMessages": agent_messages if isinstance(agent_messages, list) and agent_messages else None,
+            "modelEvents": model_events if isinstance(model_events, list) else [],
         }
 
     def sync_agent_message(

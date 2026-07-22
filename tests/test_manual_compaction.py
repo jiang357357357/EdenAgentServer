@@ -42,7 +42,7 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
                 "content": [{"type": "text", "text": "最近问题"}],
             },
         ]
-        store.set_agent_messages(session_id, messages)
+        store.replace_context_messages(session_id, messages)
         runtime_config = RuntimeModelConfig(
             {"id": "gpt-test", "provider": "openai", "contextWindow": 128_000},
             "test-key",
@@ -85,7 +85,7 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(captured["instructions"], "重点保留项目路径")
         self.assertEqual(compacted[0]["role"], "compactionSummary")
-        self.assertEqual(saved["agentMessages"], compacted)
+        self.assertEqual(store.context_messages(session_id), compacted)
         self.assertFalse(compaction_part["auto"])
         self.assertFalse(compaction_part["overflow"])
         self.assertGreater(compaction_part["tokensBefore"], compaction_part["tokensAfter"])
@@ -109,7 +109,7 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
             {"role": "user", "timestamp": 3, "content": [{"type": "text", "text": "最近问题"}]},
             {"role": "assistant", "timestamp": 4, "content": [{"type": "text", "text": "最近回答"}]},
         ]
-        store.set_agent_messages(session_id, messages)
+        store.replace_context_messages(session_id, messages)
         runtime_config = RuntimeModelConfig(
             {"id": "gpt-test", "provider": "openai", "contextWindow": 128_000},
             "test-key",
@@ -149,7 +149,7 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
         store = SessionStore()
         session = store.create_session("压缩失败")
         session_id = session["id"]
-        store.set_agent_messages(
+        store.replace_context_messages(
             session_id,
             [{"role": "user", "timestamp": 1, "content": [{"type": "text", "text": "仅一轮"}]}],
         )

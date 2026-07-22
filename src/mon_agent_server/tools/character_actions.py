@@ -165,12 +165,12 @@ async def _load_character_action_data(context: MonToolContext) -> tuple[dict[str
 
 def _format_current_action(current: dict[str, Any] | None) -> str:
     if not current:
-        return "当前前端显示动作：未知。"
+        return "当前角色动作：未知。"
     action = current.get("action") if isinstance(current.get("action"), dict) else {}
     group = current.get("group") if isinstance(current.get("group"), dict) else {}
     return "\n".join(
         [
-            f"当前前端显示动作：{_action_label(action) or current.get('actionName') or '-'}",
+            f"当前角色动作：{_action_label(action) or current.get('actionName') or '-'}",
             f"   意图: {action.get('intent') or current.get('intent') or '-'} | 图片: {current.get('imageUrl') or _action_image_url(action) or '-'}",
             f"   动作组: {group.get('name') or '-'} | 来源: {current.get('source') or '-'}",
             f"   最近小动作: {current.get('motion') or 'none'} | 最近特效: {current.get('effect') or 'none'}",
@@ -237,6 +237,16 @@ def create_character_action_tools(context: MonToolContext) -> list[AgentTool]:
             raise RuntimeError(f"没有找到立绘动作“{selector}”。可用立绘动作：{available}；或选择“{HOLD_ACTION}”。")
         if not image_url:
             image_url = _action_image_url(action, str(character.get("visual_preference") or "static"))
+        current_action = current.get("action") if isinstance(current, dict) else None
+        if (
+            _same_action(action, current_action)
+            and str((current or {}).get("motion") or "none") == motion
+            and str((current or {}).get("effect") or "none") == effect
+        ):
+            return text_result(
+                "角色动作状态没有变化，保持当前显示。",
+                {"unchanged": True, "current": current},
+            )
         state = _character_action_state(
             context,
             character,

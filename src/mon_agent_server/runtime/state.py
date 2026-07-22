@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..ids import create_id
+
 
 class RunState:
     def __init__(
@@ -9,10 +11,13 @@ class RunState:
         speaker: dict[str, Any] | None = None,
         orchestration: dict[str, Any] | None = None,
     ) -> None:
+        self.run_id = create_id("run")
         self.assistant_message_id: str | None = None
         self.assistant_created_at: int | None = None
-        self.assistant_current_segment_index: int | None = None
-        self.assistant_next_segment_index = 0
+        self.assistant_message_ids: list[str] = []
+        self.final_assistant_message_id: str | None = None
+        self.runtime_message_id: str | None = None
+        self.runtime_created_at: int | None = None
         self.runtime_thinking_lines: list[str] = []
         self.error_message: str | None = None
         self.tool_inputs: dict[str, Any] = {}

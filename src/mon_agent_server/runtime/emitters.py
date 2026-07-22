@@ -26,15 +26,17 @@ def runtime_error_summary(error: Any) -> str:
 
 
 class RuntimeEmitterMixin:
-    def ensure_assistant_message(self, session_id: str, run_state: RunState) -> str:
-        message_id = run_state.assistant_message_id or create_id("msg")
-        created = run_state.assistant_created_at or now_ms()
-        run_state.assistant_message_id = message_id
-        run_state.assistant_created_at = created
+    def ensure_runtime_message(self, session_id: str, run_state: RunState) -> str:
+        message_id = run_state.runtime_message_id or create_id("msg")
+        created = run_state.runtime_created_at or now_ms()
+        run_state.runtime_message_id = message_id
+        run_state.runtime_created_at = created
         info = {
             "id": message_id,
             "role": "assistant",
             "agent": "python-agent-core",
+            "kind": "runtime",
+            "runID": run_state.run_id,
             "speaker": run_state.speaker,
             "orchestration": run_state.orchestration,
             "time": {"created": created},
@@ -44,8 +46,8 @@ class RuntimeEmitterMixin:
         return message_id
 
     def emit_runtime_thinking(self, session_id: str, run_state: RunState, line: str, done: bool = False) -> None:
-        message_id = self.ensure_assistant_message(session_id, run_state)
-        created = run_state.assistant_created_at or now_ms()
+        message_id = self.ensure_runtime_message(session_id, run_state)
+        created = run_state.runtime_created_at or now_ms()
         text = line.strip()
         if text:
             run_state.runtime_thinking_lines.append(text)
@@ -63,19 +65,23 @@ class RuntimeEmitterMixin:
                 "time": {"start": created, "end": now_ms() if done else None},
             },
         )
+        if done:
+            self.finish_runtime_message(session_id, run_state)
 
     def finish_runtime_message(self, session_id: str, run_state: RunState, error: Any | None = None) -> None:
-        if not run_state.assistant_message_id:
+        if not run_state.runtime_message_id:
             return
         completed = now_ms()
         info = {
-            "id": run_state.assistant_message_id,
+            "id": run_state.runtime_message_id,
             "role": "assistant",
             "agent": "python-agent-core",
+            "kind": "runtime",
+            "runID": run_state.run_id,
             "speaker": run_state.speaker,
             "orchestration": run_state.orchestration,
             "time": {
-                "created": run_state.assistant_created_at or completed,
+                "created": run_state.runtime_created_at or completed,
                 "completed": completed,
             },
             "error": {"name": "AgentError", "message": str(error)} if error is not None else None,
@@ -83,43 +89,42 @@ class RuntimeEmitterMixin:
         self.store.upsert_message(session_id, info)
         self.emit_message(session_id, info)
 
-    def begin_assistant_segment(self, run_state: RunState) -> int:
-        index = run_state.assistant_next_segment_index
-        run_state.assistant_current_segment_index = index
-        run_state.assistant_next_segment_index += 1
-        return index
-
-    def ensure_assistant_segment(self, run_state: RunState) -> int:
-        if run_state.assistant_current_segment_index is not None:
-            return run_state.assistant_current_segment_index
-        return self.begin_assistant_segment(run_state)
+    def begin_assistant_message(self, run_state: RunState, message: dict[str, Any]) -> str:
+        message_id = create_id("msg")
+        run_state.assistant_message_id = message_id
+        run_state.assistant_created_at = message.get("timestamp") or now_ms()
+        run_state.assistant_message_ids.append(message_id)
+        return message_id
 
     def handle_agent_event(self, session_id: str, event: dict[str, Any], run_state: RunState) -> None:
         event_type = event.get("type")
         message = event.get("message") or {}
         if event_type == "message_end" and message.get("role") == "user":
-            self.store.append_agent_message(session_id, message)
+            self.store.append_context_message(session_id, message, turn_id=run_state.run_id)
             return
         if event_type == "message_start" and message.get("role") == "assistant":
-            run_state.assistant_message_id = run_state.assistant_message_id or create_id("msg")
-            run_state.assistant_created_at = run_state.assistant_created_at or message.get("timestamp") or now_ms()
-            self.begin_assistant_segment(run_state)
+            self.begin_assistant_message(run_state, message)
             self.upsert_assistant(session_id, message, run_state, done=False)
             return
         if event_type == "message_update" and message.get("role") == "assistant":
             self.upsert_assistant(session_id, message, run_state, done=False)
             return
         if event_type == "message_end" and message.get("role") == "assistant":
+            if not run_state.assistant_message_id:
+                self.begin_assistant_message(run_state, message)
             self.upsert_assistant(session_id, message, run_state, done=True)
+            has_tool_calls = any(block.get("type") == "toolCall" for block in (message.get("content") or []))
+            if not has_tool_calls:
+                run_state.final_assistant_message_id = run_state.assistant_message_id
             context_message = dict(message)
             if run_state.speaker:
                 context_message["contextSpeaker"] = dict(run_state.speaker)
-            self.store.append_agent_message(session_id, context_message)
+            self.store.append_context_message(session_id, context_message, turn_id=run_state.run_id)
             if message.get("errorMessage"):
                 run_state.error_message = str(message.get("errorMessage"))
             return
         if event_type == "message_end" and message.get("role") == "toolResult":
-            self.store.append_agent_message(session_id, message)
+            self.store.append_context_message(session_id, message, turn_id=run_state.run_id)
             return
         if event_type == "tool_execution_start":
             call_id = event.get("toolCallId")
@@ -156,11 +161,15 @@ class RuntimeEmitterMixin:
         created = run_state.assistant_created_at or message.get("timestamp") or now_ms()
         run_state.assistant_message_id = message_id
         run_state.assistant_created_at = created
-        segment_index = self.ensure_assistant_segment(run_state)
+        has_tool_calls = any(block.get("type") == "toolCall" for block in (message.get("content") or []))
         info = {
             "id": message_id,
             "role": "assistant",
             "agent": "python-agent-core",
+            "kind": "model",
+            "runID": run_state.run_id,
+            "phase": "tool" if has_tool_calls else "final" if done else "streaming",
+            "final": bool(done and not has_tool_calls),
             "speaker": run_state.speaker,
             "orchestration": run_state.orchestration,
             "modelID": message.get("model"),
@@ -172,11 +181,12 @@ class RuntimeEmitterMixin:
         self.emit_message(session_id, info)
         for index, block in enumerate(message.get("content") or []):
             if block.get("type") == "text":
+                part_id = f"{message_id}_text_{index}"
                 self.emit_text_part(
                     session_id,
                     run_state,
                     {
-                        "id": f"{message_id}_seg_{segment_index}_text_{index}",
+                        "id": part_id,
                         "messageID": message_id,
                         "sessionID": session_id,
                         "type": "text",
@@ -189,7 +199,7 @@ class RuntimeEmitterMixin:
                     session_id,
                     run_state,
                     {
-                        "id": f"{message_id}_seg_{segment_index}_reasoning_{index}",
+                        "id": f"{message_id}_reasoning_{index}",
                         "messageID": message_id,
                         "sessionID": session_id,
                         "type": "reasoning",

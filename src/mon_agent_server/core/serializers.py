@@ -111,6 +111,7 @@ def session_from_map(item: dict[str, Any]) -> dict[str, Any]:
         or (payload or {}).get("participantAssistantIDs")
         or ([item.get("assistant")] if item.get("assistant") else []),
         "directorRuns": director_runs or (payload or {}).get("directorRuns") or [],
+        "characterRuntime": (payload or {}).get("characterRuntime") if isinstance((payload or {}).get("characterRuntime"), dict) else None,
         "time": {"created": created, "updated": updated},
     }
 

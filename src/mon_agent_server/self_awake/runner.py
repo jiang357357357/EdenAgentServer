@@ -199,7 +199,6 @@ async def run_self_awake_agent(
             prompt_core,
             source="self_awake",
             supports_images=runtime_config.supports_images,
-            environment=context.get("environment") if isinstance(context.get("environment"), dict) else None,
             active_skill_ids=active_skill_ids,
         )
 

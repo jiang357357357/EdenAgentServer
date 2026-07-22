@@ -75,7 +75,7 @@ class RuntimePersistenceTest(unittest.IsolatedAsyncioTestCase):
     async def test_message_sync_carries_canonical_context_to_core(self):
         core = RecordingCoreClient()
         runtime, session, message = self.runtime_with(core)
-        runtime.store.set_agent_messages(
+        runtime.store.replace_context_messages(
             session["id"],
             [
                 {
@@ -94,8 +94,8 @@ class RuntimePersistenceTest(unittest.IsolatedAsyncioTestCase):
 
         await runtime.sync_core_message(session["id"], message, "token", None)
 
-        self.assertEqual(core.session["agentMessages"][0]["content"][0]["id"], "call_1")
-        self.assertEqual(core.session["agentMessages"][1]["toolCallId"], "call_1")
+        self.assertEqual(core.session["modelEvents"][0]["payload"]["content"][0]["id"], "call_1")
+        self.assertEqual(core.session["modelEvents"][1]["payload"]["toolCallId"], "call_1")
 
     def test_ssl_eof_has_readable_runtime_summary(self):
         error = RuntimeError(
@@ -103,6 +103,88 @@ class RuntimePersistenceTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(runtime_error_summary(error), "模型连接失败：安全连接被远端提前断开。")
+
+    def test_tool_loop_keeps_each_assistant_response_as_an_independent_message(self):
+        store = SessionStore()
+        session = store.create_session("累计回复")
+        emitter = EmitterHarness(store)
+        run_state = RunState()
+
+        for timestamp, text in ((1, "……请便。"), (2, "……请便。 莉莉安确实很擅长这种事。")):
+            message = {
+                "role": "assistant",
+                "timestamp": timestamp,
+                "provider": "provider",
+                "model": "model",
+                "content": [{"type": "text", "text": text}],
+            }
+            emitter.handle_agent_event(session["id"], {"type": "message_start", "message": message}, run_state)
+            emitter.handle_agent_event(session["id"], {"type": "message_end", "message": message}, run_state)
+
+        messages = store.list_messages(session["id"])
+        visible_parts = [
+            part["text"]
+            for item in messages
+            for part in item["parts"]
+            if part["type"] == "text"
+        ]
+        raw_context = store.context_messages(session["id"])
+        self.assertEqual(len(messages), 2)
+        self.assertNotEqual(messages[0]["info"]["id"], messages[1]["info"]["id"])
+        self.assertEqual(visible_parts, ["……请便。", "……请便。 莉莉安确实很擅长这种事。"])
+        self.assertEqual(run_state.final_assistant_message_id, messages[1]["info"]["id"])
+        self.assertEqual(raw_context[1]["content"][0]["text"], "……请便。 莉莉安确实很擅长这种事。")
+
+    def test_runtime_trace_is_persisted_separately_from_model_messages(self):
+        store = SessionStore()
+        session = store.create_session("运行过程")
+        emitter = EmitterHarness(store)
+        run_state = RunState()
+
+        emitter.emit_runtime_thinking(session["id"], run_state, "正在运行。")
+        message = {
+            "role": "assistant",
+            "timestamp": 2,
+            "provider": "provider",
+            "model": "model",
+            "content": [{"type": "text", "text": "最终回复。"}],
+        }
+        emitter.handle_agent_event(session["id"], {"type": "message_start", "message": message}, run_state)
+        emitter.handle_agent_event(session["id"], {"type": "message_end", "message": message}, run_state)
+        emitter.emit_runtime_thinking(session["id"], run_state, "完成。", done=True)
+
+        messages = store.list_messages(session["id"])
+        self.assertEqual([item["info"].get("kind") for item in messages], ["runtime", "model"])
+        self.assertEqual(messages[0]["info"]["runID"], messages[1]["info"]["runID"])
+        self.assertEqual(messages[0]["info"]["time"].get("completed"), messages[0]["parts"][0]["time"]["end"])
+        self.assertEqual(run_state.final_assistant_message_id, messages[1]["info"]["id"])
+
+    def test_tool_call_message_is_intermediate_and_plain_message_is_final(self):
+        store = SessionStore()
+        session = store.create_session("终止语义")
+        emitter = EmitterHarness(store)
+        run_state = RunState()
+        tool_message = {
+            "role": "assistant",
+            "timestamp": 1,
+            "content": [{"type": "toolCall", "id": "call_1", "name": "read", "arguments": {}}],
+        }
+        final_message = {
+            "role": "assistant",
+            "timestamp": 2,
+            "content": [{"type": "text", "text": "读取完成。"}],
+        }
+
+        for message in (tool_message, final_message):
+            emitter.handle_agent_event(session["id"], {"type": "message_start", "message": message}, run_state)
+            emitter.handle_agent_event(session["id"], {"type": "message_end", "message": message}, run_state)
+
+        messages = store.list_messages(session["id"])
+        self.assertEqual(messages[0]["info"]["phase"], "tool")
+        self.assertFalse(messages[0]["info"]["final"])
+        self.assertEqual(messages[1]["info"]["phase"], "final")
+        self.assertTrue(messages[1]["info"]["final"])
+        self.assertEqual(run_state.final_assistant_message_id, messages[1]["info"]["id"])
 
     def test_agent_error_is_kept_on_message_and_run_state(self):
         store = SessionStore()
@@ -195,7 +277,7 @@ class RuntimePersistenceTest(unittest.IsolatedAsyncioTestCase):
         emitter.handle_agent_event(session["id"], {"type": "message_end", "message": assistant}, run_state)
         emitter.handle_agent_event(session["id"], {"type": "message_end", "message": tool_result}, run_state)
 
-        context = store.require_session(session["id"])["agentMessages"]
+        context = store.context_messages(session["id"])
         self.assertEqual([message["role"] for message in context], ["assistant", "toolResult"])
         self.assertEqual(context[0]["content"][1]["id"], context[1]["toolCallId"])
         visible = store.list_messages(session["id"])[0]
