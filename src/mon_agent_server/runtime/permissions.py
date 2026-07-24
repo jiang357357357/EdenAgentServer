@@ -28,6 +28,8 @@ class RuntimePermissionMixin:
     @staticmethod
     def permission_pattern(tool_name: str, args: Any) -> str:
         if isinstance(args, dict):
+            if tool_name == "apply_patch" and isinstance(args.get("_paths"), list):
+                return ", ".join(str(path) for path in args["_paths"])
             for key in ["path", "url", "query", "command"]:
                 if isinstance(args.get(key), str):
                     return args[key]

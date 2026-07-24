@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,8 @@ from mon_agent_server.self_awake import (
     start_self_awake_run_async,
 )
 from mon_agent_server.self_awake.permissions import self_awake_before_tool_call
+from mon_agent_server.self_awake.contract import normalize_self_awake_request
+from mon_agent_server.self_awake.runner import run_self_awake
 
 
 class FakeConfig:
@@ -156,6 +159,29 @@ class DuplicateNotifyAgent(FakeAgent):
 
 
 class SelfAwakePromptTest(unittest.TestCase):
+    def test_run_self_awake_preserves_enrichment_error(self):
+        with patch(
+            "mon_agent_server.self_awake.runner.enrich_self_awake_request",
+            side_effect=ValueError("enrichment failed"),
+        ):
+            with self.assertRaisesRegex(ValueError, "enrichment failed"):
+                asyncio.run(run_self_awake({}, FakeApp(), "token"))
+
+    def test_v1_contract_preserves_stable_job_identity(self):
+        request = normalize_self_awake_request(
+            {
+                "schema_version": "self-awake.v1",
+                "job_id": "job-1",
+                "event_id": "event-1",
+                "idempotency_key": "key-1",
+                "context": {"event": {"source": "monos", "event_id": "event-1"}},
+            }
+        )
+
+        self.assertEqual(request["job_id"], "job-1")
+        self.assertEqual(request["event_id"], "event-1")
+        self.assertEqual(request["idempotency_key"], "key-1")
+
     def test_list_self_awake_runs_page_calculates_missing_total_pages(self):
         client = CoreClient("http://core.test")
         client._request = lambda *_args, **_kwargs: {"count": 41, "results": []}
@@ -409,6 +435,23 @@ class SelfAwakePromptTest(unittest.TestCase):
         self.assertTrue(str(accepted["async_run_id"]).startswith("selfawakejob_"))
         thread_cls.assert_called_once()
         thread_cls.return_value.start.assert_called_once()
+
+    def test_start_self_awake_run_async_deduplicates_same_v1_job(self):
+        request = {
+            "schema_version": "self-awake.v1",
+            "job_id": "job-dedup-test",
+            "event_id": "event-dedup-test",
+            "idempotency_key": "key-dedup-test",
+            "context": {"event": {"source": "monos", "event_id": "event-dedup-test"}},
+        }
+        with patch("mon_agent_server.self_awake.threading.Thread") as thread_cls:
+            first = start_self_awake_run_async(request, FakeApp(), "token-1")
+            second = start_self_awake_run_async(request, FakeApp(), "token-1")
+
+        self.assertTrue(first["accepted"])
+        self.assertTrue(second["deduplicated"])
+        self.assertEqual(first["async_run_id"], second["async_run_id"])
+        thread_cls.assert_called_once()
 
     def test_async_self_awake_worker_reaches_persistence_without_recursive_wrapper(self):
         decision = {

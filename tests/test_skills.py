@@ -99,6 +99,14 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertEqual(context["systemPrompt"], "active=memo-management")
         self.assertIsNone(runtime.prepare_next_turn({"context": context}, lambda _ids: "unused"))
 
+    def test_workspace_development_exposes_apply_patch(self) -> None:
+        runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
+
+        result = runtime.activate(["workspace-development"])
+
+        self.assertTrue(result["success"])
+        self.assertIn("apply_patch", _tool_names(runtime.active_tools()))
+
     def test_self_awake_has_system_skills_but_not_user_mutation_tools(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="self_awake")
         names = _tool_names(runtime.active_tools())

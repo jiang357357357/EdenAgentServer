@@ -160,11 +160,24 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         self.screen_captures = screen_captures
         self.environment = environment
         self._running: dict[str, threading.Thread] = {}
+        self._agents: dict[str, Agent] = {}
+        self._cancelled_sessions: set[str] = set()
         self._lock = threading.Lock()
 
     def is_running(self, session_id: str) -> bool:
         with self._lock:
             return session_id in self._running
+
+    def abort(self, session_id: str) -> bool:
+        with self._lock:
+            running = session_id in self._running
+            if running:
+                self._cancelled_sessions.add(session_id)
+            agent = self._agents.get(session_id)
+        if agent is not None:
+            agent.abort()
+        self.permissions.reject_all(session_id, reason="session_aborted")
+        return running
 
     def append_user_only(self, session_id: str, parts: list[dict[str, Any]]) -> dict[str, Any]:
         message = self.store.append_user_message(session_id, content_text(parts), prompt_files(parts))
@@ -208,6 +221,8 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         finally:
             with self._lock:
                 self._running.pop(session_id, None)
+                self._agents.pop(session_id, None)
+                self._cancelled_sessions.discard(session_id)
 
     def _compact_thread_main(self, session_id: str, custom_instructions: str | None, auth_token: str | None) -> None:
         try:
@@ -505,6 +520,11 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 prepare_next_turn_with_context=lambda turn, _signal: skill_runtime.prepare_next_turn(turn, system_prompt_for),
             )
         )
+        with self._lock:
+            self._agents[session_id] = agent
+            cancelled = session_id in self._cancelled_sessions
+        if cancelled:
+            agent.abort()
         agent.subscribe(lambda event, _signal: self.handle_agent_event(session_id, event, run_state))
         content: list[dict[str, Any]] = []
         if runtime_config.supports_images:
@@ -936,6 +956,8 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
 
     def _before_tool_call(self, session_id: str, run_state: RunState):
         async def before_tool_call(context: dict[str, Any], _signal: Any = None) -> dict[str, Any] | None:
+            if getattr(_signal, "aborted", False):
+                return {"block": True, "reason": "会话已取消。"}
             tool_call = context.get("toolCall") or {}
             tool_name = tool_call.get("name") or ""
             args = context.get("args") or {}

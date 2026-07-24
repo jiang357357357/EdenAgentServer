@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -10,11 +12,15 @@ from ..ids import now_ms
 from .auth import CoreAuthenticationExpiredError, read_auth_token, require_core_token
 from .http import error_message, is_auth_expired, parse_json
 from .serializers import message_from_map, run_id_from_millis, session_from_map, to_storage_iso, unwrap_results
+from ..service_auth import sign_service_request
 
 
 class CoreClient:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
+        self._service_token = ""
+        self._service_token_cached_at = 0.0
+        self._service_token_lock = threading.Lock()
 
     def login_for_token(self, username: str, password: str, client_id: str, client_type: str) -> str:
         data = self._request(
@@ -27,6 +33,25 @@ class CoreClient:
         if not token:
             raise RuntimeError("Core 登录成功但未返回 token")
         return token
+
+    def login_for_service(self) -> str:
+        with self._service_token_lock:
+            if self._service_token and time.monotonic() - self._service_token_cached_at < 15 * 60:
+                return self._service_token
+            path = "/api/internal/service-token/"
+            payload = {"audience": "monagent", "requested_scope": "self_awake:user_context"}
+            body = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            headers = {"accept": "application/json", "content-type": "application/json"}
+            headers.update(sign_service_request("monagent", "core:service_token", "POST", path, body))
+            request = urllib.request.Request(f"{self.base_url}{path}", data=body, headers=headers, method="POST")
+            with urllib.request.urlopen(request, timeout=15) as response:
+                data = parse_json(response.read().decode("utf-8", errors="replace"))
+            token = data.get("token") if isinstance(data, dict) else None
+            if not token:
+                raise RuntimeError("Core 服务身份交换成功但未返回 token")
+            self._service_token = str(token)
+            self._service_token_cached_at = time.monotonic()
+            return self._service_token
 
     def resolve_runtime_config(self, token: str | None) -> dict[str, Any] | None:
         if not token:

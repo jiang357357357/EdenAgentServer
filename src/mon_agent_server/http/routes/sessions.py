@@ -129,4 +129,12 @@ def handle_sessions(handler: Any, path: str, query: dict[str, list[str]], method
         handler.json_response({"accepted": True, "sessionID": session_id}, status=202)
         return True
 
+    abort_match = re.match(r"^/session/([^/]+)/abort$", path)
+    if abort_match and method == "POST":
+        session_id = urllib.parse.unquote(abort_match.group(1))
+        token = require_core_token(handler.headers)
+        handler.app.ensure_hydrated(token, session_id)
+        handler.json_response({"aborted": handler.app.runtime.abort(session_id), "sessionID": session_id})
+        return True
+
     return False

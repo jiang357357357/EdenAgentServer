@@ -19,6 +19,7 @@ from ..skills import create_skill_runtime
 from ..tools import MonToolContext, create_mon_agent_tools
 from ..tools.memo_schedule import submit_memo_schedule_refresh
 from .config import SelfAwakeRuntimeConfig, resolve_self_awake_runtime_config
+from .contract import contract_response_fields
 from .environment import enrich_self_awake_context, enrich_self_awake_request
 from .permissions import memo_due_notification_args, self_awake_before_tool_call
 from .render import render_self_awake_decision, render_self_awake_request
@@ -28,6 +29,9 @@ if TYPE_CHECKING:
     from ..app import AppState
 
 logger = get_logger("MonAgent", "SelfAwake")
+_SELF_AWAKE_JOBS: dict[str, dict[str, Any]] = {}
+_SELF_AWAKE_JOBS_LOCK = threading.Lock()
+_SELF_AWAKE_JOB_CACHE_LIMIT = 512
 
 
 class SelfAwakeModelError(RuntimeError):
@@ -349,6 +353,7 @@ def run_self_awake_and_persist_sync(
             logger.error(f"异步自醒写入 Core 失败 run={async_run_id or '-'}: {error}", exc_info=True)
     return {
         **decision,
+        **contract_response_fields(request),
         "accepted": False,
         "async_run_id": async_run_id,
         "server_run_id": server_run_id,
@@ -356,7 +361,27 @@ def run_self_awake_and_persist_sync(
     }
 
 def start_self_awake_run_async(request: dict[str, Any], app: AppState, token: str | None) -> dict[str, Any]:
-    async_run_id = create_id("selfawakejob")
+    async_run_id = str(request.get("job_id") or "").strip() or create_id("selfawakejob")
+    request = {**request, "job_id": async_run_id}
+    contract_fields = contract_response_fields(request)
+    with _SELF_AWAKE_JOBS_LOCK:
+        existing = _SELF_AWAKE_JOBS.get(async_run_id)
+        if existing:
+            if existing.get("idempotency_key") != contract_fields["idempotency_key"]:
+                raise RuntimeError(f"自醒任务 ID 冲突: {async_run_id}")
+            return {**existing, "deduplicated": True}
+        accepted_response = {
+            **contract_fields,
+            "accepted": True,
+            "status": "queued",
+            "async_run_id": async_run_id,
+            "server_run_id": None,
+            "server_error": "",
+            "message": "自醒任务已提交，MonAgent 将在后台执行并写入 Core。",
+        }
+        _SELF_AWAKE_JOBS[async_run_id] = accepted_response
+        while len(_SELF_AWAKE_JOBS) > _SELF_AWAKE_JOB_CACHE_LIMIT:
+            _SELF_AWAKE_JOBS.pop(next(iter(_SELF_AWAKE_JOBS)))
     request = enrich_self_awake_request(request, app, token=token)
     context = request.get("context") if isinstance(request.get("context"), dict) else {}
     server_run_id = None
@@ -368,9 +393,13 @@ def start_self_awake_run_async(request: dict[str, Any], app: AppState, token: st
         except Exception as error:
             server_error = str(error)
             logger.error(f"创建自醒 pending 记录失败 run={async_run_id}: {error}", exc_info=True)
+    with _SELF_AWAKE_JOBS_LOCK:
+        accepted_response.update({"server_run_id": server_run_id, "server_error": server_error})
 
     def worker() -> None:
         try:
+            with _SELF_AWAKE_JOBS_LOCK:
+                accepted_response["status"] = "running"
             logger.info(f"异步自醒开始 run={async_run_id} context_keys={list(context.keys())}")
             result = run_self_awake_and_persist_sync(request, app, token, async_run_id)
             action_type = ((result.get("action") or {}) if isinstance(result.get("action"), dict) else {}).get("type") or ""
@@ -382,15 +411,18 @@ def start_self_awake_run_async(request: dict[str, Any], app: AppState, token: st
                 f"异步自醒完成 run={async_run_id} action={action_type} next={after_minutes}m "
                 f"server_run_id={result.get('server_run_id') or ''} server_error={result.get('server_error') or ''}"
             )
+            with _SELF_AWAKE_JOBS_LOCK:
+                accepted_response.update(
+                    {
+                        "status": "completed",
+                        "server_run_id": result.get("server_run_id"),
+                        "server_error": result.get("server_error") or "",
+                    }
+                )
         except Exception as error:
             logger.error(f"异步自醒失败 run={async_run_id}: {error}", exc_info=True)
+            with _SELF_AWAKE_JOBS_LOCK:
+                accepted_response.update({"status": "failed", "server_error": str(error)})
 
     threading.Thread(target=worker, name=f"monagent-self-awake-{async_run_id}", daemon=True).start()
-    return {
-        "accepted": True,
-        "status": "queued",
-        "async_run_id": async_run_id,
-        "server_run_id": server_run_id,
-        "server_error": server_error,
-        "message": "自醒任务已提交，MonAgent 将在后台执行并写入 Core。",
-    }
+    return dict(accepted_response)

@@ -9,6 +9,7 @@ from ..ids import create_id
 
 PermissionReply = str
 PermissionMode = str
+DEFAULT_PERMISSION_TIMEOUT_SECONDS = 300.0
 
 
 @dataclass(slots=True)
@@ -19,11 +20,12 @@ class _PermissionWaiter:
 
 
 class PermissionBroker:
-    def __init__(self, events: EventBus) -> None:
+    def __init__(self, events: EventBus, timeout_seconds: float = DEFAULT_PERMISSION_TIMEOUT_SECONDS) -> None:
         self._events = events
         self._waiters: dict[str, _PermissionWaiter] = {}
         self._always_allowed: set[str] = set()
-        self._mode: PermissionMode = "full_access"
+        self._mode: PermissionMode = "ask"
+        self._timeout_seconds = max(0.01, float(timeout_seconds))
         self._lock = threading.Lock()
 
     def list(self) -> list[dict[str, Any]]:
@@ -54,8 +56,49 @@ class PermissionBroker:
         with self._lock:
             self._waiters[request_id] = waiter
         self._events.emit({"type": "permission.asked", "properties": full_request})
-        waiter.event.wait()
+        answered = waiter.event.wait(timeout=self._timeout_seconds)
+        if not answered:
+            with self._lock:
+                current = self._waiters.get(request_id)
+                if current is waiter:
+                    self._waiters.pop(request_id, None)
+            self._events.emit(
+                {
+                    "type": "permission.replied",
+                    "properties": {
+                        "sessionID": waiter.request.get("sessionID"),
+                        "requestID": request_id,
+                        "reply": "reject",
+                        "reason": "timeout",
+                    },
+                }
+            )
         return waiter.reply or "reject"
+
+    def reject_all(self, session_id: str | None = None, reason: str = "cancelled") -> int:
+        with self._lock:
+            selected = [
+                (request_id, waiter)
+                for request_id, waiter in self._waiters.items()
+                if session_id is None or waiter.request.get("sessionID") == session_id
+            ]
+            for request_id, _waiter in selected:
+                self._waiters.pop(request_id, None)
+        for request_id, waiter in selected:
+            waiter.reply = "reject"
+            waiter.event.set()
+            self._events.emit(
+                {
+                    "type": "permission.replied",
+                    "properties": {
+                        "sessionID": waiter.request.get("sessionID"),
+                        "requestID": request_id,
+                        "reply": "reject",
+                        "reason": reason,
+                    },
+                }
+            )
+        return len(selected)
 
     def reply(self, request_id: str, reply: str, message: str | None = None) -> bool:
         with self._lock:

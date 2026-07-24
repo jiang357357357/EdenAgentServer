@@ -47,6 +47,26 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(handler.response[1], HTTPStatus.FORBIDDEN)
         self.assertIn("只能由 MonOs", handler.response[0]["error"])
 
+    def test_internal_self_awake_v1_requires_stable_identifiers(self):
+        class Handler:
+            headers = {"Authorization": "Token test"}
+
+            def read_json_body(self):
+                return {
+                    "schema_version": "self-awake.v1",
+                    "context": {"event": {"source": "monos", "type": "scheduled"}},
+                }
+
+            def json_response(self, data, status=200):
+                self.response = (data, status)
+
+        handler = Handler()
+        handled = handle_self_awake(handler, "/internal/self-awake/run", {}, "POST")
+
+        self.assertTrue(handled)
+        self.assertEqual(handler.response[1], HTTPStatus.BAD_REQUEST)
+        self.assertEqual(handler.response[0]["code"], "invalid_self_awake_contract")
+
     def test_model_option_exposes_runtime_context_window(self):
         option = _model_option(
             {
@@ -105,6 +125,34 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(calls[0], ("hydrate", "session 1", "core-token"))
         self.assertEqual(calls[1], ("session 1", "保留项目路径", "core-token"))
         self.assertEqual(handler.response, ({"accepted": True, "sessionID": "session 1"}, 202))
+
+    def test_abort_route_stops_active_session(self):
+        calls = []
+
+        class Runtime:
+            def abort(self, session_id):
+                calls.append(("abort", session_id))
+                return True
+
+        class App:
+            runtime = Runtime()
+
+            def ensure_hydrated(self, token, session_id):
+                calls.append(("hydrate", session_id, token))
+
+        class Handler:
+            headers = {"Authorization": "Bearer core-token"}
+            app = App()
+
+            def json_response(self, data, status=200):
+                self.response = (data, status)
+
+        handler = Handler()
+        handled = handle_sessions(handler, "/session/session%201/abort", {}, "POST")
+
+        self.assertTrue(handled)
+        self.assertEqual(calls, [("hydrate", "session 1", "core-token"), ("abort", "session 1")])
+        self.assertEqual(handler.response, ({"aborted": True, "sessionID": "session 1"}, 200))
 
 
 if __name__ == "__main__":

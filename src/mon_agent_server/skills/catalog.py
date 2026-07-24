@@ -130,7 +130,7 @@ SKILL_DEFINITIONS: tuple[SkillDefinition, ...] = (
         id="workspace-development",
         name="工作区开发与操作",
         description="在当前工作区内写文件、编辑代码和执行命令。",
-        tool_names=("write", "edit", "bash"),
+        tool_names=("write", "edit", "apply_patch", "bash"),
         instructions=(
             "先使用基础只读工具了解相关文件，再进行最小范围的写入、编辑或命令执行。",
             "写文件和执行命令必须经过现有权限系统，不得把技能激活视为用户授权。",
