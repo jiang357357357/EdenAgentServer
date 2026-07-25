@@ -101,8 +101,12 @@ def create_vision_tools(root: Path, context: MonToolContext) -> list[AgentTool]:
     async def analyze_screen_execute(tool_call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
         if not context.permissions or not context.session_id:
             raise RuntimeError("当前会话无法请求屏幕读取权限。")
+        requested_source = str(params.get("source") or "auto").strip().lower()
+        if requested_source not in {"auto", "desktop", "game"}:
+            raise RuntimeError("屏幕来源无效，只支持 auto、desktop 或 game。")
+        source_labels = {"auto": "自动选择", "desktop": "整个桌面", "game": "游戏画面"}
         permission = "读取当前屏幕"
-        pattern = "desktop-screenshot"
+        pattern = f"screen-screenshot:{requested_source}"
         if not context.permissions.is_always_allowed(permission, pattern):
             reply = await asyncio.to_thread(
                 context.permissions.ask,
@@ -111,9 +115,10 @@ def create_vision_tools(root: Path, context: MonToolContext) -> list[AgentTool]:
                     "permission": permission,
                     "patterns": [pattern],
                     "metadata": {
-                        "action": "截取当前屏幕",
+                        "action": f"截取{source_labels[requested_source]}",
                         "toolName": "analyze_screen",
-                        "reason": "模型请求查看当前桌面画面，需要你确认。",
+                        "reason": f"模型请求查看{source_labels[requested_source]}，需要你确认。",
+                        "source": requested_source,
                     },
                     "tool": {"messageID": context.get_message_id(), "callID": tool_call_id}
                     if context.get_message_id and context.get_message_id()
@@ -130,6 +135,8 @@ def create_vision_tools(root: Path, context: MonToolContext) -> list[AgentTool]:
             {
                 "sessionID": context.session_id,
                 "toolCallID": tool_call_id,
+                "source": requested_source,
+                # Retain the legacy display hint for existing Electron clients.
                 "display": "cursor",
             },
         )
@@ -148,6 +155,7 @@ def create_vision_tools(root: Path, context: MonToolContext) -> list[AgentTool]:
         width = capture.get("width")
         height = capture.get("height")
         source_name = str(capture.get("sourceName") or "").strip()
+        captured_source = str(capture.get("source") or requested_source).strip().lower()
         capture_details = []
         if width and height:
             capture_details.append(f"{width}×{height}")
@@ -164,13 +172,32 @@ def create_vision_tools(root: Path, context: MonToolContext) -> list[AgentTool]:
             metadata={
                 "displayId": capture.get("displayId"),
                 "sourceName": source_name or None,
+                "source": captured_source,
+                "requestedSource": requested_source,
                 "width": width,
                 "height": height,
             },
         )
 
     tools = [
-        AgentTool("analyze_screen", "屏幕分析", "经用户授权后截取当前桌面屏幕；多模态模型直接查看截图，文本模型交给角色绑定的 Vision 分析。", {"type": "object", "properties": {"question": {"type": "string"}}}, analyze_screen_execute),
+        AgentTool(
+            "analyze_screen",
+            "屏幕分析",
+            "经用户授权后截取整个桌面或当前游戏画面；多模态模型直接查看截图，文本模型交给角色绑定的 Vision 分析。",
+            {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "source": {
+                        "type": "string",
+                        "enum": ["auto", "desktop", "game"],
+                        "default": "auto",
+                        "description": "截图来源：auto 在游戏运行时优先游戏，否则截取桌面；desktop 截取整个当前显示器；game 仅截取 VTU 嵌入的游戏画面。",
+                    },
+                },
+            },
+            analyze_screen_execute,
+        ),
     ]
     if context.current_model_supports_images is False:
         tools.insert(

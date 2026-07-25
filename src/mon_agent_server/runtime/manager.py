@@ -87,6 +87,10 @@ _CORE_SYNC_RETRY_DELAYS = (0.15, 0.5, 1.5)
 _MANUAL_COMPACTION_KEEP_RECENT_TOKENS = 8_000
 
 
+class TurnAborted(RuntimeError):
+    """Raised when the user explicitly stops the active turn."""
+
+
 def _as_dict_list(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
@@ -254,6 +258,10 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 future = self._host.submit(self._interrupt_all_subagents(control))
                 future.add_done_callback(self._log_abort_cleanup_error)
         self.permissions.reject_all(session_id, reason="session_aborted")
+        if running or active_subagents:
+            self.events.emit(
+                {"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "stopping"}}}
+            )
         return running or active_subagents
 
     @staticmethod
@@ -274,6 +282,12 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         for snapshot in active:
             await control.interrupt(snapshot.path)
         return bool(active)
+
+    def _raise_if_cancelled(self, session_id: str) -> None:
+        with self._lock:
+            cancelled = session_id in self._cancelled_sessions
+        if cancelled:
+            raise TurnAborted("当前回合已由用户停止")
 
     def append_user_only(self, session_id: str, parts: list[dict[str, Any]]) -> dict[str, Any]:
         message = self.store.append_user_message(session_id, content_text(parts), prompt_files(parts))
@@ -1367,6 +1381,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         )
         self.emit_runtime_thinking(session_id, run_state, "正在发送给 Python AgentCore，并等待模型回复。")
         await agent.prompt({"role": "user", "timestamp": now_ms(), "content": content})
+        self._raise_if_cancelled(session_id)
         if run_state.error_message:
             raise RuntimeError(run_state.error_message)
         self.emit_runtime_thinking(session_id, run_state, "回复生成完成。", done=True)
@@ -1501,6 +1516,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             self.emit_part(session_id, part)
         self.emit_session(session_id)
         try:
+            self._raise_if_cancelled(session_id)
             participants = [item for item in session["info"].get("participants", []) if item.get("assistantID") is not None]
             primary_id = participants[0].get("assistantID") if participants else None
             director_config = await self._resolve_runtime_config(auth_token, primary_id)
@@ -1582,6 +1598,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 )
             previous_replies: list[dict[str, Any]] = []
             for beat_index, beat in enumerate(plan.beats):
+                self._raise_if_cancelled(session_id)
                 participant = next(
                     item for item in participants if str(item.get("assistantID")) == str(beat.assistant_id)
                 )
@@ -1702,6 +1719,25 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             self.events.emit({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "idle"}}})
             self.emit_session(session_id)
             logger.info(f"session {session_id} companion turn completed in {now_ms() - started}ms")
+        except TurnAborted:
+            if active_run_state is not None:
+                self.emit_runtime_thinking(session_id, active_run_state, "当前回合已停止。", done=True)
+                self.store.append_session_event(
+                    session_id,
+                    "turn_aborted",
+                    {"reason": "user_requested"},
+                    turn_id=active_run_state.run_id,
+                )
+            if active_director_run:
+                self.store.upsert_director_run(
+                    session_id,
+                    {**active_director_run, "status": "aborted", "activeBeatIndex": None, "error": None},
+                )
+            self.events.emit(
+                {"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "idle"}}}
+            )
+            self.emit_session(session_id)
+            logger.info(f"session {session_id} turn aborted by user")
         except Exception as error:
             logger.error(f"session {session_id} 运行失败: {error}", exc_info=True)
             if active_main_run_id:

@@ -116,11 +116,60 @@ class AnalyzeScreenToolTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(permissions.requests), 1)
         self.assertEqual(permissions.requests[0]["permission"], "读取当前屏幕")
+        self.assertEqual(permissions.requests[0]["patterns"], ["screen-screenshot:auto"])
+        self.assertEqual(permissions.requests[0]["metadata"]["source"], "auto")
         self.assertEqual(len(captures.requests), 1)
+        self.assertEqual(captures.requests[0]["source"], "auto")
         self.assertEqual(result["content"][0]["text"], "屏幕截图已捕获并提供给当前模型（1920×1080，Display 1）。")
         self.assertEqual(result["content"][1]["type"], "image")
         self.assertEqual(result["details"]["width"], 1920)
         self.assertEqual(result["details"]["sourceName"], "Display 1")
+        self.assertEqual(result["details"]["requestedSource"], "auto")
+
+    async def test_explicit_game_source_is_forwarded_to_capture_client(self):
+        permissions = AllowPermissionBroker()
+        captures = FakeScreenCaptureBroker()
+        tools = create_vision_tools(
+            Path.cwd(),
+            MonToolContext(
+                session_id="session-1",
+                permissions=permissions,
+                screen_captures=captures,
+                current_model_supports_images=True,
+                get_message_id=lambda: "message-1",
+            ),
+        )
+
+        result = await tool_by_name(tools, "analyze_screen").run(
+            "tool-game",
+            {"question": "游戏画面显示了什么？", "source": "game"},
+        )
+
+        self.assertEqual(permissions.requests[0]["patterns"], ["screen-screenshot:game"])
+        self.assertEqual(captures.requests[0]["source"], "game")
+        self.assertEqual(result["details"]["requestedSource"], "game")
+
+    async def test_invalid_screen_source_is_rejected_before_capture(self):
+        permissions = AllowPermissionBroker()
+        captures = FakeScreenCaptureBroker()
+        tools = create_vision_tools(
+            Path.cwd(),
+            MonToolContext(
+                session_id="session-1",
+                permissions=permissions,
+                screen_captures=captures,
+                current_model_supports_images=True,
+            ),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "屏幕来源无效"):
+            await tool_by_name(tools, "analyze_screen").run(
+                "tool-invalid",
+                {"source": "window"},
+            )
+
+        self.assertEqual(permissions.requests, [])
+        self.assertEqual(captures.requests, [])
 
     async def test_full_access_skips_screen_permission_card(self):
         permissions = AllowPermissionBroker(full_access=True)
