@@ -432,6 +432,38 @@ class CoreClient:
         raw = self._request("/api/users/me/profile/", token)
         return raw if isinstance(raw, dict) else {}
 
+    def list_skill_installations(self, token: str, device_id: str) -> list[dict[str, Any]]:
+        query = urllib.parse.urlencode({"device_id": device_id})
+        path = f"/api/agent/skills/?{query}"
+        installations: list[dict[str, Any]] = []
+        for _page in range(100):
+            raw = self._request(path, token)
+            installations.extend(unwrap_results(raw))
+            next_url = raw.get("next") if isinstance(raw, dict) else None
+            if not next_url:
+                break
+            parsed = urllib.parse.urlparse(str(next_url))
+            path = f"{parsed.path}{'?' + parsed.query if parsed.query else ''}"
+        return installations
+
+    def upsert_skill_installation(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        raw = self._request("/api/agent/skills/", token, method="POST", payload=payload)
+        return raw if isinstance(raw, dict) else {}
+
+    def update_skill_installation(
+        self, token: str, installation_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        encoded = urllib.parse.quote(installation_id)
+        raw = self._request(f"/api/agent/skills/{encoded}/", token, method="PATCH", payload=payload)
+        return raw if isinstance(raw, dict) else {}
+
+    def delete_skill_installation(self, token: str, installation_id: str) -> dict[str, Any]:
+        encoded = urllib.parse.quote(installation_id)
+        raw = self._request(f"/api/agent/skills/{encoded}/", token, method="DELETE", payload={})
+        if isinstance(raw, dict) and raw.get("deleted") is True:
+            return raw
+        return {"deleted": True, "external_installation_id": installation_id}
+
     def update_user_profile(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
         raw = self._request("/api/users/me/profile/", token, method="PATCH", payload=payload)
         return raw if isinstance(raw, dict) else {}
@@ -480,6 +512,8 @@ class CoreClient:
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
                 text = response.read().decode("utf-8", errors="replace")
+                if response.status == 204:
+                    return {}
                 data = parse_json(text)
                 if data is None:
                     raise RuntimeError(f"Core 响应不是有效 JSON: {path}")

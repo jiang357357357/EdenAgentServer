@@ -75,6 +75,8 @@ class ContextManager:
             if event_type not in {"user_message", "assistant_message", "tool_result"}:
                 continue
             if event_type == "assistant_message":
+                if cls._is_failed_assistant(payload):
+                    continue
                 for block in payload.get("content") or []:
                     if block.get("type") == "toolCall" and block.get("id"):
                         pending_calls.add(str(block["id"]))
@@ -85,6 +87,10 @@ class ContextManager:
                 pending_calls.discard(call_id)
             messages.append(cls._truncate_message(payload))
         return messages
+
+    @staticmethod
+    def _is_failed_assistant(message: dict[str, Any]) -> bool:
+        return bool(message.get("errorMessage")) or message.get("stopReason") in {"error", "aborted"}
 
     @classmethod
     def _truncate_message(cls, message: dict[str, Any]) -> dict[str, Any]:

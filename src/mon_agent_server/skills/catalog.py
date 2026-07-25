@@ -13,9 +13,32 @@ class SkillDefinition:
     instructions: tuple[str, ...]
     profiles: tuple[str, ...] = ("user_chat", "self_awake")
     model_invocable: bool = True
+    source: str = "builtin"
+    file_path: str | None = None
+    scope: str = "system"
 
 
 SKILL_DEFINITIONS: tuple[SkillDefinition, ...] = (
+    SkillDefinition(
+        id="multi-agent",
+        name="子智能体协作",
+        description="把可独立并行的研究、编码或审查任务交给后台子智能体，并等待或追加任务。",
+        tool_names=(
+            "spawn_agent",
+            "send_message",
+            "followup_task",
+            "list_agents",
+            "wait_agent",
+            "interrupt_agent",
+        ),
+        instructions=(
+            "只为边界清晰、可独立完成且能实质改善速度或质量的任务创建子智能体；简单问题和普通闲聊直接处理。",
+            "创建多个互相独立的任务后可以继续本地工作，再使用 wait_agent 收集结果；不要用循环查询状态代替等待。",
+            "子智能体作为后台任务线程向当前角色交付结果；最终面向用户的表达由当前角色统一完成。",
+            "子智能体继承当前会话的权限边界，不能利用子智能体绕过写入、命令或外部操作授权。",
+        ),
+        profiles=("user_chat",),
+    ),
     SkillDefinition(
         id="memo-management",
         name="备忘录与待办管理",
@@ -80,7 +103,8 @@ SKILL_DEFINITIONS: tuple[SkillDefinition, ...] = (
         tool_names=("web_search", "web_fetch"),
         instructions=(
             "需要实时或可变化的信息时先使用 web_search，再按结果使用 web_fetch 读取必要正文。",
-            "不要伪造搜索结果；只抓取与当前问题直接相关的页面。",
+            "优先依据 web_search 返回的 source_id 组织来源；重要结论应能对应到实际 URL。",
+            "不要伪造搜索结果，不把搜索摘要当作完整正文；只抓取与当前问题直接相关的公开页面。",
         ),
     ),
     SkillDefinition(
@@ -165,10 +189,15 @@ def initial_skill_ids(profile: str) -> tuple[str, ...]:
     return INITIAL_SKILLS_BY_PROFILE.get(profile, ())
 
 
-def skill_definitions_for_profile(profile: str, *, model_invocable_only: bool = False) -> tuple[SkillDefinition, ...]:
+def skill_definitions_for_profile(
+    profile: str,
+    *,
+    model_invocable_only: bool = False,
+    definitions: Iterable[SkillDefinition] | None = None,
+) -> tuple[SkillDefinition, ...]:
     return tuple(
         skill
-        for skill in SKILL_DEFINITIONS
+        for skill in (definitions or SKILL_DEFINITIONS)
         if profile in skill.profiles and (skill.model_invocable or not model_invocable_only)
     )
 
@@ -182,28 +211,40 @@ def normalize_skill_ids(skill_ids: Iterable[str]) -> tuple[str, ...]:
     return tuple(normalized)
 
 
-def tool_names_for_skills(skill_ids: Iterable[str]) -> set[str]:
+def tool_names_for_skills(
+    skill_ids: Iterable[str], definitions_by_id: dict[str, SkillDefinition] | None = None
+) -> set[str]:
+    catalog = definitions_by_id or SKILLS_BY_ID
     names: set[str] = set()
     for skill_id in normalize_skill_ids(skill_ids):
-        skill = SKILLS_BY_ID.get(skill_id)
+        skill = catalog.get(skill_id)
         if skill:
             names.update(skill.tool_names)
     return names
 
 
-def render_skill_catalog(profile: str, active_skill_ids: Iterable[str] = ()) -> str:
+def render_skill_catalog(
+    profile: str,
+    active_skill_ids: Iterable[str] = (),
+    definitions: Iterable[SkillDefinition] | None = None,
+) -> str:
     active = set(normalize_skill_ids(active_skill_ids))
     lines = []
-    for skill in skill_definitions_for_profile(profile, model_invocable_only=True):
-        status = "（已激活）" if skill.id in active else ""
+    for skill in skill_definitions_for_profile(
+        profile, model_invocable_only=True, definitions=definitions
+    ):
+        status = "（已加载）" if skill.id in active else ""
         lines.append(f"- {skill.id}{status}：{skill.name}。{skill.description}")
     return "\n".join(lines)
 
 
-def render_active_skill_instructions(skill_ids: Iterable[str]) -> str:
+def render_active_skill_instructions(
+    skill_ids: Iterable[str], definitions_by_id: dict[str, SkillDefinition] | None = None
+) -> str:
+    catalog = definitions_by_id or SKILLS_BY_ID
     sections: list[str] = []
     for skill_id in normalize_skill_ids(skill_ids):
-        skill = SKILLS_BY_ID.get(skill_id)
+        skill = catalog.get(skill_id)
         if not skill:
             continue
         lines = [f"## {skill.name}（{skill.id}）"]

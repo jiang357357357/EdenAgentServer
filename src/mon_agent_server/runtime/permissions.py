@@ -7,6 +7,7 @@ class RuntimePermissionMixin:
     @staticmethod
     def is_safe_tool(tool_name: str) -> bool:
         return tool_name in {
+            "load_skill",
             "activate_skill",
             "read",
             "ls",
@@ -23,6 +24,12 @@ class RuntimePermissionMixin:
             "list_memos",
             "list_due_memos",
             "get_next_memo_wake",
+            "spawn_agent",
+            "send_message",
+            "followup_task",
+            "list_agents",
+            "wait_agent",
+            "interrupt_agent",
         }
 
     @staticmethod

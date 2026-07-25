@@ -1,5 +1,8 @@
+import io
 import json
+import ssl
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 from mon_agent_server.model_stream import _usage_from_openai, call_openai_compatible, stream_openai_compatible, to_openai_messages
@@ -40,6 +43,12 @@ class FakeStreamResponse:
 
     def __iter__(self):
         return iter(self.lines)
+
+
+class InterruptedStreamResponse(FakeStreamResponse):
+    def __iter__(self):
+        yield from self.lines
+        raise ssl.SSLEOFError(8, "unexpected eof while reading")
 
 
 class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
@@ -98,6 +107,25 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<summary>", messages[0]["content"])
         self.assertIn("用户正在调试上下文压缩。", messages[0]["content"])
         self.assertEqual(messages[1], {"role": "user", "content": "继续"})
+
+    def test_openai_messages_skip_failed_and_empty_assistant_items(self):
+        messages = to_openai_messages(
+            {
+                "messages": [
+                    {"role": "user", "content": "第一次请求"},
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": ""}],
+                        "stopReason": "error",
+                        "errorMessage": "SSL EOF",
+                    },
+                    {"role": "assistant", "content": [{"type": "text", "text": ""}]},
+                    {"role": "user", "content": "重新请求"},
+                ]
+            }
+        )
+
+        self.assertEqual(messages, [{"role": "user", "content": "第一次请求"}, {"role": "user", "content": "重新请求"}])
 
     def test_tool_result_image_is_forwarded_as_multimodal_context(self):
         messages = to_openai_messages(
@@ -205,6 +233,101 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([event["type"] for event in events], ["start", "text_start", "text_delta", "text_delta", "text_end", "done"])
         self.assertEqual(events[-1]["message"]["content"], [{"type": "text", "text": "hello"}])
         self.assertEqual(events[-1]["message"]["usage"]["totalTokens"], 5)
+
+    async def test_openai_compatible_retries_ssl_eof_before_stream_starts(self):
+        attempts = 0
+
+        def fake_urlopen(_request, timeout):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise urllib.error.URLError(ssl.SSLEOFError(8, "unexpected eof while reading"))
+            return FakeStreamResponse(
+                [
+                    b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n',
+                    b"data: [DONE]\n\n",
+                ]
+            )
+
+        model = {
+            "id": "mimo-v2.5",
+            "api": "openai-completions",
+            "provider": "opencode-go",
+            "baseUrl": "https://opencode.ai/zen/go/v1",
+        }
+        context = {"messages": [{"role": "user", "content": "ping"}], "tools": []}
+
+        with patch("urllib.request.urlopen", fake_urlopen), patch("mon_agent_server.llm.openai_compatible.time.sleep"):
+            stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test"})
+            events = [event async for event in stream]
+
+        self.assertEqual(attempts, 2)
+        retry = next(event for event in events if event["type"] == "provider_retry")
+        self.assertEqual((retry["attempt"], retry["maxAttempts"]), (2, 3))
+        self.assertEqual(events[-1]["message"]["content"][0]["text"], "ok")
+
+    async def test_openai_compatible_retries_upstream_500(self):
+        attempts = 0
+
+        def fake_urlopen(_request, timeout):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise urllib.error.HTTPError(
+                    "https://opencode.ai/zen/go/v1/chat/completions",
+                    500,
+                    "Internal Server Error",
+                    None,
+                    io.BytesIO(b'{"error":{"message":"Internal server error"}}'),
+                )
+            return FakeStreamResponse(
+                [
+                    b'data: {"choices":[{"delta":{"content":"recovered"},"finish_reason":"stop"}]}\n\n',
+                    b"data: [DONE]\n\n",
+                ]
+            )
+
+        model = {
+            "id": "mimo-v2.5",
+            "api": "openai-completions",
+            "provider": "opencode-go",
+            "baseUrl": "https://opencode.ai/zen/go/v1",
+        }
+        context = {"messages": [{"role": "user", "content": "ping"}], "tools": []}
+
+        with patch("urllib.request.urlopen", fake_urlopen), patch("mon_agent_server.llm.openai_compatible.time.sleep"):
+            stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test"})
+            events = [event async for event in stream]
+
+        self.assertEqual(attempts, 2)
+        self.assertEqual([event["type"] for event in events].count("provider_retry"), 1)
+        self.assertEqual(events[-1]["message"]["content"][0]["text"], "recovered")
+
+    async def test_openai_compatible_does_not_replay_after_stream_content(self):
+        attempts = 0
+
+        def fake_urlopen(_request, timeout):
+            nonlocal attempts
+            attempts += 1
+            return InterruptedStreamResponse(
+                [b'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n']
+            )
+
+        model = {
+            "id": "mimo-v2.5",
+            "api": "openai-completions",
+            "provider": "opencode-go",
+            "baseUrl": "https://opencode.ai/zen/go/v1",
+        }
+        context = {"messages": [{"role": "user", "content": "ping"}], "tools": []}
+
+        with patch("urllib.request.urlopen", fake_urlopen), patch("mon_agent_server.llm.openai_compatible.time.sleep"):
+            stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test"})
+            events = [event async for event in stream]
+
+        self.assertEqual(attempts, 1)
+        self.assertNotIn("provider_retry", [event["type"] for event in events])
+        self.assertEqual(events[-1]["type"], "error")
 
     async def test_openai_compatible_streams_tool_calls(self):
         def fake_urlopen(_request, timeout):

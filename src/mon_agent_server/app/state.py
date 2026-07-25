@@ -10,6 +10,7 @@ from ..events import EventBus
 from ..runtime import MonAgentRuntime
 from ..store import SessionStore
 from ..speech import SpeechCache
+from ..skills import SkillInstallationService
 
 
 @dataclass(slots=True)
@@ -25,6 +26,7 @@ class AppState:
         self.screen_captures = ScreenCaptureBroker(self.events)
         self.core_client = CoreClient(self.config.core_base_url)
         self.speech_cache = SpeechCache(self.config.workspace_root / ".artifacts" / "speech-cache")
+        self.skill_installer = SkillInstallationService(self.config.workspace_root, self.core_client)
         self.runtime = MonAgentRuntime(
             self.config.workspace_root,
             self.store,
@@ -41,6 +43,7 @@ class AppState:
     screen_captures: ScreenCaptureBroker = field(init=False)
     core_client: CoreClient = field(init=False)
     speech_cache: SpeechCache = field(init=False)
+    skill_installer: SkillInstallationService = field(init=False)
     runtime: MonAgentRuntime = field(init=False)
 
     def environment_context_for_token(self, token: str | None) -> dict[str, Any]:
@@ -55,6 +58,7 @@ class AppState:
         data = self.core_client.get_agent_session(token, session_id)
         self.store.upsert_session_info(data["info"])
         self.store.hydrate_messages(session_id, data["messages"], data.get("modelEvents"))
+        self.runtime.load_persisted_subagents(session_id)
         self.hydrated_session_ids.add(session_id)
 
     def ensure_hydrated(self, token: str, session_id: str) -> None:
@@ -65,6 +69,9 @@ class AppState:
 
     def mark_hydrated(self, session_id: str) -> None:
         self.hydrated_session_ids.add(session_id)
+
+    def close(self) -> None:
+        self.runtime.close()
 
 
 def is_agent_api_route(pathname: str) -> bool:
@@ -85,4 +92,6 @@ def is_agent_api_route(pathname: str) -> bool:
         or pathname == "/model"
         or pathname == "/internal/self-awake/run"
         or pathname == "/tools/status"
+        or pathname == "/skills"
+        or pathname.startswith("/skills/")
     )

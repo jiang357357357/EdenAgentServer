@@ -132,9 +132,52 @@ def handle_sessions(handler: Any, path: str, query: dict[str, list[str]], method
     abort_match = re.match(r"^/session/([^/]+)/abort$", path)
     if abort_match and method == "POST":
         session_id = urllib.parse.unquote(abort_match.group(1))
+        require_core_token(handler.headers)
+        handler.json_response({"aborted": handler.app.runtime.abort(session_id), "sessionID": session_id})
+        return True
+
+    interrupt_agent_match = re.match(r"^/session/([^/]+)/agents/([^/]+)/interrupt$", path)
+    if interrupt_agent_match and method == "POST":
+        session_id = urllib.parse.unquote(interrupt_agent_match.group(1))
+        target = urllib.parse.unquote(interrupt_agent_match.group(2))
         token = require_core_token(handler.headers)
         handler.app.ensure_hydrated(token, session_id)
-        handler.json_response({"aborted": handler.app.runtime.abort(session_id), "sessionID": session_id})
+        handler.json_response(handler.app.runtime.interrupt_subagent(session_id, target))
+        return True
+
+    followup_agent_match = re.match(r"^/session/([^/]+)/agents/([^/]+)/followup$", path)
+    if followup_agent_match and method == "POST":
+        session_id = urllib.parse.unquote(followup_agent_match.group(1))
+        target = urllib.parse.unquote(followup_agent_match.group(2))
+        token = require_core_token(handler.headers)
+        body = handler.read_json_body()
+        handler.app.ensure_hydrated(token, session_id)
+        handler.json_response(
+            handler.app.runtime.followup_subagent(
+                session_id,
+                target,
+                str(body.get("message") or ""),
+                token,
+            ),
+            status=202,
+        )
+        return True
+
+    agent_details_match = re.match(r"^/session/([^/]+)/agents/([^/]+)$", path)
+    if agent_details_match and method == "GET":
+        session_id = urllib.parse.unquote(agent_details_match.group(1))
+        target = urllib.parse.unquote(agent_details_match.group(2))
+        token = require_core_token(handler.headers)
+        handler.app.ensure_hydrated(token, session_id)
+        handler.json_response(
+            handler.app.runtime.get_subagent_thread_details(
+                session_id,
+                target,
+                event_limit=handler.query_int(query, "eventLimit", 500),
+                include_messages=(query.get("includeMessages") or [""])[0].strip().lower()
+                in {"1", "true", "yes"},
+            )
+        )
         return True
 
     return False

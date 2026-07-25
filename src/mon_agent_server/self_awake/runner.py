@@ -15,7 +15,7 @@ from ..prompts import (
     fallback_self_awake_decision,
     parse_self_awake_decision,
 )
-from ..skills import create_skill_runtime
+from ..skills import create_skill_runtime, owner_storage_key
 from ..tools import MonToolContext, create_mon_agent_tools
 from ..tools.memo_schedule import submit_memo_schedule_refresh
 from .config import SelfAwakeRuntimeConfig, resolve_self_awake_runtime_config
@@ -182,6 +182,13 @@ async def run_self_awake_agent(
 ) -> dict[str, Any]:
     context = request.get("context") if isinstance(request.get("context"), dict) else {}
     session_id = create_id("selfawake")
+    skill_owner_key = None
+    if token:
+        try:
+            profile = await asyncio.to_thread(app.core_client.get_user_profile, token)
+            skill_owner_key = owner_storage_key(profile.get("id"))
+        except Exception as error:
+            logger.warning(f"读取自醒技能所有者失败，继续使用内置技能: {error}")
     skill_runtime = create_skill_runtime(
         app.config.workspace_root,
         MonToolContext(
@@ -194,6 +201,7 @@ async def run_self_awake_agent(
             get_current_files=lambda: [],
         ),
         profile="self_awake",
+        owner_key=skill_owner_key,
     )
     tools = skill_runtime.active_tools()
     character = request_character(request, runtime_config.core)
@@ -204,6 +212,7 @@ async def run_self_awake_agent(
             source="self_awake",
             supports_images=runtime_config.supports_images,
             active_skill_ids=active_skill_ids,
+            skill_resource_prompt=skill_runtime.prompt_section(),
         )
 
     system_prompt = system_prompt_for(skill_runtime.active_skill_ids)
@@ -370,6 +379,20 @@ def start_self_awake_run_async(request: dict[str, Any], app: AppState, token: st
             if existing.get("idempotency_key") != contract_fields["idempotency_key"]:
                 raise RuntimeError(f"自醒任务 ID 冲突: {async_run_id}")
             return {**existing, "deduplicated": True}
+
+    # Enrichment may call external services. Do it before publishing the job so a
+    # failed attempt cannot leave a permanently queued cache entry behind.
+    request = enrich_self_awake_request(request, app, token=token)
+    context = request.get("context") if isinstance(request.get("context"), dict) else {}
+
+    with _SELF_AWAKE_JOBS_LOCK:
+        # Another caller may have completed enrichment for the same job while we
+        # were outside the lock. Preserve the first accepted run.
+        existing = _SELF_AWAKE_JOBS.get(async_run_id)
+        if existing:
+            if existing.get("idempotency_key") != contract_fields["idempotency_key"]:
+                raise RuntimeError(f"自醒任务 ID 冲突: {async_run_id}")
+            return {**existing, "deduplicated": True}
         accepted_response = {
             **contract_fields,
             "accepted": True,
@@ -382,8 +405,6 @@ def start_self_awake_run_async(request: dict[str, Any], app: AppState, token: st
         _SELF_AWAKE_JOBS[async_run_id] = accepted_response
         while len(_SELF_AWAKE_JOBS) > _SELF_AWAKE_JOB_CACHE_LIMIT:
             _SELF_AWAKE_JOBS.pop(next(iter(_SELF_AWAKE_JOBS)))
-    request = enrich_self_awake_request(request, app, token=token)
-    context = request.get("context") if isinstance(request.get("context"), dict) else {}
     server_run_id = None
     server_error = ""
     if token:

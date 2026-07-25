@@ -372,6 +372,33 @@ class SelfAwakePromptTest(unittest.TestCase):
         self.assertIn("立绘动作、表情符号、立绘动效", prompt)
         self.assertIn("生气、叹气、无语、低落、困倦", prompt)
 
+    def test_skill_aware_user_chat_prompt_keeps_model_action_choice_and_recent_history(self):
+        prompt = build_agent_system_prompt(
+            {
+                "character": {
+                    "name": "伊芙",
+                    "visual_actions": [
+                        {"name": "单手抚胸陈述", "intent": "talk", "description": "正式说明时使用。"},
+                        {"name": "抬手强调", "intent": "talk", "description": "强调重点时使用。"},
+                    ],
+                }
+            },
+            source="user_chat",
+            current_character_action={"action": {"name": "单手抚胸陈述", "intent": "talk"}},
+            recent_character_actions=[
+                {"actionName": "单手抚胸陈述"},
+                {"actionName": "单手抚胸陈述"},
+                {"actionName": "抬手强调"},
+            ],
+            active_skill_ids=(),
+            skill_resource_prompt="技能目录",
+        )
+
+        self.assertIn("单手抚胸陈述 → 单手抚胸陈述 → 抬手强调", prompt)
+        self.assertIn("从动作列表中自主选择", prompt)
+        self.assertIn("不要仅凭角色的固定性格长期选择同一个姿势", prompt)
+        self.assertIn("不要为了变化而勉强选择不符合语境的动作", prompt)
+
     def test_user_chat_prompt_keeps_every_visual_action_without_api_payload_noise(self):
         actions = [
             {
@@ -452,6 +479,35 @@ class SelfAwakePromptTest(unittest.TestCase):
         self.assertTrue(second["deduplicated"])
         self.assertEqual(first["async_run_id"], second["async_run_id"])
         thread_cls.assert_called_once()
+
+    def test_async_self_awake_enrichment_failure_does_not_poison_job_cache(self):
+        request = {
+            "schema_version": "self-awake.v1",
+            "job_id": "job-enrichment-retry-test",
+            "event_id": "event-enrichment-retry-test",
+            "idempotency_key": "key-enrichment-retry-test",
+            "context": {"event": {"source": "monos", "event_id": "event-enrichment-retry-test"}},
+        }
+        from mon_agent_server.self_awake import runner
+
+        with runner._SELF_AWAKE_JOBS_LOCK:
+            runner._SELF_AWAKE_JOBS.pop(request["job_id"], None)
+        try:
+            with patch(
+                "mon_agent_server.self_awake.runner.enrich_self_awake_request",
+                side_effect=[RuntimeError("enrichment failed"), request],
+            ), patch("mon_agent_server.self_awake.threading.Thread") as thread_cls:
+                with self.assertRaisesRegex(RuntimeError, "enrichment failed"):
+                    start_self_awake_run_async(request, FakeApp(), "token-1")
+
+                accepted = start_self_awake_run_async(request, FakeApp(), "token-1")
+
+            self.assertTrue(accepted["accepted"])
+            self.assertFalse(accepted.get("deduplicated", False))
+            thread_cls.assert_called_once()
+        finally:
+            with runner._SELF_AWAKE_JOBS_LOCK:
+                runner._SELF_AWAKE_JOBS.pop(request["job_id"], None)
 
     def test_async_self_awake_worker_reaches_persistence_without_recursive_wrapper(self):
         decision = {

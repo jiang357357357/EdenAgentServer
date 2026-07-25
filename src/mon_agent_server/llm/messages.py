@@ -44,6 +44,8 @@ def to_openai_messages(context: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
         elif role == "assistant":
+            if message.get("errorMessage") or message.get("stopReason") in {"error", "aborted"}:
+                continue
             content_blocks = [block for block in message.get("content", []) if isinstance(block, dict)]
             text = "".join(
                 str(block.get("text") or "")
@@ -77,6 +79,8 @@ def to_openai_messages(context: dict[str, Any]) -> list[dict[str, Any]]:
                     item[signature] = "\n".join(str(block.get("thinking") or "") for block in thinking_blocks)
             if tool_calls:
                 item["tool_calls"] = tool_calls
+            if not text and not tool_calls:
+                continue
             messages.append(item)
         elif role == "toolResult":
             blocks = [block for block in message.get("content", []) if isinstance(block, dict)]

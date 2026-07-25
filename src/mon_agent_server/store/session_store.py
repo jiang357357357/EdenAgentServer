@@ -10,6 +10,8 @@ from .serializers import is_hidden_message, message_compaction, message_text, ti
 
 
 class SessionStore:
+    _CHARACTER_ACTION_HISTORY_LIMIT = 5
+
     def __init__(self) -> None:
         self._sessions: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
@@ -35,6 +37,10 @@ class SessionStore:
             "participants": selected,
             "participantAssistantIDs": [item.get("assistantID") for item in selected if item.get("assistantID") is not None],
             "directorRuns": [],
+            "orchestratorRuns": [],
+            "agentThreads": [],
+            "agentMessages": [],
+            "characterPerformances": {},
             "time": {"created": current, "updated": current},
         }
         with self._lock:
@@ -94,6 +100,79 @@ class SessionStore:
                 runs[existing_index] = saved
             session["info"]["directorRuns"] = runs
             return dict(saved)
+
+    def upsert_orchestrator_run(self, session_id: str, orchestrator_run: dict[str, Any]) -> dict[str, Any]:
+        orchestration_id = str(orchestrator_run.get("orchestrationID") or "").strip()
+        if not orchestration_id:
+            raise ValueError("编排运行缺少 orchestrationID")
+        with self._lock:
+            session = self.require_session(session_id)
+            runs = list(session["info"].get("orchestratorRuns") or [])
+            existing_index = next(
+                (
+                    index
+                    for index, item in enumerate(runs)
+                    if str(item.get("orchestrationID") or "") == orchestration_id
+                ),
+                None,
+            )
+            if existing_index is None:
+                saved = deepcopy(orchestrator_run)
+                runs.append(saved)
+            else:
+                saved = {**runs[existing_index], **deepcopy(orchestrator_run)}
+                runs[existing_index] = saved
+            session["info"]["orchestratorRuns"] = runs[-500:]
+            return deepcopy(saved)
+
+    def upsert_agent_thread(
+        self,
+        session_id: str,
+        agent: dict[str, Any],
+        *,
+        touch: bool = True,
+    ) -> dict[str, Any]:
+        agent_id = str(agent.get("id") or "").strip()
+        if not agent_id:
+            raise ValueError("子智能体状态缺少 id")
+        with self._lock:
+            session = self.require_session(session_id)
+            threads = list(session["info"].get("agentThreads") or [])
+            index = next(
+                (position for position, item in enumerate(threads) if str(item.get("id") or "") == agent_id),
+                None,
+            )
+            if index is None:
+                saved = deepcopy(agent)
+                threads.append(saved)
+            else:
+                saved = {**threads[index], **deepcopy(agent)}
+                threads[index] = saved
+            session["info"]["agentThreads"] = threads
+            if touch:
+                self._touch(session)
+            return deepcopy(saved)
+
+    def append_agent_message(self, session_id: str, message: dict[str, Any]) -> dict[str, Any]:
+        message_id = str(message.get("id") or "").strip()
+        if not message_id:
+            raise ValueError("智能体消息缺少 id")
+        with self._lock:
+            session = self.require_session(session_id)
+            messages = list(session["info"].get("agentMessages") or [])
+            index = next(
+                (position for position, item in enumerate(messages) if str(item.get("id") or "") == message_id),
+                None,
+            )
+            saved = deepcopy(message)
+            if index is None:
+                messages.append(saved)
+            else:
+                messages[index] = {**messages[index], **saved}
+                saved = messages[index]
+            session["info"]["agentMessages"] = messages[-500:]
+            self._touch(session)
+            return deepcopy(saved)
 
     def require_session(self, session_id: str) -> dict[str, Any]:
         with self._lock:
@@ -332,23 +411,84 @@ class SessionStore:
         with self._lock:
             return deepcopy(self.require_session(session_id).get("modelEvents") or [])
 
-    def get_character_action(self, session_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            state = self.require_session(session_id).get("characterRuntime")
-            return dict(state) if isinstance(state, dict) else None
-
-    def set_character_action(self, session_id: str, state: dict[str, Any] | None) -> dict[str, Any] | None:
+    def get_character_action(
+        self,
+        session_id: str,
+        character_id: int | str | None = None,
+    ) -> dict[str, Any] | None:
         with self._lock:
             session = self.require_session(session_id)
+            if character_id is not None:
+                performances = session["info"].get("characterPerformances")
+                record = performances.get(str(character_id)) if isinstance(performances, dict) else None
+                state = record.get("current") if isinstance(record, dict) else None
+                if isinstance(state, dict):
+                    return deepcopy(state)
+                runtime = session.get("characterRuntime")
+                if isinstance(runtime, dict) and str(runtime.get("characterID")) == str(character_id):
+                    return deepcopy(runtime)
+                return None
+            state = session.get("characterRuntime")
+            return deepcopy(state) if isinstance(state, dict) else None
+
+    def get_character_action_history(
+        self,
+        session_id: str,
+        character_id: int | str,
+        limit: int = _CHARACTER_ACTION_HISTORY_LIMIT,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            session = self.require_session(session_id)
+            performances = session["info"].get("characterPerformances")
+            record = performances.get(str(character_id)) if isinstance(performances, dict) else None
+            recent = record.get("recent") if isinstance(record, dict) else None
+            if not isinstance(recent, list):
+                return []
+            return deepcopy(recent[: max(0, limit)])
+
+    def set_character_action(
+        self,
+        session_id: str,
+        state: dict[str, Any] | None,
+        *,
+        record_history: bool = True,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            session = self.require_session(session_id)
+            saved = deepcopy(state) if isinstance(state, dict) else None
             previous = session.get("characterRuntime") if isinstance(session.get("characterRuntime"), dict) else {}
-            next_state = dict(state) if isinstance(state, dict) else None
-            if next_state is not None:
-                next_state["revision"] = int(previous.get("revision") or 0) + 1
-                next_state["updatedAt"] = now_ms()
-            session["characterRuntime"] = next_state
-            session["info"]["characterRuntime"] = deepcopy(next_state)
+            if saved is not None:
+                saved["revision"] = int(previous.get("revision") or 0) + 1
+                saved["updatedAt"] = now_ms()
+            session["characterRuntime"] = saved
+            session["info"]["characterRuntime"] = deepcopy(saved)
+            character_id = saved.get("characterID") if saved else None
+            if character_id is not None:
+                performances = session["info"].setdefault("characterPerformances", {})
+                if not isinstance(performances, dict):
+                    performances = {}
+                    session["info"]["characterPerformances"] = performances
+                key = str(character_id)
+                existing = performances.get(key) if isinstance(performances.get(key), dict) else {}
+                recent = list(existing.get("recent") or [])
+                if record_history:
+                    action = saved.get("action") if isinstance(saved.get("action"), dict) else {}
+                    recent.insert(
+                        0,
+                        {
+                            "actionID": action.get("id"),
+                            "actionName": action.get("name") or action.get("action_label") or "",
+                            "intent": action.get("intent") or action.get("action_key") or "",
+                            "motion": saved.get("motion") or "none",
+                            "effect": saved.get("effect") or "none",
+                            "performanceID": saved.get("performanceID") or "",
+                            "time": saved.get("time") or now_ms(),
+                        },
+                    )
+                    recent = recent[: self._CHARACTER_ACTION_HISTORY_LIMIT]
+                performances[key] = {"current": deepcopy(saved), "recent": recent}
             self._touch(session)
-            return self.get_character_action(session_id)
+            return deepcopy(saved)
 
     def _touch(self, session: dict[str, Any]) -> None:
         session["info"]["time"]["updated"] = now_ms()

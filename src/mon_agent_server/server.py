@@ -60,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
         server.serve_forever()
     finally:
         hub.stop("shutdown")
+        app.close()
         server.server_close()
         shutdown_logging()
     return 0

@@ -3,8 +3,9 @@ import platform
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
-from mon_agent_server.config import create_core_base_url, environment_context, load_server_config
+from mon_agent_server.config import MonConfig, create_core_base_url, environment_context, load_server_config, publish_web_env_defaults
 
 
 class ConfigTest(unittest.TestCase):
@@ -19,6 +20,11 @@ class ConfigTest(unittest.TestCase):
                 "MON_AGENT_RENDER_LOG_FILE",
                 "MON_AGENT_RENDER_PLAIN_LOG_FILE",
                 "MON_AGENT_RENDER_PANELS_FILE",
+                "MON_AGENT_SEARCH_PROVIDER",
+                "MON_AGENT_SEARCH_TIMEOUT_MS",
+                "MON_AGENT_SEARCH_CACHE_TTL_SECONDS",
+                "MON_AGENT_FETCH_TIMEOUT_MS",
+                "MON_AGENT_FETCH_MAX_BYTES",
             ]
         }
         try:
@@ -58,6 +64,18 @@ class ConfigTest(unittest.TestCase):
     def test_core_base_url_normalizes_public_bind_host(self):
         self.assertEqual(create_core_base_url(None, "0.0.0.0", 40011), "http://127.0.0.1:40011")
         self.assertEqual(create_core_base_url("http://0.0.0.0:40011", None, 1), "http://127.0.0.1:40011")
+
+    def test_search_config_publishes_defaults_without_overriding_environment(self):
+        config = MonConfig(
+            data={"search": {"PROVIDER": "exa,brave", "EXA_API_KEY": "config-key", "FETCH_MAX_BYTES": "1000000"}},
+            workspace_root=Path("/tmp"),
+            files=[],
+        )
+        with patch.dict(os.environ, {"EXA_API_KEY": "environment-key"}, clear=True):
+            publish_web_env_defaults(config)
+            self.assertEqual(os.environ["MON_AGENT_SEARCH_PROVIDER"], "exa,brave")
+            self.assertEqual(os.environ["EXA_API_KEY"], "environment-key")
+            self.assertEqual(os.environ["MON_AGENT_FETCH_MAX_BYTES"], "1000000")
 
 
 if __name__ == "__main__":

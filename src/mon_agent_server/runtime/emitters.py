@@ -19,6 +19,8 @@ def runtime_error_summary(error: Any) -> str:
         return "模型鉴权失败：请检查当前模型的 API Key。"
     if "429" in normalized or "too many requests" in normalized or "rate limit" in normalized:
         return "模型服务繁忙：请求受到频率限制，请稍后重试。"
+    if any(code in normalized for code in ("500", "502", "503", "504")) or "internal server error" in normalized:
+        return "模型服务暂时不可用：自动重试后仍未恢复，请稍后再试。"
     if "connection refused" in normalized or "name or service not known" in normalized:
         return "模型连接失败：当前无法连接模型服务。"
     concise = message if len(message) <= 240 else f"{message[:237]}..."
@@ -114,14 +116,27 @@ class RuntimeEmitterMixin:
                 self.begin_assistant_message(run_state, message)
             self.upsert_assistant(session_id, message, run_state, done=True)
             has_tool_calls = any(block.get("type") == "toolCall" for block in (message.get("content") or []))
+            failed = bool(message.get("errorMessage")) or message.get("stopReason") in {"error", "aborted"}
             if not has_tool_calls:
                 run_state.final_assistant_message_id = run_state.assistant_message_id
-            context_message = dict(message)
-            if run_state.speaker:
-                context_message["contextSpeaker"] = dict(run_state.speaker)
-            self.store.append_context_message(session_id, context_message, turn_id=run_state.run_id)
             if message.get("errorMessage"):
                 run_state.error_message = str(message.get("errorMessage"))
+            if not failed:
+                context_message = dict(message)
+                if run_state.speaker:
+                    context_message["contextSpeaker"] = dict(run_state.speaker)
+                self.store.append_context_message(session_id, context_message, turn_id=run_state.run_id)
+            return
+        if event_type == "model_retry":
+            attempt = int(event.get("attempt") or 1)
+            max_attempts = int(event.get("maxAttempts") or attempt)
+            delay_ms = int(event.get("delayMs") or 0)
+            wait_text = f"，将在 {delay_ms / 1000:g} 秒后继续" if delay_ms > 0 else ""
+            self.emit_runtime_thinking(
+                session_id,
+                run_state,
+                f"模型连接暂时失败，正在自动重试（第 {attempt}/{max_attempts} 次）{wait_text}。",
+            )
             return
         if event_type == "message_end" and message.get("role") == "toolResult":
             self.store.append_context_message(session_id, message, turn_id=run_state.run_id)

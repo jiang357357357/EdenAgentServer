@@ -47,7 +47,7 @@ class PermissionBroker:
         with self._lock:
             if self._mode == "full_access":
                 return True
-        return f"{permission}:{pattern}" in self._always_allowed or f"{permission}:*" in self._always_allowed
+            return f"{permission}:{pattern}" in self._always_allowed or f"{permission}:*" in self._always_allowed
 
     def ask(self, request: dict[str, Any]) -> str:
         request_id = create_id("per")
@@ -58,21 +58,25 @@ class PermissionBroker:
         self._events.emit({"type": "permission.asked", "properties": full_request})
         answered = waiter.event.wait(timeout=self._timeout_seconds)
         if not answered:
+            timed_out = False
             with self._lock:
                 current = self._waiters.get(request_id)
                 if current is waiter:
                     self._waiters.pop(request_id, None)
-            self._events.emit(
-                {
-                    "type": "permission.replied",
-                    "properties": {
-                        "sessionID": waiter.request.get("sessionID"),
-                        "requestID": request_id,
-                        "reply": "reject",
-                        "reason": "timeout",
-                    },
-                }
-            )
+                    waiter.reply = "reject"
+                    timed_out = True
+            if timed_out:
+                self._events.emit(
+                    {
+                        "type": "permission.replied",
+                        "properties": {
+                            "sessionID": waiter.request.get("sessionID"),
+                            "requestID": request_id,
+                            "reply": "reject",
+                            "reason": "timeout",
+                        },
+                    }
+                )
         return waiter.reply or "reject"
 
     def reject_all(self, session_id: str | None = None, reason: str = "cancelled") -> int:
@@ -82,10 +86,10 @@ class PermissionBroker:
                 for request_id, waiter in self._waiters.items()
                 if session_id is None or waiter.request.get("sessionID") == session_id
             ]
-            for request_id, _waiter in selected:
+            for request_id, waiter in selected:
                 self._waiters.pop(request_id, None)
+                waiter.reply = "reject"
         for request_id, waiter in selected:
-            waiter.reply = "reject"
             waiter.event.set()
             self._events.emit(
                 {
@@ -103,15 +107,15 @@ class PermissionBroker:
     def reply(self, request_id: str, reply: str, message: str | None = None) -> bool:
         with self._lock:
             waiter = self._waiters.pop(request_id, None)
-        if not waiter:
-            return False
-        if reply == "always":
-            patterns = waiter.request.get("always") or waiter.request.get("patterns") or []
-            for pattern in patterns:
-                self._always_allowed.add(f"{waiter.request.get('permission')}:{pattern}")
-        if message:
-            waiter.request.setdefault("metadata", {})["userMessage"] = message
-        waiter.reply = reply
+            if not waiter:
+                return False
+            if reply == "always":
+                patterns = waiter.request.get("always") or waiter.request.get("patterns") or []
+                for pattern in patterns:
+                    self._always_allowed.add(f"{waiter.request.get('permission')}:{pattern}")
+            if message:
+                waiter.request.setdefault("metadata", {})["userMessage"] = message
+            waiter.reply = reply
         waiter.event.set()
         self._events.emit(
             {

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from ..brokers import PermissionBroker, QuestionBroker, ScreenCaptureBroker
 from ..core import CoreClient
@@ -24,3 +24,6 @@ class MonToolContext:
     set_character_action: Callable[[dict[str, Any]], None] | None = None
     get_message_id: Callable[[], str | None] | None = None
     get_current_files: Callable[[], list[dict[str, Any]]] | None = None
+    agent_path: str = "/root"
+    subagent_role_names: tuple[str, ...] = ()
+    subagent_dispatch: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None

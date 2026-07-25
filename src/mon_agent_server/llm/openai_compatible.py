@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 import json
+import ssl
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Callable
@@ -68,207 +70,159 @@ def _stream_openai_compatible_sync(
     push({"type": "start", "partial": deepcopy(partial)})
 
     payload = _openai_stream_payload(model, context, options)
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(
-        endpoint_to_chat_url(model),
-        data=body,
-        method="POST",
-        headers={
-            "content-type": "application/json",
-            "authorization": f"Bearer {api_key}",
-            "accept": "text/event-stream",
-            "user-agent": http_user_agent(),
-        },
-    )
-
     text_index: int | None = None
     thinking_index: int | None = None
     tool_indexes: dict[int, int] = {}
     tool_argument_buffers: dict[int, str] = {}
     finish_reason = "stop"
     usage: dict[str, Any] | None = None
+    stream_started = False
 
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            for data in _iter_sse_data(response):
-                if data == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(chunk.get("usage"), dict):
-                    usage = chunk.get("usage")
-                choice = (chunk.get("choices") or [{}])[0]
-                delta = choice.get("delta") or {}
-                if choice.get("finish_reason"):
-                    finish_reason = choice.get("finish_reason")
+    def request_for_payload() -> urllib.request.Request:
+        return urllib.request.Request(
+            endpoint_to_chat_url(model),
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            method="POST",
+            headers={
+                "content-type": "application/json",
+                "authorization": f"Bearer {api_key}",
+                "accept": "text/event-stream",
+                "user-agent": http_user_agent(),
+            },
+        )
 
-                reasoning_field = next(
-                    (
-                        field
-                        for field in ("reasoning_content", "reasoning", "reasoning_text")
-                        if isinstance(delta.get(field), str) and delta.get(field)
-                    ),
-                    None,
-                )
-                reasoning_delta = delta.get(reasoning_field) if reasoning_field else None
-                if isinstance(reasoning_delta, str) and reasoning_delta:
-                    content = partial.setdefault("content", [])
-                    if thinking_index is None:
-                        thinking_index = len(content)
-                        signature = (
-                            "reasoning_content"
-                            if model.get("provider") == "opencode-go" and reasoning_field == "reasoning"
-                            else reasoning_field
-                        )
-                        content.append({"type": "thinking", "thinking": "", "thinkingSignature": signature})
-                        push_partial({"type": "thinking_start", "contentIndex": thinking_index})
-                    content[thinking_index]["thinking"] += reasoning_delta
-                    push_partial({"type": "thinking_delta", "contentIndex": thinking_index, "delta": reasoning_delta})
+    def consume(response: Any) -> bool:
+        nonlocal finish_reason, stream_started, thinking_index, text_index, usage
+        received_data = False
+        for data in _iter_sse_data(response):
+            received_data = True
+            stream_started = True
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(chunk.get("usage"), dict):
+                usage = chunk.get("usage")
+            choice = (chunk.get("choices") or [{}])[0]
+            delta = choice.get("delta") or {}
+            if choice.get("finish_reason"):
+                finish_reason = choice.get("finish_reason")
 
-                text_delta = delta.get("content")
-                if isinstance(text_delta, str) and text_delta:
-                    content = partial.setdefault("content", [])
-                    if text_index is None:
-                        text_index = len(content)
-                        content.append({"type": "text", "text": ""})
-                        push_partial({"type": "text_start", "contentIndex": text_index})
-                    content[text_index]["text"] += text_delta
-                    push_partial({"type": "text_delta", "contentIndex": text_index, "delta": text_delta})
-
-                for call_delta in delta.get("tool_calls") or []:
-                    call_position = int(call_delta.get("index") or 0)
-                    function = call_delta.get("function") or {}
-                    content = partial.setdefault("content", [])
-                    if call_position not in tool_indexes:
-                        tool_indexes[call_position] = len(content)
-                        tool_argument_buffers[call_position] = ""
-                        content.append(
-                            {
-                                "type": "toolCall",
-                                "id": call_delta.get("id") or f"call_{now_ms()}_{call_position}",
-                                "name": function.get("name") or "unknown_tool",
-                                "arguments": {},
-                            }
-                        )
-                        push_partial({"type": "toolcall_start", "contentIndex": tool_indexes[call_position]})
-                    block = content[tool_indexes[call_position]]
-                    if call_delta.get("id"):
-                        block["id"] = call_delta.get("id")
-                    if function.get("name"):
-                        block["name"] = function.get("name")
-                    arguments_delta = function.get("arguments")
-                    if isinstance(arguments_delta, str) and arguments_delta:
-                        tool_argument_buffers[call_position] += arguments_delta
-                        block["arguments"] = parse_tool_arguments(tool_argument_buffers[call_position])
-                        push_partial(
-                            {
-                                "type": "toolcall_delta",
-                                "contentIndex": tool_indexes[call_position],
-                                "delta": arguments_delta,
-                            }
-                        )
-    except urllib.error.HTTPError as error:
-        text = error.read().decode("utf-8", errors="replace")
-        if error.code in {400, 422} and "stream_options" in text:
-            payload.pop("stream_options", None)
-            retry_request = urllib.request.Request(
-                endpoint_to_chat_url(model),
-                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                method="POST",
-                headers={
-                    "content-type": "application/json",
-                    "authorization": f"Bearer {api_key}",
-                    "accept": "text/event-stream",
-                    "user-agent": http_user_agent(),
-                },
+            reasoning_field = next(
+                (
+                    field
+                    for field in ("reasoning_content", "reasoning", "reasoning_text")
+                    if isinstance(delta.get(field), str) and delta.get(field)
+                ),
+                None,
             )
-            with urllib.request.urlopen(retry_request, timeout=120) as response:
-                for data in _iter_sse_data(response):
-                    if data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(chunk.get("usage"), dict):
-                        usage = chunk.get("usage")
-                    choice = (chunk.get("choices") or [{}])[0]
-                    delta = choice.get("delta") or {}
-                    if choice.get("finish_reason"):
-                        finish_reason = choice.get("finish_reason")
-
-                    reasoning_field = next(
-                        (
-                            field
-                            for field in ("reasoning_content", "reasoning", "reasoning_text")
-                            if isinstance(delta.get(field), str) and delta.get(field)
-                        ),
-                        None,
+            reasoning_delta = delta.get(reasoning_field) if reasoning_field else None
+            if isinstance(reasoning_delta, str) and reasoning_delta:
+                content = partial.setdefault("content", [])
+                if thinking_index is None:
+                    thinking_index = len(content)
+                    signature = (
+                        "reasoning_content"
+                        if model.get("provider") == "opencode-go" and reasoning_field == "reasoning"
+                        else reasoning_field
                     )
-                    reasoning_delta = delta.get(reasoning_field) if reasoning_field else None
-                    if isinstance(reasoning_delta, str) and reasoning_delta:
-                        content = partial.setdefault("content", [])
-                        if thinking_index is None:
-                            thinking_index = len(content)
-                            signature = (
-                                "reasoning_content"
-                                if model.get("provider") == "opencode-go" and reasoning_field == "reasoning"
-                                else reasoning_field
-                            )
-                            content.append({"type": "thinking", "thinking": "", "thinkingSignature": signature})
-                            push_partial({"type": "thinking_start", "contentIndex": thinking_index})
-                        content[thinking_index]["thinking"] += reasoning_delta
-                        push_partial({"type": "thinking_delta", "contentIndex": thinking_index, "delta": reasoning_delta})
+                    content.append({"type": "thinking", "thinking": "", "thinkingSignature": signature})
+                    push_partial({"type": "thinking_start", "contentIndex": thinking_index})
+                content[thinking_index]["thinking"] += reasoning_delta
+                push_partial({"type": "thinking_delta", "contentIndex": thinking_index, "delta": reasoning_delta})
 
-                    text_delta = delta.get("content")
-                    if isinstance(text_delta, str) and text_delta:
-                        content = partial.setdefault("content", [])
-                        if text_index is None:
-                            text_index = len(content)
-                            content.append({"type": "text", "text": ""})
-                            push_partial({"type": "text_start", "contentIndex": text_index})
-                        content[text_index]["text"] += text_delta
-                        push_partial({"type": "text_delta", "contentIndex": text_index, "delta": text_delta})
+            text_delta = delta.get("content")
+            if isinstance(text_delta, str) and text_delta:
+                content = partial.setdefault("content", [])
+                if text_index is None:
+                    text_index = len(content)
+                    content.append({"type": "text", "text": ""})
+                    push_partial({"type": "text_start", "contentIndex": text_index})
+                content[text_index]["text"] += text_delta
+                push_partial({"type": "text_delta", "contentIndex": text_index, "delta": text_delta})
 
-                    for call_delta in delta.get("tool_calls") or []:
-                        call_position = int(call_delta.get("index") or 0)
-                        function = call_delta.get("function") or {}
-                        content = partial.setdefault("content", [])
-                        if call_position not in tool_indexes:
-                            tool_indexes[call_position] = len(content)
-                            tool_argument_buffers[call_position] = ""
-                            content.append(
-                                {
-                                    "type": "toolCall",
-                                    "id": call_delta.get("id") or f"call_{now_ms()}_{call_position}",
-                                    "name": function.get("name") or "unknown_tool",
-                                    "arguments": {},
-                                }
-                            )
-                            push_partial({"type": "toolcall_start", "contentIndex": tool_indexes[call_position]})
-                        block = content[tool_indexes[call_position]]
-                        if call_delta.get("id"):
-                            block["id"] = call_delta.get("id")
-                        if function.get("name"):
-                            block["name"] = function.get("name")
-                        arguments_delta = function.get("arguments")
-                        if isinstance(arguments_delta, str) and arguments_delta:
-                            tool_argument_buffers[call_position] += arguments_delta
-                            block["arguments"] = parse_tool_arguments(tool_argument_buffers[call_position])
-                            push_partial(
-                                {
-                                    "type": "toolcall_delta",
-                                    "contentIndex": tool_indexes[call_position],
-                                    "delta": arguments_delta,
-                                }
-                            )
-            text = ""
-        if not text:
-            pass
-        else:
-            raise RuntimeError(f"模型请求失败: {error.code} {error.reason} {text[:800]}") from error
+            for call_delta in delta.get("tool_calls") or []:
+                call_position = int(call_delta.get("index") or 0)
+                function = call_delta.get("function") or {}
+                content = partial.setdefault("content", [])
+                if call_position not in tool_indexes:
+                    tool_indexes[call_position] = len(content)
+                    tool_argument_buffers[call_position] = ""
+                    content.append(
+                        {
+                            "type": "toolCall",
+                            "id": call_delta.get("id") or f"call_{now_ms()}_{call_position}",
+                            "name": function.get("name") or "unknown_tool",
+                            "arguments": {},
+                        }
+                    )
+                    push_partial({"type": "toolcall_start", "contentIndex": tool_indexes[call_position]})
+                block = content[tool_indexes[call_position]]
+                if call_delta.get("id"):
+                    block["id"] = call_delta.get("id")
+                if function.get("name"):
+                    block["name"] = function.get("name")
+                arguments_delta = function.get("arguments")
+                if isinstance(arguments_delta, str) and arguments_delta:
+                    tool_argument_buffers[call_position] += arguments_delta
+                    block["arguments"] = parse_tool_arguments(tool_argument_buffers[call_position])
+                    push_partial(
+                        {
+                            "type": "toolcall_delta",
+                            "contentIndex": tool_indexes[call_position],
+                            "delta": arguments_delta,
+                        }
+                    )
+        return received_data
+
+    max_attempts = max(1, min(5, int(options.get("maxRetries", 2)) + 1))
+    max_delay_ms = max(0, int(options.get("maxRetryDelayMs") or 5_000))
+    attempt = 1
+    stream_options_fallback_used = False
+    while True:
+        stream_started = False
+        try:
+            with urllib.request.urlopen(request_for_payload(), timeout=120) as response:
+                consume(response)
+            if not stream_started:
+                raise EOFError("模型流在返回任何事件前结束")
+            break
+        except urllib.error.HTTPError as error:
+            error_text = error.read().decode("utf-8", errors="replace")
+            if (
+                not stream_options_fallback_used
+                and error.code in {400, 422}
+                and "stream_options" in error_text
+            ):
+                payload.pop("stream_options", None)
+                stream_options_fallback_used = True
+                continue
+            if error.code not in {408, 425, 429, 500, 502, 503, 504} or attempt >= max_attempts:
+                raise RuntimeError(f"模型请求失败: {error.code} {error.reason} {error_text[:800]}") from error
+            retry_reason = f"HTTP {error.code} {error.reason}"
+            status_code: int | None = error.code
+        except (urllib.error.URLError, ssl.SSLError, TimeoutError, ConnectionError, EOFError) as error:
+            if stream_started or attempt >= max_attempts:
+                raise
+            retry_reason = str(error)
+            status_code = None
+
+        attempt += 1
+        delay_ms = min(max_delay_ms, 500 * (2 ** (attempt - 2)))
+        push(
+            {
+                "type": "provider_retry",
+                "attempt": attempt,
+                "maxAttempts": max_attempts,
+                "delayMs": delay_ms,
+                "reason": retry_reason,
+                "statusCode": status_code,
+            }
+        )
+        if delay_ms:
+            time.sleep(delay_ms / 1000)
 
     if thinking_index is not None:
         push_partial({"type": "thinking_end", "contentIndex": thinking_index})

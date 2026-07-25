@@ -8,6 +8,7 @@ from .logs import active_logs_root, publish_log_env_defaults
 from .monconfig import MonConfig, load_mon_config
 from .schema import EnvironmentConfig, HubConfig, ServerConfig
 from .utils import create_core_base_url, env_float, env_path
+from .web import publish_web_env_defaults
 
 
 def default_agent_root() -> Path:
@@ -17,6 +18,7 @@ def default_agent_root() -> Path:
 def load_server_config(agent_root: Path | None = None) -> ServerConfig:
     root = (agent_root or default_agent_root()).resolve()
     config = load_mon_config(root)
+    publish_web_env_defaults(config)
     core_config = load_mon_config((config.workspace_root / ".." / "Backend" / "Server").resolve())
     hub_host = os.environ.get("MON_AGENT_HUB_HOST") or config.get("hub", "HUB_ZMQ_HOST", "127.0.0.1") or "127.0.0.1"
     hub_port = int(os.environ.get("MON_AGENT_HUB_PORT") or config.number("hub", "HUB_ZMQ_PORT", 40051))
@@ -127,4 +129,5 @@ __all__ = [
     "load_server_config",
     "localize_environment_times",
     "merge_environment_context",
+    "publish_web_env_defaults",
 ]

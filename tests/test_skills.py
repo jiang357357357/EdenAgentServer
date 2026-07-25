@@ -31,7 +31,7 @@ def _tool_names(tools: list[Any]) -> set[str]:
 
 
 class SkillCatalogTest(unittest.TestCase):
-    def test_catalog_contains_the_nine_bounded_skills(self) -> None:
+    def test_catalog_contains_the_bounded_skills(self) -> None:
         self.assertEqual(
             {skill.id for skill in SKILL_DEFINITIONS},
             {
@@ -44,6 +44,7 @@ class SkillCatalogTest(unittest.TestCase):
                 "qq-communication",
                 "email-communication",
                 "workspace-development",
+                "multi-agent",
             },
         )
 
@@ -54,7 +55,7 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertEqual(
             names,
             {
-                "activate_skill",
+                "load_skill",
                 "ask_user",
                 "list_character_actions",
                 "switch_character_action",
@@ -73,7 +74,7 @@ class SkillCatalogTest(unittest.TestCase):
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
         initial_tools = runtime.active_tools()
 
-        result = runtime.activate(["memo-management"])
+        result = runtime.load(["memo-management"])
         update = runtime.prepare_next_turn(
             {
                 "context": {
@@ -102,10 +103,22 @@ class SkillCatalogTest(unittest.TestCase):
     def test_workspace_development_exposes_apply_patch(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
 
-        result = runtime.activate(["workspace-development"])
+        result = runtime.load(["workspace-development"])
 
         self.assertTrue(result["success"])
         self.assertIn("apply_patch", _tool_names(runtime.active_tools()))
+
+    def test_multi_agent_tools_are_only_exposed_after_skill_load(self) -> None:
+        runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
+
+        self.assertNotIn("spawn_agent", _tool_names(runtime.active_tools()))
+        result = runtime.load(["multi-agent"])
+
+        self.assertTrue(result["success"])
+        names = _tool_names(runtime.active_tools())
+        self.assertIn("spawn_agent", names)
+        self.assertIn("wait_agent", names)
+        self.assertIn("interrupt_agent", names)
 
     def test_self_awake_has_system_skills_but_not_user_mutation_tools(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="self_awake")
@@ -121,19 +134,44 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertNotIn("send_external_email", names)
         self.assertNotIn("web_search", names)
 
-        result = runtime.activate(["web-research"])
+        result = runtime.load(["web-research"])
         self.assertTrue(result["success"])
         self.assertIn("web_search", _tool_names(runtime.active_tools()))
 
     def test_skill_aware_prompt_lists_catalog_and_active_instructions(self) -> None:
-        initial = build_agent_tool_section("user_chat", True, ())
-        active = build_agent_tool_section("user_chat", True, ("memo-management",))
+        runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
+        initial = build_agent_tool_section(
+            "user_chat",
+            True,
+            runtime.loaded_skill_ids,
+            runtime.prompt_section(),
+        )
+        runtime.load(["memo-management"])
+        active = build_agent_tool_section(
+            "user_chat",
+            True,
+            runtime.loaded_skill_ids,
+            runtime.prompt_section(),
+        )
 
-        self.assertIn("activate_skill", initial)
+        self.assertIn("load_skill", initial)
+        self.assertIn("<available_skills>", initial)
         self.assertIn("memo-management", initial)
         self.assertIn("workspace-development", initial)
-        self.assertIn("当前已激活技能说明", active)
+        self.assertIn("当前已加载技能", active)
         self.assertIn("create_reminder", active)
+
+    def test_explicit_skill_command_preloads_skill_and_preserves_arguments(self) -> None:
+        runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
+
+        result = runtime.load_command("/skill:web-research 查一下今天的新闻")
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result["success"])
+        self.assertEqual(result["loaded"], ["web-research"])
+        self.assertEqual(result["userMessage"], "查一下今天的新闻")
+        self.assertIn("web_search", _tool_names(runtime.active_tools()))
 
 
 class SkillActivationLoopTest(unittest.IsolatedAsyncioTestCase):
@@ -155,7 +193,7 @@ class SkillActivationLoopTest(unittest.IsolatedAsyncioTestCase):
                             {
                                 "type": "toolCall",
                                 "id": "activate-1",
-                                "name": "activate_skill",
+                                "name": "load_skill",
                                 "arguments": {"skills": ["memo-management"]},
                             }
                         ],

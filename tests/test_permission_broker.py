@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 import threading
+from unittest.mock import patch
 
 from mon_agent_server.brokers import PermissionBroker
 from mon_agent_server.events import EventBus
@@ -43,6 +44,48 @@ class PermissionBrokerTest(unittest.TestCase):
         thread.join(timeout=1)
         self.assertEqual(result, ["reject"])
         self.assertEqual(broker.list(), [])
+
+    def test_reply_wins_timeout_race_without_duplicate_terminal_event(self) -> None:
+        class RecordingEvents:
+            def __init__(self) -> None:
+                self.items = []
+
+            def emit(self, event) -> None:
+                self.items.append(event)
+
+        real_event = threading.Event
+        wait_entered = real_event()
+        release_wait = real_event()
+
+        class FalseAfterReplyEvent:
+            def wait(self, timeout=None):
+                wait_entered.set()
+                release_wait.wait(timeout=1)
+                return False
+
+            def set(self):
+                return None
+
+        events = RecordingEvents()
+        broker = PermissionBroker(events, timeout_seconds=1)
+        result: list[str] = []
+        worker = threading.Thread(
+            target=lambda: result.append(broker.ask({"sessionID": "ses-race", "permission": "write"})),
+            daemon=True,
+        )
+
+        with patch("mon_agent_server.brokers.broker.threading.Event", return_value=FalseAfterReplyEvent()):
+            worker.start()
+            self.assertTrue(wait_entered.wait(timeout=1))
+            request_id = broker.list()[0]["id"]
+            self.assertTrue(broker.reply(request_id, "once"))
+            release_wait.set()
+            worker.join(timeout=1)
+
+        self.assertEqual(result, ["once"])
+        replied = [item for item in events.items if item["type"] == "permission.replied"]
+        self.assertEqual(len(replied), 1)
+        self.assertEqual(replied[0]["properties"]["reply"], "once")
 
 
 if __name__ == "__main__":

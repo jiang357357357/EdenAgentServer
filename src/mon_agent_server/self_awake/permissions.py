@@ -76,6 +76,7 @@ def is_memo_due_context(context_data: dict[str, Any] | None) -> bool:
 def self_awake_before_tool_call(context_data: dict[str, Any] | None):
     notification_calls = 0
     allowed_tools = {
+        "load_skill",
         "activate_skill",
         "loaded_tools",
         "get_self_awake_state",

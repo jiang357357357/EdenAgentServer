@@ -19,7 +19,7 @@ core_logger = get_logger("MonAgent", "Core")
 
 CORS_HEADERS = {
     "access-control-allow-origin": "*",
-    "access-control-allow-headers": "content-type, authorization",
+    "access-control-allow-headers": "content-type, authorization, x-mon-client-id",
     "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
 }
 
@@ -48,6 +48,9 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         self.handle_request()
 
     def do_PUT(self) -> None:
+        self.handle_request()
+
+    def do_DELETE(self) -> None:
         self.handle_request()
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -81,6 +84,8 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                 },
                 error.status,
             )
+        except ValueError as error:
+            self.json_response({"error": str(error)}, HTTPStatus.BAD_REQUEST)
         except Exception as error:
             http_logger.error(f"request failed: {error}", exc_info=True)
             self.json_response({"error": str(error)}, 500)

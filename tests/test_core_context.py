@@ -86,6 +86,46 @@ class CoreContextTest(unittest.TestCase):
 
         self.assertEqual(restored["modelEvents"], [])
 
+    def test_session_sync_and_restore_preserves_per_character_performance_state(self):
+        client = CoreClient("http://core.test")
+        captured = {}
+        client._request = lambda _path, _token, **kwargs: captured.update(kwargs["payload"]) or {"id": 1}
+        performances = {
+            "9": {
+                "current": {"characterID": 9, "action": {"name": "抬手强调"}},
+                "recent": [{"actionName": "抬手强调"}],
+            }
+        }
+
+        client.sync_agent_session(
+            "token",
+            {
+                "id": "ses_actions",
+                "title": "多人会话",
+                "characterPerformances": performances,
+                "time": {"created": 1, "updated": 2},
+            },
+        )
+        stored_payload = captured["session_payload"]
+        self.assertEqual(stored_payload["characterPerformances"], performances)
+
+        client._request = lambda _path, _token, **_kwargs: {
+            "results": [
+                {
+                    "id": 1,
+                    "external_session_id": "ses_actions",
+                    "title": "多人会话",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "session_payload": stored_payload,
+                    "messages": [],
+                }
+            ]
+        }
+
+        restored = client.get_agent_session("token", "ses_actions")
+        self.assertEqual(restored["info"]["characterPerformances"], performances)
+
 
 if __name__ == "__main__":
     unittest.main()

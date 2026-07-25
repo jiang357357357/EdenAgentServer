@@ -74,7 +74,7 @@ def build_character_identity_section(character: dict[str, Any] | None = None, *,
     lines = [
         f"你是「{name}」。",
         "你需要以这个角色的身份理解用户、观察环境、思考和行动。",
-        "你对外呈现的身份就是当前角色，不要称自己为默认助手、助手配置或 MonAgent。",
+        "你以当前角色的姓名、关系和表达方式持续参与会话，并对本轮理解、行动与回复负责。",
     ]
     if character.get("signature"):
         lines.append(f"角色签名：{_clean_prompt_text(character['signature'], 800)}")
@@ -130,18 +130,95 @@ def build_assistant_context_section(core: dict[str, Any] | None = None) -> str:
     return "\n".join(lines)
 
 
+def build_environment_awareness_section(environment: dict[str, Any] | None = None) -> str:
+    if not isinstance(environment, dict):
+        return ""
+    runtime = environment.get("runtime") if isinstance(environment.get("runtime"), dict) else {}
+    lines = [
+        "以下内容由本地运行时提供，是当前环境事实。分析屏幕时优先使用这些事实，不要根据界面外观猜测冲突的操作系统或桌面环境。"
+    ]
+    operating_system = _clean_prompt_text(runtime.get("operating_system"), 80)
+    distribution = _clean_prompt_text(runtime.get("distribution"), 160)
+    os_release = _clean_prompt_text(runtime.get("os_release"), 120)
+    if operating_system or distribution:
+        os_text = distribution or operating_system
+        if operating_system and operating_system.lower() != os_text.lower():
+            os_text = f"{os_text}（{operating_system}）"
+        if os_release:
+            os_text += f"，内核 {os_release}"
+        lines.append(f"操作系统：{os_text}")
+    architecture = _clean_prompt_text(runtime.get("architecture"), 80)
+    if architecture:
+        lines.append(f"系统架构：{architecture}")
+    desktop_environment = _clean_prompt_text(runtime.get("desktop_environment"), 120)
+    desktop_session = _clean_prompt_text(runtime.get("desktop_session"), 120)
+    if desktop_environment or desktop_session:
+        lines.append(f"桌面环境：{desktop_environment or desktop_session}，桌面会话：{desktop_session or '-'}")
+    session_type = _clean_prompt_text(runtime.get("session_type"), 80)
+    if session_type:
+        lines.append(f"图形会话类型：{session_type}")
+    timezone = _clean_prompt_text(environment.get("timezone"), 100)
+    locale = _clean_prompt_text(environment.get("locale"), 80)
+    if timezone or locale:
+        lines.append(f"时区：{timezone or '-'}，语言区域：{locale or '-'}")
+    location = environment.get("location") if isinstance(environment.get("location"), dict) else {}
+    location_text = " ".join(
+        str(location.get(key) or "").strip()
+        for key in ("country", "region", "city", "district")
+        if str(location.get(key) or "").strip()
+    )
+    if location_text:
+        lines.append(f"配置位置：{location_text}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def build_current_character_action_section(
+    current_action: dict[str, Any] | None = None,
+    recent_actions: list[dict[str, Any]] | None = None,
+) -> str:
+    if not isinstance(current_action, dict):
+        return ""
+    action = current_action.get("action") if isinstance(current_action.get("action"), dict) else {}
+    group = current_action.get("group") if isinstance(current_action.get("group"), dict) else {}
+    lines: list[str] = []
+    action_name = _clean_prompt_text(action.get("name") or action.get("action_label") or current_action.get("actionName"), 300)
+    action_intent = _clean_prompt_text(action.get("intent") or current_action.get("intent"), 200)
+    if action_name or action_intent:
+        lines.append(f"当前前端显示动作：{action_name or '-'}")
+        if action_intent:
+            lines.append(f"当前动作意图：{action_intent}")
+        if group.get("name") or group.get("trigger"):
+            lines.append(f"当前动作组：{_clean_prompt_text(group.get('name') or '-', 300)} / 触发 {_clean_prompt_text(group.get('trigger') or '-', 200)}")
+        source = _clean_prompt_text(current_action.get("source"), 120)
+        if source:
+            lines.append(f"当前动作来源：{source}")
+        motion = _clean_prompt_text(current_action.get("motion"), 120)
+        effect = _clean_prompt_text(current_action.get("effect"), 120)
+        if motion or effect:
+            lines.append(f"最近角色演出：motion={motion or 'none'}，effect={effect or 'none'}")
+    recent_labels = [
+        _clean_prompt_text(item.get("actionName"), 120)
+        for item in (recent_actions or [])
+        if isinstance(item, dict) and _clean_prompt_text(item.get("actionName"), 120)
+    ]
+    if recent_labels:
+        lines.append(f"该角色最近自主选择的动作（新到旧）：{' → '.join(recent_labels)}")
+    return "\n".join(lines)
+
+
 def _build_skill_aware_tool_section(
     source: str,
     supports_images: bool | None,
     active_skill_ids: Iterable[str],
+    skill_resource_prompt: str | None = None,
 ) -> str:
     active = tuple(active_skill_ids)
     catalog = render_skill_catalog(source, active)
     active_instructions = render_active_skill_instructions(active)
     if source == "self_awake":
         lines = [
-            "本轮工具采用按需技能机制；系统已经激活自醒和到期提醒技能，其他能力只在确实需要时通过 activate_skill 加载。",
-            "后台自醒不等待用户，也不能调用未激活或不适合后台执行的能力。",
+            "本轮工具采用按需技能机制；系统已经加载自醒和到期提醒技能，其他技能只在确实需要时通过 load_skill 读取。",
+            "后台自醒不等待用户，也不能调用尚未加载或不适合后台执行的能力。",
             "每次后台自醒在输出最终 JSON 前必须且只能调用一次 notify_user；通知优先级、精准提醒内容和状态收尾以本轮任务协议为准。",
             "除非上下文明确提供 due_memos_checked=true，否则最终 JSON 前至少调用一次 list_due_memos。",
             "只有存在明确调试目标、事故日志或策略允许时才使用基础只读文件工具，不无目的浏览工作区。",
@@ -149,23 +226,29 @@ def _build_skill_aware_tool_section(
         ]
     else:
         vision_instruction = (
-            "当前对话模型支持图片输入：用户图片已经直接进入上下文；不要重复调用 analyze_image。需要查看桌面时先激活 visual-observation，再调用 analyze_screen。"
+            "当前对话模型支持图片输入：用户图片已经直接进入上下文；不要重复调用 analyze_image。需要查看桌面时先加载 visual-observation，再调用 analyze_screen。"
             if supports_images is True
-            else "当前对话模型不支持图片输入：附件会由角色绑定的 Vision 服务自动分析；需要额外分析图片或屏幕时先激活 visual-observation。"
+            else "当前对话模型不支持图片输入：附件会由角色绑定的 Vision 服务自动分析；需要额外分析图片或屏幕时先加载 visual-observation。"
         )
         lines = [
-            "本轮工具采用按需技能机制。基础工具可以直接调用；使用备忘录、网页、天气、视觉、通信或工作区写入能力前，必须先调用 activate_skill 激活匹配技能。",
-            "activate_skill 返回的技能说明是当前任务必须遵循的工作流；相关工具会从同一轮的下一次模型调用开始可用。不要猜测或直接调用尚未激活的工具。",
-            "你可以直接使用 read、ls、grep、find 读取和搜索当前工作区；写文件、编辑或执行命令前先激活 workspace-development。",
+            "本轮工具采用按需技能机制。基础工具可以直接调用；任务与技能描述匹配时，先调用 load_skill 读取完整工作流。",
+            "load_skill 返回的是技能说明，不是权限授权。宿主可能为可信技能启用相关工具，但所有受控操作仍独立检查权限。不要猜测尚未加载的技能正文。",
+            "你可以直接使用 read、ls、grep、find 读取和搜索当前工作区；写文件、编辑或执行命令前先加载 workspace-development。",
             vision_instruction,
             "只有表达所需的角色动作与当前状态不同，才调用 switch_character_action；状态相同时不要重复调用。需要确认准确动作名称时先调用 list_character_actions。",
+            "switch_character_action 的立绘动作、表情符号和立绘动效三个中文字段全部必填；平静表达时自主选择“无”，不需要换图时填写“保持当前”。",
+            "立绘动作由你根据本轮实际表达从动作列表中自主选择；不要仅凭角色的固定性格长期选择同一个姿势。",
+            "选择前比较当前动作和该角色最近的动作记录：可以为了自然连续性保持当前，也可以继续选择仍然最贴合语境的同一动作；如果已经连续重复，应认真比较其他动作，但不要为了变化而勉强选择不符合语境的动作。",
             "缺少继续执行所必需的信息、需要用户选择或确认边界时，使用 ask_user 展示问题卡片；闲聊或不影响继续的小问题可以直接回复。",
-            "技能激活不等同于授权；写文件、执行命令和其他受控操作仍必须经过权限系统。",
+            "技能加载不等同于授权；写文件、执行命令和其他受控操作仍必须经过权限系统。",
             "工具被拒绝、拦截或失败后先调整方案，不重复调用完全相同的失败工具。",
         ]
-    lines.extend(["", "可按需激活的技能：", catalog or "- 当前 profile 没有其他可激活技能。"])
-    if active_instructions:
-        lines.extend(["", "当前已激活技能说明：", active_instructions])
+    if skill_resource_prompt:
+        lines.extend(["", skill_resource_prompt])
+    else:
+        lines.extend(["", "可按需加载的技能：", catalog or "- 当前 profile 没有其他可加载技能。"])
+        if active_instructions:
+            lines.extend(["", "当前已加载技能说明：", active_instructions])
     return "\n".join(lines)
 
 
@@ -173,9 +256,10 @@ def build_agent_tool_section(
     source: str = "user_chat",
     supports_images: bool | None = None,
     active_skill_ids: Iterable[str] | None = None,
+    skill_resource_prompt: str | None = None,
 ) -> str:
     if active_skill_ids is not None:
-        return _build_skill_aware_tool_section(source, supports_images, active_skill_ids)
+        return _build_skill_aware_tool_section(source, supports_images, active_skill_ids, skill_resource_prompt)
     if source == "self_awake":
         return "\n".join(
             [
@@ -205,7 +289,7 @@ def build_agent_tool_section(
         [
             "工具是你观察和完成任务的方式，不是你对外表达的身份。",
             "你可以使用工具读取、搜索和修改当前工作区文件。",
-            "你可以使用 web_search 搜索实时网页信息，使用 web_fetch 抓取网页正文。",
+            "你可以使用 web_search 搜索实时网页信息，使用 web_fetch 抓取网页正文；回答中的重要事实应对应搜索结果的 source_id 和实际 URL。",
             vision_instruction,
             "你可以使用 get_calendar_context 查询节日、农历和近期特殊日期；可以使用 get_weather 查询实时天气。",
             "当用户询问天气、温度、降水或出行影响时优先使用 get_weather；询问节日、农历、今天是什么日子时优先使用 get_calendar_context。",
@@ -238,8 +322,12 @@ def build_agent_tool_section(
 def build_agent_system_prompt(
     core: dict[str, Any] | None = None,
     source: str = "user_chat",
+    current_character_action: dict[str, Any] | None = None,
+    recent_character_actions: list[dict[str, Any]] | None = None,
     supports_images: bool | None = None,
+    environment: dict[str, Any] | None = None,
     active_skill_ids: Iterable[str] | None = None,
+    skill_resource_prompt: str | None = None,
 ) -> str:
     character = (core or {}).get("character")
     sections = [
@@ -249,6 +337,15 @@ def build_agent_system_prompt(
     assistant_context = build_assistant_context_section(core)
     if assistant_context:
         sections.extend(["# 助手配置", assistant_context])
+    environment_context = build_environment_awareness_section(environment)
+    if environment_context:
+        sections.extend(["# 当前环境感知", environment_context])
+    current_action_context = build_current_character_action_section(
+        current_character_action,
+        recent_character_actions,
+    )
+    if current_action_context and source != "self_awake":
+        sections.extend(["# 当前前端动作", current_action_context])
     sections.extend(
         [
             "# 语言",
@@ -273,7 +370,7 @@ def build_agent_system_prompt(
                 ]
             ),
             "# 工具",
-            build_agent_tool_section(source, supports_images, active_skill_ids),
+            build_agent_tool_section(source, supports_images, active_skill_ids, skill_resource_prompt),
         ]
     )
     return "\n\n".join(sections)

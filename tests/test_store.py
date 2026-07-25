@@ -190,6 +190,51 @@ class StoreTest(unittest.TestCase):
         self.assertEqual([message["role"] for message in stored], ["compactionSummary", "user"])
         self.assertEqual(stored[0]["summary"], "旧消息已经摘要。")
 
+    def test_character_actions_are_isolated_and_remembered_per_character(self):
+        store = SessionStore()
+        session = store.create_session("")
+
+        def state(character_id, character_name, action_id, action_name, timestamp):
+            return {
+                "sessionID": session["id"],
+                "characterID": character_id,
+                "characterName": character_name,
+                "action": {"id": action_id, "name": action_name, "intent": "talk"},
+                "motion": "none",
+                "effect": "none",
+                "performanceID": f"perf_{timestamp}",
+                "time": timestamp,
+            }
+
+        store.set_character_action(session["id"], state(9, "莉莉安", 18, "抬手强调", 1))
+        store.set_character_action(session["id"], state(10, "伊芙", 36, "单手抚胸陈述", 2))
+        store.set_character_action(session["id"], state(9, "莉莉安", 20, "星星眼握拳兴奋", 3))
+
+        self.assertEqual(store.get_character_action(session["id"], 9)["action"]["name"], "星星眼握拳兴奋")
+        self.assertEqual(store.get_character_action(session["id"], 10)["action"]["name"], "单手抚胸陈述")
+        self.assertEqual(
+            [item["actionName"] for item in store.get_character_action_history(session["id"], 9)],
+            ["星星眼握拳兴奋", "抬手强调"],
+        )
+        self.assertIn("9", session["characterPerformances"])
+        self.assertIn("10", session["characterPerformances"])
+
+    def test_default_character_action_does_not_pollute_recent_choices(self):
+        store = SessionStore()
+        session = store.create_session("")
+        store.set_character_action(
+            session["id"],
+            {
+                "characterID": 10,
+                "action": {"id": 35, "name": "抚胸垂手", "intent": "idle"},
+                "source": "default",
+            },
+            record_history=False,
+        )
+
+        self.assertEqual(store.get_character_action_history(session["id"], 10), [])
+        self.assertEqual(store.get_character_action(session["id"], 10)["action"]["name"], "抚胸垂手")
+
 
 if __name__ == "__main__":
     unittest.main()

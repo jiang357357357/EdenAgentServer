@@ -97,6 +97,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "mon-agent-core" },
+    { name = "pyyaml" },
     { name = "pyzmq" },
     { name = "rich" },
 ]
@@ -104,6 +105,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "mon-agent-core", editable = "../AgentCore" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "pyzmq", specifier = ">=26" },
     { name = "rich", specifier = ">=13" },
 ]

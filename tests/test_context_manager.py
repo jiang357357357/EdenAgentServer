@@ -64,6 +64,27 @@ class ContextManagerTests(unittest.TestCase):
         self.assertIn("...[truncated 10 chars]", messages[0]["content"])
         self.assertEqual(source["payload"]["content"], original)
 
+    def test_failed_assistant_messages_are_removed_from_existing_history(self):
+        events = [
+            event(1, "user_message", {"role": "user", "content": "第一次请求"}),
+            event(
+                2,
+                "assistant_message",
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": ""}],
+                    "stopReason": "error",
+                    "errorMessage": "SSL EOF",
+                },
+            ),
+            event(3, "user_message", {"role": "user", "content": "重新请求"}),
+        ]
+
+        messages = ContextManager.compile(events)
+
+        self.assertEqual([message["role"] for message in messages], ["user", "user"])
+        self.assertEqual(messages[-1]["content"], "重新请求")
+
 
 if __name__ == "__main__":
     unittest.main()

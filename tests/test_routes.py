@@ -16,6 +16,7 @@ class RouteTest(unittest.TestCase):
         self.assertTrue(is_agent_api_route("/session/abc/prompt"))
         self.assertTrue(is_agent_api_route("/memos/1/complete"))
         self.assertTrue(is_agent_api_route("/screen-capture/cap_1/reply"))
+        self.assertTrue(is_agent_api_route("/skills/sample-skill/inspect-update"))
         self.assertFalse(is_agent_api_route("/assets/index.js"))
 
     def test_strip_api_prefix(self):
@@ -151,8 +152,122 @@ class RouteTest(unittest.TestCase):
         handled = handle_sessions(handler, "/session/session%201/abort", {}, "POST")
 
         self.assertTrue(handled)
-        self.assertEqual(calls, [("hydrate", "session 1", "core-token"), ("abort", "session 1")])
+        self.assertEqual(calls, [("abort", "session 1")])
         self.assertEqual(handler.response, ({"aborted": True, "sessionID": "session 1"}, 200))
+
+    def test_interrupt_subagent_route_decodes_target_and_calls_runtime(self):
+        calls = []
+
+        class Runtime:
+            def interrupt_subagent(self, session_id, target):
+                calls.append((session_id, target))
+                return {"target": target, "status": "interrupted"}
+
+        class App:
+            runtime = Runtime()
+
+            def ensure_hydrated(self, token, session_id):
+                calls.append(("hydrate", session_id, token))
+
+        class Handler:
+            headers = {"Authorization": "Bearer core-token"}
+            app = App()
+
+            def json_response(self, data, status=200):
+                self.response = (data, status)
+
+        handler = Handler()
+        handled = handle_sessions(
+            handler,
+            "/session/session%201/agents/%2Froot%2Fresearcher/interrupt",
+            {},
+            "POST",
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(calls[0], ("hydrate", "session 1", "core-token"))
+        self.assertEqual(calls[1], ("session 1", "/root/researcher"))
+        self.assertEqual(
+            handler.response,
+            ({"target": "/root/researcher", "status": "interrupted"}, 200),
+        )
+
+    def test_subagent_details_route_reads_durable_thread(self):
+        calls = []
+
+        class Runtime:
+            def get_subagent_thread_details(self, session_id, target, event_limit=500, include_messages=False):
+                calls.append((session_id, target, event_limit, include_messages))
+                return {"thread": {"agentPath": target}, "events": [], "checkpoint": None}
+
+        class App:
+            runtime = Runtime()
+
+            def ensure_hydrated(self, token, session_id):
+                calls.append(("hydrate", session_id, token))
+
+        class Handler:
+            headers = {"Authorization": "Bearer core-token"}
+            app = App()
+
+            def query_int(self, query, key, default):
+                return int((query.get(key) or [default])[0])
+
+            def json_response(self, data, status=200):
+                self.response = (data, status)
+
+        handler = Handler()
+        handled = handle_sessions(
+            handler,
+            "/session/session%201/agents/%2Froot%2Freviewer",
+            {"eventLimit": ["25"]},
+            "GET",
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(calls[0], ("hydrate", "session 1", "core-token"))
+        self.assertEqual(calls[1], ("session 1", "/root/reviewer", 25, False))
+        self.assertEqual(handler.response[0]["thread"]["agentPath"], "/root/reviewer")
+
+    def test_subagent_followup_route_resumes_thread(self):
+        calls = []
+
+        class Runtime:
+            def followup_subagent(self, session_id, target, message, token):
+                calls.append((session_id, target, message, token))
+                return {"target": target, "kind": "followup"}
+
+        class App:
+            runtime = Runtime()
+
+            def ensure_hydrated(self, token, session_id):
+                calls.append(("hydrate", session_id, token))
+
+        class Handler:
+            headers = {"Authorization": "Bearer core-token"}
+            app = App()
+
+            def read_json_body(self):
+                return {"message": "继续检查测试"}
+
+            def json_response(self, data, status=200):
+                self.response = (data, status)
+
+        handler = Handler()
+        handled = handle_sessions(
+            handler,
+            "/session/session%201/agents/%2Froot%2Freviewer/followup",
+            {},
+            "POST",
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(calls[0], ("hydrate", "session 1", "core-token"))
+        self.assertEqual(
+            calls[1],
+            ("session 1", "/root/reviewer", "继续检查测试", "core-token"),
+        )
+        self.assertEqual(handler.response[1], HTTPStatus.ACCEPTED)
 
 
 if __name__ == "__main__":

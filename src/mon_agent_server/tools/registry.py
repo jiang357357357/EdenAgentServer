@@ -16,6 +16,7 @@ from .notify import create_notify_tools
 from .profiles import allowed_tool_names
 from .qq import create_qq_tools
 from .self_awake_tools import create_self_awake_tools
+from .subagents import create_subagent_tools
 from .timer import create_timer_tools
 from .vision import create_vision_tools
 from .web import create_web_tools
@@ -41,6 +42,7 @@ def create_mon_agent_tools(
     tools.extend(create_qq_tools(context))
     tools.extend(create_notify_tools(context))
     tools.extend(create_vision_tools(root, context))
+    tools.extend(create_subagent_tools(context))
 
     coding_tools = create_all_tools(str(root))
     allowed = allowed_tool_names(profile, tools, coding_tools)

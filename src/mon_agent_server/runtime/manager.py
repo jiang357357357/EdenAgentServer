@@ -2,11 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections.abc import Callable
+from concurrent.futures import Future
+import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
-from mon_agent_core import Agent, AgentOptions
+from mon_agent_core import (
+    Agent,
+    AgentControl,
+    AgentOptions,
+    AgentResult,
+    AgentSnapshot,
+    AgentThread,
+    TERMINAL_AGENT_STATUSES,
+    fork_messages,
+)
 from mon_agent_core.harness.compaction import (
     compact as compact_context,
     estimate_context_tokens,
@@ -23,17 +36,51 @@ from ..ids import create_id, now_ms
 from ..logging import get_logger
 from ..model_stream import core_model, env_model, stream_openai_compatible
 from ..prompts import attachment_context, build_agent_system_prompt
-from ..skills import create_skill_runtime
-from ..store import SessionStore
+from ..skills import create_skill_runtime, owner_storage_key
+from ..store import SessionStore, SubagentThreadRepository
 from ..store.serializers import is_hidden_message, message_text
 from ..tools import MonToolContext
 from .compaction import RuntimeCompactionModels, messages_to_compaction_entries, runtime_compaction_settings, timestamp_iso
 from .companion import DirectorBeat, DirectorExecution, DirectorScene, actor_task_prompt, create_director_plan
 from .config import RuntimeModelConfig, runtime_context_window
 from .emitters import RuntimeEmitterMixin, runtime_error_summary
+from .host import RuntimeHost
 from .messages import content_text, images_from_parts, prompt_files
 from .permissions import RuntimePermissionMixin
 from .state import RunState
+from .subagents import (
+    SubagentBudget,
+    SubagentDefinition,
+    SubagentToolPolicy,
+    build_subagent_system_prompt,
+    load_subagent_catalog,
+)
+
+
+def _bounded_env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return min(max(value, minimum), maximum)
+
+
+def _subagent_budget_usage(payload: Any = None) -> dict[str, Any]:
+    value = payload if isinstance(payload, dict) else {}
+
+    def nonnegative_int(key: str) -> int:
+        try:
+            return max(0, int(value.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        "turnCount": nonnegative_int("turnCount"),
+        "toolCallCount": nonnegative_int("toolCallCount"),
+        "elapsedMs": nonnegative_int("elapsedMs"),
+        "exceededReason": str(value.get("exceededReason") or "") or None,
+    }
+
 
 logger = get_logger("MonAgent", "Runtime")
 _CORE_SYNC_RETRY_DELAYS = (0.15, 0.5, 1.5)
@@ -159,9 +206,29 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         self.core_client = core_client
         self.screen_captures = screen_captures
         self.environment = environment
-        self._running: dict[str, threading.Thread] = {}
+        self.subagent_catalog = load_subagent_catalog(self.workspace_root)
+        self.subagent_repository = SubagentThreadRepository.for_workspace(self.workspace_root)
+        self.subagent_max_threads = _bounded_env_int(
+            "MON_AGENT_SUBAGENT_MAX_THREADS", 64, minimum=1, maximum=1_024
+        )
+        self.subagent_max_concurrent_per_session = _bounded_env_int(
+            "MON_AGENT_SUBAGENT_MAX_CONCURRENT_PER_SESSION", 4, minimum=1, maximum=64
+        )
+        self.subagent_max_concurrent_global = _bounded_env_int(
+            "MON_AGENT_SUBAGENT_MAX_CONCURRENT_GLOBAL", 8, minimum=1, maximum=256
+        )
+        self.subagent_max_depth = _bounded_env_int(
+            "MON_AGENT_SUBAGENT_MAX_DEPTH", 2, minimum=1, maximum=8
+        )
+        self._subagent_global_semaphore = asyncio.Semaphore(self.subagent_max_concurrent_global)
+        self._host = RuntimeHost()
+        self._running: dict[str, Future[Any]] = {}
         self._agents: dict[str, Agent] = {}
         self._cancelled_sessions: set[str] = set()
+        self._agent_controls: dict[str, AgentControl] = {}
+        self._session_runtime_auth: dict[str, tuple[str | None, dict[str, Any] | None]] = {}
+        self._reconciled_subagent_sessions: set[str] = set()
+        self._restored_subagent_controls: set[str] = set()
         self._lock = threading.Lock()
 
     def is_running(self, session_id: str) -> bool:
@@ -174,10 +241,39 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             if running:
                 self._cancelled_sessions.add(session_id)
             agent = self._agents.get(session_id)
+            control = self._agent_controls.get(session_id)
         if agent is not None:
             agent.abort()
+        active_subagents = False
+        if control is not None:
+            active_subagents = any(
+                snapshot.status not in TERMINAL_AGENT_STATUSES
+                for snapshot in control.list_agents()
+            )
+            if active_subagents:
+                future = self._host.submit(self._interrupt_all_subagents(control))
+                future.add_done_callback(self._log_abort_cleanup_error)
         self.permissions.reject_all(session_id, reason="session_aborted")
-        return running
+        return running or active_subagents
+
+    @staticmethod
+    def _log_abort_cleanup_error(completed: Future[Any]) -> None:
+        try:
+            completed.result()
+        except Exception:
+            logger.exception("后台中止子智能体失败")
+
+    @staticmethod
+    async def _interrupt_all_subagents(control: AgentControl) -> bool:
+        snapshots = control.list_agents()
+        active = [
+            snapshot
+            for snapshot in snapshots
+            if snapshot.status not in TERMINAL_AGENT_STATUSES
+        ]
+        for snapshot in active:
+            await control.interrupt(snapshot.path)
+        return bool(active)
 
     def append_user_only(self, session_id: str, parts: list[dict[str, Any]]) -> dict[str, Any]:
         message = self.store.append_user_message(session_id, content_text(parts), prompt_files(parts))
@@ -191,9 +287,9 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         with self._lock:
             if session_id in self._running:
                 raise RuntimeError("Session is already running")
-            thread = threading.Thread(target=self._thread_main, args=(session_id, parts, auth_token), daemon=True)
-            self._running[session_id] = thread
-            thread.start()
+            future = self._host.submit(self._run_prompt(session_id, parts, auth_token))
+            self._running[session_id] = future
+            future.add_done_callback(lambda completed: self._finish_submission(session_id, completed))
 
     def compact_async(self, session_id: str, custom_instructions: str | None, auth_token: str | None) -> None:
         instructions = str(custom_instructions or "").strip()
@@ -205,33 +301,277 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         with self._lock:
             if session_id in self._running:
                 raise RuntimeError("Session is already running")
-            thread = threading.Thread(
-                target=self._compact_thread_main,
-                args=(session_id, instructions or None, auth_token),
-                daemon=True,
+            future = self._host.submit(self._run_manual_compaction(session_id, instructions or None, auth_token))
+            self._running[session_id] = future
+            future.add_done_callback(lambda completed: self._finish_submission(session_id, completed))
+
+    def _finish_submission(self, session_id: str, completed: Future[Any]) -> None:
+        try:
+            completed.result()
+        except Exception as error:
+            self.emit_session_error(session_id, error)
+        finally:
+            with self._lock:
+                if self._running.get(session_id) is completed:
+                    self._running.pop(session_id, None)
+                    self._agents.pop(session_id, None)
+                    self._cancelled_sessions.discard(session_id)
+
+    def close(self) -> None:
+        self._host.close()
+
+    def interrupt_subagent(self, session_id: str, target: str) -> dict[str, Any]:
+        async def interrupt() -> dict[str, Any]:
+            control = self._agent_controls.get(session_id)
+            if control is None:
+                raise KeyError(f"当前会话没有运行中的子智能体控制器：{session_id}")
+            return (await control.interrupt(target)).to_payload()
+
+        return self._host.submit(interrupt()).result(timeout=5)
+
+    def followup_subagent(
+        self,
+        session_id: str,
+        target: str,
+        message: str,
+        auth_token: str | None,
+    ) -> dict[str, Any]:
+        task = str(message or "").strip()
+        if not task:
+            raise ValueError("追加任务不能为空。")
+
+        async def followup() -> dict[str, Any]:
+            session = self.store.require_session(session_id)
+            participants = session.get("info", {}).get("participants") or []
+            assistant_id = participants[0].get("assistantID") if participants else None
+            parent_config = await self._resolve_runtime_config(auth_token, assistant_id)
+            environment, owner_key = await self._resolve_user_context(auth_token)
+            control = await self._ensure_subagent_control_restored(
+                session_id=session_id,
+                parent_runtime_config=parent_config,
+                auth_token=auth_token,
+                environment=environment,
+                skill_owner_key=owner_key,
             )
-            self._running[session_id] = thread
-            thread.start()
+            communication = await control.followup_task(target, task, sender="/root")
+            return communication.to_payload()
 
-    def _thread_main(self, session_id: str, parts: list[dict[str, Any]], auth_token: str | None) -> None:
-        try:
-            asyncio.run(self._run_prompt(session_id, parts, auth_token))
-        except Exception as error:
-            self.emit_session_error(session_id, error)
-        finally:
-            with self._lock:
-                self._running.pop(session_id, None)
-                self._agents.pop(session_id, None)
-                self._cancelled_sessions.discard(session_id)
+        return self._host.submit(followup()).result(timeout=10)
 
-    def _compact_thread_main(self, session_id: str, custom_instructions: str | None, auth_token: str | None) -> None:
-        try:
-            asyncio.run(self._run_manual_compaction(session_id, custom_instructions, auth_token))
-        except Exception as error:
-            self.emit_session_error(session_id, error)
-        finally:
-            with self._lock:
-                self._running.pop(session_id, None)
+    def load_persisted_subagents(self, session_id: str) -> list[dict[str, Any]]:
+        first_restore = session_id not in self._reconciled_subagent_sessions
+        if first_restore:
+            self.subagent_repository.reconcile_inflight(session_id)
+            self._reconciled_subagent_sessions.add(session_id)
+        threads = self.subagent_repository.list_threads(session_id)
+        for thread in threads:
+            self.store.upsert_agent_thread(session_id, thread, touch=False)
+            if first_restore:
+                self.events.emit(
+                    {
+                        "type": "subagent.restored",
+                        "properties": {"sessionID": session_id, "agent": thread},
+                    }
+                )
+        return threads
+
+    def get_subagent_thread_details(
+        self,
+        session_id: str,
+        target: str,
+        *,
+        event_limit: int = 500,
+        include_messages: bool = False,
+    ) -> dict[str, Any]:
+        return self.subagent_repository.thread_details(
+            session_id,
+            target,
+            event_limit=event_limit,
+            include_messages=include_messages,
+        )
+
+    def _agent_control_for(self, session_id: str) -> AgentControl:
+        control = self._agent_controls.get(session_id)
+        if control is None:
+            control = AgentControl(
+                session_id,
+                max_threads=self.subagent_max_threads,
+                max_concurrent=self.subagent_max_concurrent_per_session,
+                max_depth=self.subagent_max_depth,
+                on_event=self._on_subagent_event,
+            )
+            self._agent_controls[session_id] = control
+        return control
+
+    async def _ensure_subagent_control_restored(
+        self,
+        *,
+        session_id: str,
+        parent_runtime_config: RuntimeModelConfig,
+        auth_token: str | None,
+        environment: dict[str, Any] | None,
+        skill_owner_key: str | None,
+    ) -> AgentControl:
+        control = self._agent_control_for(session_id)
+        if session_id in self._restored_subagent_controls:
+            return control
+        await asyncio.to_thread(self.load_persisted_subagents, session_id)
+        persisted = await asyncio.to_thread(self.subagent_repository.list_threads, session_id)
+        policies_by_id: dict[str, SubagentToolPolicy] = {}
+        budgets_by_id: dict[str, SubagentBudget] = {}
+        for payload in sorted(persisted, key=lambda item: (int(item.get("depth") or 1), int(item.get("createdAt") or 0))):
+            snapshot = AgentSnapshot.from_payload(payload)
+            try:
+                definition = self.subagent_catalog.resolve(snapshot.role)
+            except ValueError:
+                definition = self.subagent_catalog.resolve("general")
+            checkpoint = await asyncio.to_thread(
+                self.subagent_repository.load_checkpoint,
+                session_id,
+                snapshot.id,
+            ) or {}
+            saved_policy_payload = checkpoint.get("toolPolicy")
+            saved_policy = (
+                SubagentToolPolicy.from_payload(saved_policy_payload)
+                if isinstance(saved_policy_payload, dict)
+                else definition.tool_policy
+            )
+            effective_policy = saved_policy.restrict(definition.tool_policy)
+            if snapshot.parent_id and snapshot.parent_id in policies_by_id:
+                effective_policy = policies_by_id[snapshot.parent_id].restrict(effective_policy)
+            policies_by_id[snapshot.id] = effective_policy
+            saved_budget_payload = checkpoint.get("budget")
+            try:
+                saved_budget = (
+                    SubagentBudget.from_payload(saved_budget_payload)
+                    if isinstance(saved_budget_payload, dict)
+                    else definition.budget
+                )
+            except ValueError:
+                logger.warning(f"恢复子智能体预算失败，使用当前角色预算: agent={snapshot.path}")
+                saved_budget = definition.budget
+            effective_budget = saved_budget.restrict(definition.budget)
+            if snapshot.parent_id and snapshot.parent_id in budgets_by_id:
+                effective_budget = budgets_by_id[snapshot.parent_id].restrict(effective_budget)
+            budgets_by_id[snapshot.id] = effective_budget
+            try:
+                runtime_config = await self._resolve_subagent_runtime_config(
+                    definition,
+                    parent_runtime_config,
+                    auth_token,
+                )
+            except Exception as error:
+                logger.warning(
+                    f"恢复子智能体模型配置失败，回退父会话模型: agent={snapshot.path}, error={error}"
+                )
+                runtime_config = RuntimeModelConfig(
+                    dict(parent_runtime_config.model),
+                    parent_runtime_config.api_key,
+                    parent_runtime_config.label,
+                    parent_runtime_config.source,
+                    parent_runtime_config.core,
+                )
+            inherited_messages = [
+                item for item in (checkpoint.get("messages") or []) if isinstance(item, dict)
+            ]
+            restored_skills = tuple(
+                str(item) for item in (checkpoint.get("activeSkillIDs") or []) if str(item).strip()
+            ) or None
+            child_state: dict[str, Any] = {
+                "budgetUsage": _subagent_budget_usage(checkpoint.get("budgetUsage")),
+            }
+
+            async def restored_runner(
+                thread: AgentThread,
+                message: str,
+                *,
+                _definition: SubagentDefinition = definition,
+                _runtime_config: RuntimeModelConfig = runtime_config,
+                _inherited_messages: list[dict[str, Any]] = inherited_messages,
+                _child_state: dict[str, Any] = child_state,
+                _tool_policy: SubagentToolPolicy = effective_policy,
+                _budget: SubagentBudget = effective_budget,
+                _restored_skills: tuple[str, ...] | None = restored_skills,
+            ) -> AgentResult:
+                return await self._run_subagent_thread(
+                    thread=thread,
+                    message=message,
+                    role=_definition,
+                    runtime_config=_runtime_config,
+                    auth_token=auth_token,
+                    environment=environment,
+                    skill_owner_key=skill_owner_key,
+                    inherited_messages=_inherited_messages,
+                    child_state=_child_state,
+                    tool_policy=_tool_policy,
+                    budget=_budget,
+                    restored_skill_ids=_restored_skills,
+                )
+
+            control.restore(snapshot, restored_runner)
+        persisted_mailbox = await asyncio.to_thread(self.subagent_repository.list_mailbox, session_id)
+        control.restore_mailbox(persisted_mailbox)
+        self._restored_subagent_controls.add(session_id)
+        return control
+
+    async def _on_subagent_event(self, event: dict[str, Any]) -> None:
+        properties = event.get("properties") if isinstance(event.get("properties"), dict) else {}
+        session_id = str(properties.get("rootSessionID") or "")
+        event_type = str(event.get("type") or "agent.updated")
+        if event_type == "agent.messages_consumed" and session_id:
+            receiver = str(properties.get("receiver") or "/root")
+            message_ids = [str(item) for item in (properties.get("messageIDs") or []) if str(item)]
+            await asyncio.to_thread(
+                self.subagent_repository.consume_messages,
+                session_id,
+                receiver,
+                message_ids,
+            )
+            self.events.emit(
+                {
+                    "type": "subagent.messages_consumed",
+                    "properties": {
+                        "sessionID": session_id,
+                        "receiver": receiver,
+                        "messageIDs": message_ids,
+                    },
+                }
+            )
+            return
+        agent = properties.get("agent") if isinstance(properties.get("agent"), dict) else None
+        if not session_id or agent is None:
+            return
+        await asyncio.to_thread(self.subagent_repository.upsert_thread, session_id, agent)
+        self.store.upsert_agent_thread(session_id, agent)
+        message = properties.get("message") if isinstance(properties.get("message"), dict) else None
+        if message:
+            await asyncio.to_thread(
+                self.subagent_repository.enqueue_message,
+                session_id,
+                message,
+            )
+            await asyncio.to_thread(
+                self.subagent_repository.append_event,
+                session_id,
+                str(agent.get("id") or "unknown"),
+                {"type": "agent.communication", "message": message},
+            )
+            self.store.append_agent_message(session_id, message)
+        self.events.emit(
+            {
+                "type": event_type.replace("agent.", "subagent.", 1),
+                "properties": {"sessionID": session_id, **properties},
+            }
+        )
+        if agent.get("status") in {"completed", "failed", "interrupted", "cancelled"}:
+            auth_token, core = self._session_runtime_auth.get(session_id, (None, None))
+            if auth_token:
+                try:
+                    await self.sync_core_session(session_id, auth_token, core)
+                except Exception:
+                    logger.exception(
+                        f"子智能体终态同步到 Core 失败: session={session_id} agent={agent.get('id')}"
+                    )
 
     async def _resolve_runtime_config(
         self,
@@ -252,6 +592,39 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 return RuntimeModelConfig(model, api_key, label, source, core)
         model, api_key, label, source = env_model()
         return RuntimeModelConfig(model, api_key, label, source, None)
+
+    async def _resolve_subagent_runtime_config(
+        self,
+        definition: SubagentDefinition,
+        parent: RuntimeModelConfig,
+        auth_token: str | None,
+    ) -> RuntimeModelConfig:
+        if definition.ai_entity_id is None:
+            resolved = RuntimeModelConfig(
+                dict(parent.model),
+                parent.api_key,
+                parent.label,
+                parent.source,
+                parent.core,
+            )
+        else:
+            if not auth_token:
+                raise RuntimeError(
+                    f"子智能体 {definition.name} 配置了 ai_entity_id，但当前会话没有 Core 身份凭据。"
+                )
+            entity = await asyncio.to_thread(
+                self.core_client.get_ai_entity,
+                auth_token,
+                definition.ai_entity_id,
+            )
+            if not entity.get("api_key"):
+                raise RuntimeError(f"子智能体 {definition.name} 使用的 AI 实体没有配置 API Key。")
+            core = {**(parent.core or {}), "aiEntity": entity}
+            model, api_key, label, source = core_model(core)
+            resolved = RuntimeModelConfig(model, api_key, label, source, core)
+        if definition.thinking_level is not None:
+            resolved.thinking_level = definition.thinking_level
+        return resolved
 
     async def _run_manual_compaction(
         self,
@@ -305,18 +678,20 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             self.finish_runtime_message(session_id, run_state, error=error)
             self.emit_session_error(session_id, error)
 
-    async def _resolve_environment(self, auth_token: str | None) -> dict[str, Any] | None:
+    async def _resolve_user_context(
+        self, auth_token: str | None
+    ) -> tuple[dict[str, Any] | None, str | None]:
         if not auth_token:
-            return self.environment
+            return self.environment, None
         try:
             profile = await asyncio.to_thread(self.core_client.get_user_profile, auth_token)
             configured = profile.get("environment") if isinstance(profile.get("environment"), dict) else {}
             from ..config import merge_environment_context
 
-            return merge_environment_context(self.environment or {}, configured)
+            return merge_environment_context(self.environment or {}, configured), owner_storage_key(profile.get("id"))
         except Exception as error:
             logger.warning(f"读取 Core 用户偏好环境配置失败，使用本地默认值: {error}")
-            return self.environment
+            return self.environment, None
 
     async def _analyze_non_multimodal_images(
         self,
@@ -416,7 +791,393 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             "position": position,
         }
 
-    async def _run_actor(
+    def _make_subagent_dispatcher(
+        self,
+        *,
+        session_id: str,
+        parent_path: str,
+        runtime_config: RuntimeModelConfig,
+        auth_token: str | None,
+        environment: dict[str, Any] | None,
+        skill_owner_key: str | None,
+        messages_provider: Callable[[], list[dict[str, Any]]],
+        parent_policy: SubagentToolPolicy | None = None,
+        parent_budget: SubagentBudget | None = None,
+    ):
+        async def dispatch(action: str, params: dict[str, Any]) -> dict[str, Any]:
+            control = self._agent_control_for(session_id)
+            if action == "spawn":
+                role = self.subagent_catalog.resolve(params.get("role"))
+                role_policy = role.tool_policy
+                effective_policy = parent_policy.restrict(role_policy) if parent_policy else role_policy
+                effective_budget = parent_budget.restrict(role.budget) if parent_budget else role.budget
+                child_runtime_config = await self._resolve_subagent_runtime_config(
+                    role,
+                    runtime_config,
+                    auth_token,
+                )
+                task = str(params.get("message") or "").strip()
+                task_name = str(params.get("task_name") or "").strip()
+                if not task:
+                    raise ValueError("子智能体任务说明不能为空。")
+                fork_turns = params.get("fork_turns", "none")
+                inherited_messages = fork_messages(messages_provider(), fork_turns)
+                child_state: dict[str, Any] = {"budgetUsage": _subagent_budget_usage()}
+
+                async def runner(thread: AgentThread, message: str) -> AgentResult:
+                    return await self._run_subagent_thread(
+                        thread=thread,
+                        message=message,
+                        role=role,
+                        runtime_config=child_runtime_config,
+                        auth_token=auth_token,
+                        environment=environment,
+                        skill_owner_key=skill_owner_key,
+                        inherited_messages=inherited_messages,
+                        child_state=child_state,
+                        tool_policy=effective_policy,
+                        budget=effective_budget,
+                    )
+
+                snapshot = await control.spawn(
+                    message=task,
+                    task_name=task_name,
+                    parent=parent_path,
+                    role=role.name,
+                    runner=runner,
+                    metadata={
+                        "forkTurns": fork_turns,
+                        "roleDescription": role.description,
+                        "configSource": role.source,
+                        "configPath": role.file_path,
+                        "sandboxMode": effective_policy.sandbox_mode,
+                        "model": child_runtime_config.label,
+                        "thinkingLevel": child_runtime_config.thinking_level,
+                        "budget": effective_budget.to_payload(),
+                    },
+                )
+                return snapshot.to_payload()
+            if action == "send_message":
+                message = await control.send_message(
+                    str(params.get("target") or ""),
+                    str(params.get("message") or ""),
+                    sender=parent_path,
+                )
+                return message.to_payload()
+            if action == "followup_task":
+                message = await control.followup_task(
+                    str(params.get("target") or ""),
+                    str(params.get("message") or ""),
+                    sender=parent_path,
+                )
+                return message.to_payload()
+            if action == "list_agents":
+                prefix = str(params.get("path_prefix") or "").strip() or None
+                return {"agents": [item.to_payload() for item in control.list_agents(prefix)]}
+            if action == "wait_agent":
+                raw_targets = params.get("targets")
+                targets = [str(item) for item in raw_targets] if isinstance(raw_targets, list) else None
+                timeout_ms = min(60_000, max(0, int(params.get("timeout_ms") or 30_000)))
+                return await control.wait(targets, timeout=timeout_ms / 1000, receiver=parent_path)
+            if action == "interrupt_agent":
+                snapshot = await control.interrupt(str(params.get("target") or ""))
+                return snapshot.to_payload()
+            raise ValueError(f"未知子智能体操作：{action}")
+
+        return dispatch
+
+    async def _run_subagent_thread(
+        self,
+        *,
+        thread: AgentThread,
+        message: str,
+        role: SubagentDefinition,
+        runtime_config: RuntimeModelConfig,
+        auth_token: str | None,
+        environment: dict[str, Any] | None,
+        skill_owner_key: str | None,
+        inherited_messages: list[dict[str, Any]],
+        child_state: dict[str, Any],
+        tool_policy: SubagentToolPolicy,
+        budget: SubagentBudget,
+        restored_skill_ids: tuple[str, ...] | None = None,
+    ) -> AgentResult:
+        agent = child_state.get("agent")
+        skill_runtime = child_state.get("skillRuntime")
+        budget_usage = child_state.setdefault("budgetUsage", _subagent_budget_usage())
+        if not isinstance(agent, Agent):
+            holder: dict[str, Agent] = {}
+            tool_context = MonToolContext(
+                session_id=thread.snapshot.root_session_id,
+                core_client=self.core_client,
+                core_token=auth_token,
+                permissions=self.permissions,
+                questions=self.questions,
+                screen_captures=self.screen_captures,
+                current_model_supports_images=runtime_config.supports_images,
+                vision_config=(runtime_config.core or {}).get("visionConfig") if runtime_config.core else None,
+                environment=environment,
+                emit_event=self.events.emit,
+                agent_path=thread.snapshot.path,
+                subagent_role_names=self.subagent_catalog.names,
+            )
+            tool_context.subagent_dispatch = self._make_subagent_dispatcher(
+                session_id=thread.snapshot.root_session_id,
+                parent_path=thread.snapshot.path,
+                runtime_config=runtime_config,
+                auth_token=auth_token,
+                environment=environment,
+                skill_owner_key=skill_owner_key,
+                messages_provider=lambda: holder.get("agent").state.messages if holder.get("agent") else inherited_messages,
+                parent_policy=tool_policy,
+                parent_budget=budget,
+            )
+            skill_runtime = create_skill_runtime(
+                self.workspace_root,
+                tool_context,
+                profile="user_chat",
+                active_skill_ids=restored_skill_ids or tuple([*role.initial_skills, "multi-agent"]),
+                owner_key=skill_owner_key,
+                tool_filter=tool_policy.filter(),
+            )
+            blocked_tools = {"ask_user", "list_character_actions", "switch_character_action"}
+            tools = [tool for tool in skill_runtime.active_tools() if tool.name not in blocked_tools]
+
+            def system_prompt_for(active_skill_ids: tuple[str, ...]) -> str:
+                return build_subagent_system_prompt(
+                    role,
+                    agent_path=thread.snapshot.path,
+                    workspace_root=str(self.workspace_root),
+                    skill_prompt=skill_runtime.prompt_section(),
+                    tool_policy=tool_policy,
+                    budget=budget,
+                )
+
+            permission_hook = self._before_tool_call(
+                thread.snapshot.root_session_id,
+                RunState(),
+                agent_path=thread.snapshot.path,
+                tool_policy=tool_policy,
+            )
+
+            async def budgeted_before_tool_call(
+                context: dict[str, Any],
+                signal: Any = None,
+            ) -> dict[str, Any] | None:
+                permission_result = await permission_hook(context, signal)
+                if permission_result and permission_result.get("block"):
+                    return permission_result
+                if int(budget_usage["toolCallCount"]) >= budget.max_tool_calls:
+                    budget_usage["exceededReason"] = (
+                        f"子智能体工具调用预算已耗尽：最多 {budget.max_tool_calls} 次。"
+                    )
+                    return {"block": True, "reason": budget_usage["exceededReason"]}
+                budget_usage["toolCallCount"] = int(budget_usage["toolCallCount"]) + 1
+                return None
+
+            async def should_stop_after_turn(context: dict[str, Any]) -> bool:
+                budget_usage["turnCount"] = int(budget_usage["turnCount"]) + 1
+                if int(budget_usage["turnCount"]) >= budget.max_turns and context.get("toolResults"):
+                    budget_usage["exceededReason"] = (
+                        f"子智能体模型轮次预算已耗尽：最多 {budget.max_turns} 轮。"
+                    )
+                    return True
+                return bool(budget_usage.get("exceededReason"))
+
+            agent = Agent(
+                AgentOptions(
+                    session_id=f"{thread.snapshot.root_session_id}:{thread.snapshot.id}",
+                    tool_execution="sequential",
+                    convert_to_llm=convert_to_llm,
+                    stream_fn=stream_openai_compatible,
+                    initial_state={
+                        "model": runtime_config.model,
+                        "thinkingLevel": runtime_config.thinking_level,
+                        "systemPrompt": system_prompt_for(skill_runtime.active_skill_ids),
+                        "tools": tools,
+                        "messages": inherited_messages,
+                    },
+                    get_api_key=lambda _provider: runtime_config.api_key,
+                    before_tool_call=budgeted_before_tool_call,
+                    should_stop_after_turn=should_stop_after_turn,
+                    prepare_next_turn_with_context=lambda turn, _signal: skill_runtime.prepare_next_turn(
+                        turn, system_prompt_for
+                    ),
+                )
+            )
+            holder["agent"] = agent
+            child_state["agent"] = agent
+            child_state["skillRuntime"] = skill_runtime
+            agent.subscribe(
+                lambda event, _signal: self._record_subagent_agent_event(
+                    thread,
+                    event,
+                    agent,
+                    skill_runtime,
+                    role,
+                    tool_policy,
+                    budget,
+                    budget_usage,
+                    runtime_config,
+                )
+            )
+        if int(budget_usage["turnCount"]) >= budget.max_turns:
+            raise RuntimeError(f"子智能体模型轮次预算已耗尽：最多 {budget.max_turns} 轮。")
+        remaining_seconds = budget.timeout_seconds - (int(budget_usage["elapsedMs"]) / 1_000)
+        if remaining_seconds <= 0:
+            raise RuntimeError(f"子智能体运行时间预算已耗尽：最多 {budget.timeout_seconds} 秒。")
+        started_at = time.monotonic()
+        try:
+            async with self._subagent_global_semaphore:
+                async with asyncio.timeout(remaining_seconds):
+                    await agent.prompt(message)
+        except TimeoutError as error:
+            budget_usage["exceededReason"] = (
+                f"子智能体运行时间预算已耗尽：最多 {budget.timeout_seconds} 秒。"
+            )
+            raise RuntimeError(budget_usage["exceededReason"]) from error
+        finally:
+            budget_usage["elapsedMs"] = int(budget_usage["elapsedMs"]) + int(
+                (time.monotonic() - started_at) * 1_000
+            )
+            await asyncio.to_thread(
+                self.subagent_repository.save_checkpoint,
+                thread.snapshot.root_session_id,
+                thread.snapshot.id,
+                self._subagent_checkpoint_payload(
+                    thread,
+                    agent,
+                    skill_runtime,
+                    role,
+                    tool_policy,
+                    budget,
+                    budget_usage,
+                    runtime_config,
+                ),
+            )
+        if budget_usage.get("exceededReason"):
+            raise RuntimeError(str(budget_usage["exceededReason"]))
+        if agent.state.error_message:
+            raise RuntimeError(agent.state.error_message)
+        final_message = next(
+            (
+                item
+                for item in reversed(agent.state.messages)
+                if item.get("role") == "assistant"
+                and not any(block.get("type") == "toolCall" for block in (item.get("content") or []))
+            ),
+            None,
+        )
+        content = "\n".join(
+            str(block.get("text") or "")
+            for block in (final_message or {}).get("content", [])
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+        if not content:
+            raise RuntimeError("子智能体没有返回可用结果。")
+        return AgentResult(
+            content=content,
+            summary=content[:240],
+            details={
+                "model": runtime_config.label,
+                "messageCount": len(agent.state.messages),
+                "loadedSkills": list(skill_runtime.active_skill_ids) if skill_runtime else [],
+            },
+        )
+
+    async def _record_subagent_agent_event(
+        self,
+        thread: AgentThread,
+        event: dict[str, Any],
+        agent: Agent,
+        skill_runtime: Any,
+        role: SubagentDefinition,
+        tool_policy: SubagentToolPolicy,
+        budget: SubagentBudget,
+        budget_usage: dict[str, Any],
+        runtime_config: RuntimeModelConfig,
+    ) -> None:
+        event_type = str(event.get("type") or "")
+        if event_type == "message_update":
+            self._emit_subagent_activity(thread.snapshot.root_session_id, thread.snapshot.path, event)
+            return
+        durable_event = dict(event)
+        if event_type == "agent_end":
+            durable_event = {
+                "type": "agent_end",
+                "messageCount": len(agent.state.messages),
+                "error": agent.state.error_message,
+            }
+        await asyncio.to_thread(
+            self.subagent_repository.append_event,
+            thread.snapshot.root_session_id,
+            thread.snapshot.id,
+            durable_event,
+        )
+        if event_type in {"message_end", "tool_execution_end", "agent_end"}:
+            await asyncio.to_thread(
+                self.subagent_repository.save_checkpoint,
+                thread.snapshot.root_session_id,
+                thread.snapshot.id,
+                self._subagent_checkpoint_payload(
+                    thread,
+                    agent,
+                    skill_runtime,
+                    role,
+                    tool_policy,
+                    budget,
+                    budget_usage,
+                    runtime_config,
+                ),
+            )
+        self._emit_subagent_activity(thread.snapshot.root_session_id, thread.snapshot.path, event)
+
+    @staticmethod
+    def _subagent_checkpoint_payload(
+        thread: AgentThread,
+        agent: Agent,
+        skill_runtime: Any,
+        role: SubagentDefinition,
+        tool_policy: SubagentToolPolicy,
+        budget: SubagentBudget,
+        budget_usage: dict[str, Any],
+        runtime_config: RuntimeModelConfig,
+    ) -> dict[str, Any]:
+        return {
+            "agentPath": thread.snapshot.path,
+            "role": role.name,
+            "roleSource": role.source,
+            "messages": list(agent.state.messages),
+            "activeSkillIDs": list(skill_runtime.active_skill_ids),
+            "model": {
+                "label": runtime_config.label,
+                "source": runtime_config.source,
+                "id": runtime_config.model.get("id"),
+                "provider": runtime_config.model.get("provider"),
+            },
+            "thinkingLevel": runtime_config.thinking_level,
+            "toolPolicy": tool_policy.to_payload(),
+            "budget": budget.to_payload(),
+            "budgetUsage": dict(budget_usage),
+        }
+
+    def _emit_subagent_activity(self, session_id: str, agent_path: str, event: dict[str, Any]) -> None:
+        event_type = str(event.get("type") or "")
+        if event_type not in {"model_retry", "tool_execution_start", "tool_execution_end"}:
+            return
+        properties = {
+            key: value
+            for key, value in event.items()
+            if key in {"toolCallId", "toolName", "args", "isError", "attempt", "maxAttempts", "delayMs", "reason"}
+        }
+        self.events.emit(
+            {
+                "type": "subagent.activity",
+                "properties": {"sessionID": session_id, "agentPath": agent_path, "activityType": event_type, **properties},
+            }
+        )
+
+    async def _run_character_main_agent(
         self,
         *,
         session_id: str,
@@ -430,31 +1191,26 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         execution: DirectorExecution | None,
         previous_replies: list[dict[str, Any]],
         environment: dict[str, Any] | None,
+        skill_owner_key: str | None,
     ) -> tuple[dict[str, Any] | None, str]:
         files = prompt_files(parts)
         character = (runtime_config.core or {}).get("character") if runtime_config.core else None
         self.emit_runtime_thinking(
             session_id,
             run_state,
-            f"已选择模型：{runtime_config.label}；正在由{run_state.speaker.get('assistantName') or '助手'}接续本轮。",
+            f"{run_state.speaker.get('assistantName') or '当前角色'}正在理解请求并处理本轮任务。",
         )
-        automatic_vision_context = await self._analyze_non_multimodal_images(
-            session_id=session_id,
-            message_id=user_message["info"]["id"],
-            parts=parts,
-            user_text=content_text(parts),
-            auth_token=auth_token,
-            runtime_config=runtime_config,
-        )
-        current_character_action = self.store.get_character_action(session_id)
-        if not current_character_action or (
-            isinstance(character, dict)
-            and character.get("id") is not None
-            and current_character_action.get("characterID") != character.get("id")
-        ):
+        character_id = character.get("id") if isinstance(character, dict) else None
+        current_character_action = self.store.get_character_action(session_id, character_id)
+        if not current_character_action:
             current_character_action = _default_character_action_state(session_id, character)
             if current_character_action:
-                self.store.set_character_action(session_id, current_character_action)
+                self.store.set_character_action(session_id, current_character_action, record_history=False)
+        recent_character_actions = (
+            self.store.get_character_action_history(session_id, character_id)
+            if character_id is not None
+            else []
+        )
         tool_context = MonToolContext(
             session_id=session_id,
             core_client=self.core_client,
@@ -471,15 +1227,75 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             set_character_action=lambda state: self.store.set_character_action(session_id, state),
             get_message_id=lambda: run_state.assistant_message_id,
             get_current_files=lambda: files,
+            agent_path="/root",
+            subagent_role_names=self.subagent_catalog.names,
         )
-        skill_runtime = create_skill_runtime(self.workspace_root, tool_context, profile="user_chat")
+        is_tool_owner = (
+            execution is None
+            or execution.tool_owner_assistant_id is None
+            or str(beat.assistant_id) == str(execution.tool_owner_assistant_id)
+        )
+        collaboration_policy = None if is_tool_owner else SubagentToolPolicy.create("read-only")
+        await self._ensure_subagent_control_restored(
+            session_id=session_id,
+            parent_runtime_config=runtime_config,
+            auth_token=auth_token,
+            environment=environment,
+            skill_owner_key=skill_owner_key,
+        )
+        tool_context.subagent_dispatch = self._make_subagent_dispatcher(
+            session_id=session_id,
+            parent_path="/root",
+            runtime_config=runtime_config,
+            auth_token=auth_token,
+            environment=environment,
+            skill_owner_key=skill_owner_key,
+            messages_provider=lambda: self.store.context_messages(session_id),
+            parent_policy=collaboration_policy,
+        )
+        skill_runtime = create_skill_runtime(
+            self.workspace_root,
+            tool_context,
+            profile="user_chat",
+            active_skill_ids=(),
+            owner_key=skill_owner_key,
+            tool_filter=(
+                None
+                if is_tool_owner
+                else lambda tool: (
+                    collaboration_policy is not None
+                    and collaboration_policy.allows(tool.name)
+                )
+                or tool.name == "switch_character_action"
+            ),
+        )
+        actor_user_text = content_text(parts)
+        explicit_skill = skill_runtime.load_command(actor_user_text)
+        if explicit_skill is not None:
+            if explicit_skill["success"]:
+                actor_user_text = explicit_skill["userMessage"] or actor_user_text
+            else:
+                actor_user_text = (
+                    f"用户请求了未知技能：{', '.join(explicit_skill['unknown'])}。"
+                    f"当前可用技能：{', '.join(explicit_skill['available'])}。"
+                )
         tools = skill_runtime.active_tools()
-        self.emit_runtime_thinking(session_id, run_state, f"已加载按需技能目录，首轮暴露 {len(tools)} 个基础工具。")
         attachment_details = attachment_context(files, runtime_config.supports_images)
-        if automatic_vision_context:
-            attachment_details = "\n\n".join(filter(None, [attachment_details, automatic_vision_context]))
+        if not runtime_config.supports_images:
+            automatic_vision_context = await self._analyze_non_multimodal_images(
+                session_id=session_id,
+                message_id=user_message["info"]["id"],
+                parts=parts,
+                user_text=actor_user_text,
+                auth_token=auth_token,
+                runtime_config=runtime_config,
+            )
+            if automatic_vision_context:
+                attachment_details = "\n\n".join(
+                    filter(None, [attachment_details, automatic_vision_context])
+                )
         task_prompt = actor_task_prompt(
-            content_text(parts),
+            actor_user_text,
             beat,
             previous_replies,
             attachment_details,
@@ -490,8 +1306,19 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         def system_prompt_for(active_skill_ids: tuple[str, ...]) -> str:
             return build_agent_system_prompt(
                 runtime_config.core,
+                source="user_chat",
+                current_character_action=(
+                    self.store.get_character_action(session_id, character_id) or current_character_action
+                ),
+                recent_character_actions=(
+                    self.store.get_character_action_history(session_id, character_id)
+                    if character_id is not None
+                    else recent_character_actions
+                ),
                 supports_images=runtime_config.supports_images,
+                environment=environment,
                 active_skill_ids=active_skill_ids,
+                skill_resource_prompt=skill_runtime.prompt_section(),
             )
 
         agent_messages = await self.compact_agent_messages_if_needed(
@@ -516,8 +1343,10 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     "messages": agent_messages,
                 },
                 get_api_key=lambda _provider: runtime_config.api_key,
-                before_tool_call=self._before_tool_call(session_id, run_state),
-                prepare_next_turn_with_context=lambda turn, _signal: skill_runtime.prepare_next_turn(turn, system_prompt_for),
+                before_tool_call=self._before_tool_call(session_id, run_state, agent_path="/root"),
+                prepare_next_turn_with_context=lambda turn, _signal: skill_runtime.prepare_next_turn(
+                    turn, system_prompt_for
+                ),
             )
         )
         with self._lock:
@@ -568,6 +1397,94 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         ).strip()
         return message, text
 
+    def _start_character_main_run(
+        self,
+        session_id: str,
+        user_message_id: str,
+        assistant_name: str,
+    ) -> str:
+        orchestration_id = create_id("orc")
+        created_at = now_ms()
+        self.store.upsert_orchestrator_run(
+            session_id,
+            {
+                "orchestrationID": orchestration_id,
+                "userMessageID": user_message_id,
+                "status": "running",
+                "phase": f"{assistant_name}正在理解并处理请求",
+                "summary": "",
+                "source": "character_main",
+                "createdAt": created_at,
+                "updatedAt": created_at,
+            },
+        )
+        self.store.append_session_event(
+            session_id,
+            "orchestrator_started",
+            {"orchestrationID": orchestration_id, "userMessageID": user_message_id, "source": "character_main"},
+            turn_id=orchestration_id,
+        )
+        self.events.emit(
+            {
+                "type": "orchestrator.started",
+                "properties": {
+                    "sessionID": session_id,
+                    "orchestrationID": orchestration_id,
+                    "userMessageID": user_message_id,
+                    "phase": f"{assistant_name}正在理解并处理请求",
+                    "source": "character_main",
+                },
+            }
+        )
+        return orchestration_id
+
+    def _finish_character_main_run(
+        self,
+        session_id: str,
+        orchestration_id: str,
+        user_message_id: str,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        failed = error is not None
+        summary = runtime_error_summary(error) if failed else "当前角色已完成本轮处理"
+        status = "failed" if failed else "completed"
+        phase = "处理失败" if failed else "已完成"
+        self.store.upsert_orchestrator_run(
+            session_id,
+            {
+                "orchestrationID": orchestration_id,
+                "userMessageID": user_message_id,
+                "status": status,
+                "phase": phase,
+                "summary": summary,
+                "source": "character_main",
+                "error": summary if failed else None,
+                "updatedAt": now_ms(),
+            },
+        )
+        event_suffix = "failed" if failed else "completed"
+        payload = {
+            "sessionID": session_id,
+            "orchestrationID": orchestration_id,
+            "userMessageID": user_message_id,
+            "source": "character_main",
+        }
+        if failed:
+            payload["error"] = summary
+            event_payload: dict[str, Any] = {"error": summary}
+        else:
+            brief = {"summary": summary, "source": "character_main"}
+            payload["brief"] = brief
+            event_payload = brief
+        self.store.append_session_event(
+            session_id,
+            f"orchestrator_{event_suffix}",
+            event_payload,
+            turn_id=orchestration_id,
+        )
+        self.events.emit({"type": f"orchestrator.{event_suffix}", "properties": payload})
+
     async def _run_prompt(self, session_id: str, parts: list[dict[str, Any]], auth_token: str | None) -> None:
         session = self.store.require_session(session_id)
         started = now_ms()
@@ -575,6 +1492,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         active_config: RuntimeModelConfig | None = None
         director_config: RuntimeModelConfig | None = None
         active_director_run: dict[str, Any] | None = None
+        active_main_run_id: str | None = None
         participants: list[dict[str, Any]] = []
         self.events.emit({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "busy"}}})
         user_message = self.store.append_user_message(session_id, content_text(parts), prompt_files(parts))
@@ -586,6 +1504,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             participants = [item for item in session["info"].get("participants", []) if item.get("assistantID") is not None]
             primary_id = participants[0].get("assistantID") if participants else None
             director_config = await self._resolve_runtime_config(auth_token, primary_id)
+            self._session_runtime_auth[session_id] = (auth_token, director_config.core)
             if not participants and director_config.core:
                 participants = [self._participant_from_core(director_config.core)]
                 self.store.update_participants(session_id, participants)
@@ -593,6 +1512,12 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 raise RuntimeError("当前会话没有可用的参与助手。")
             await self.sync_core_session(session_id, auth_token, director_config.core)
             await self.sync_core_message(session_id, user_message, auth_token, director_config.core)
+            environment, skill_owner_key = await self._resolve_user_context(auth_token)
+            active_main_run_id = self._start_character_main_run(
+                session_id,
+                user_message["info"]["id"],
+                str(participants[0].get("assistantName") or "当前角色"),
+            )
             director_enabled = len(participants) > 1
             if director_enabled:
                 self.events.emit(
@@ -655,7 +1580,6 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                         },
                     }
                 )
-            environment = await self._resolve_environment(auth_token)
             previous_replies: list[dict[str, Any]] = []
             for beat_index, beat in enumerate(plan.beats):
                 participant = next(
@@ -712,7 +1636,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                             },
                         }
                     )
-                _, reply = await self._run_actor(
+                _, reply = await self._run_character_main_agent(
                     session_id=session_id,
                     parts=parts,
                     user_message=user_message,
@@ -724,6 +1648,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     execution=plan.execution if director_enabled else None,
                     previous_replies=previous_replies,
                     environment=environment,
+                    skill_owner_key=skill_owner_key,
                 )
                 previous_replies.append(
                     {
@@ -765,12 +1690,29 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                             },
                         }
                     )
+            if active_main_run_id:
+                completed_main_run_id = active_main_run_id
+                active_main_run_id = None
+                self._finish_character_main_run(
+                    session_id,
+                    completed_main_run_id,
+                    user_message["info"]["id"],
+                )
             await self.sync_core_session(session_id, auth_token, director_config.core)
             self.events.emit({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "idle"}}})
             self.emit_session(session_id)
             logger.info(f"session {session_id} companion turn completed in {now_ms() - started}ms")
         except Exception as error:
             logger.error(f"session {session_id} 运行失败: {error}", exc_info=True)
+            if active_main_run_id:
+                failed_main_run_id = active_main_run_id
+                active_main_run_id = None
+                self._finish_character_main_run(
+                    session_id,
+                    failed_main_run_id,
+                    user_message["info"]["id"],
+                    error=error,
+                )
             if active_director_run:
                 active_director_run = self.store.upsert_director_run(
                     session_id,
@@ -954,13 +1896,28 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         )
         return compacted_messages
 
-    def _before_tool_call(self, session_id: str, run_state: RunState):
+    def _before_tool_call(
+        self,
+        session_id: str,
+        run_state: RunState,
+        *,
+        agent_path: str = "/root",
+        tool_policy: SubagentToolPolicy | None = None,
+    ):
         async def before_tool_call(context: dict[str, Any], _signal: Any = None) -> dict[str, Any] | None:
             if getattr(_signal, "aborted", False):
                 return {"block": True, "reason": "会话已取消。"}
             tool_call = context.get("toolCall") or {}
             tool_name = tool_call.get("name") or ""
             args = context.get("args") or {}
+            if tool_policy is not None and not tool_policy.allows(tool_name):
+                return {
+                    "block": True,
+                    "reason": (
+                        f"工具 {tool_name} 被子智能体 {agent_path} 的 "
+                        f"{tool_policy.sandbox_mode} 策略禁止。"
+                    ),
+                }
             pattern = self.permission_pattern(tool_name, args)
             if self.is_safe_tool(tool_name) or self.permissions.is_always_allowed(tool_name, pattern):
                 return None
@@ -971,7 +1928,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     "permission": tool_name,
                     "patterns": [pattern],
                     "always": self.permission_always_patterns(tool_name),
-                    "metadata": {"args": args, "toolName": tool_name},
+                    "metadata": {"args": args, "toolName": tool_name, "agentPath": agent_path},
                     "tool": {
                         "messageID": run_state.assistant_message_id,
                         "callID": tool_call.get("id"),

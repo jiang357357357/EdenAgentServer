@@ -104,6 +104,11 @@ class RuntimePersistenceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(runtime_error_summary(error), "模型连接失败：安全连接被远端提前断开。")
 
+    def test_upstream_500_has_readable_runtime_summary(self):
+        error = RuntimeError('模型请求失败: 500 Internal Server Error {"error":"failed"}')
+
+        self.assertEqual(runtime_error_summary(error), "模型服务暂时不可用：自动重试后仍未恢复，请稍后再试。")
+
     def test_tool_loop_keeps_each_assistant_response_as_an_independent_message(self):
         store = SessionStore()
         session = store.create_session("累计回复")
@@ -211,8 +216,26 @@ class RuntimePersistenceTest(unittest.IsolatedAsyncioTestCase):
 
         message = store.list_messages(session["id"])[0]
         self.assertEqual(run_state.error_message, error_message)
+        self.assertEqual(run_state.final_assistant_message_id, message["info"]["id"])
         self.assertEqual(message["info"]["error"]["message"], error_message)
+        self.assertEqual(store.context_messages(session["id"]), [])
         self.assertFalse(any(event["type"] == "session.error" for event in emitter.events.events))
+
+    def test_model_retry_is_visible_in_runtime_trace(self):
+        store = SessionStore()
+        session = store.create_session("模型重试")
+        emitter = EmitterHarness(store)
+        run_state = RunState()
+
+        emitter.handle_agent_event(
+            session["id"],
+            {"type": "model_retry", "attempt": 2, "maxAttempts": 3, "delayMs": 500},
+            run_state,
+        )
+
+        runtime_message = store.list_messages(session["id"])[0]
+        self.assertIn("第 2/3 次", runtime_message["parts"][0]["text"])
+        self.assertIn("0.5 秒", runtime_message["parts"][0]["text"])
 
     def test_companion_speaker_and_orchestration_are_kept_on_message(self):
         store = SessionStore()
