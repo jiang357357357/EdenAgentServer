@@ -114,10 +114,7 @@ class AnalyzeScreenToolTest(unittest.IsolatedAsyncioTestCase):
             {"question": "当前屏幕显示了什么？"},
         )
 
-        self.assertEqual(len(permissions.requests), 1)
-        self.assertEqual(permissions.requests[0]["permission"], "读取当前屏幕")
-        self.assertEqual(permissions.requests[0]["patterns"], ["screen-screenshot:auto"])
-        self.assertEqual(permissions.requests[0]["metadata"]["source"], "auto")
+        self.assertEqual(permissions.requests, [])
         self.assertEqual(len(captures.requests), 1)
         self.assertEqual(captures.requests[0]["source"], "auto")
         self.assertEqual(result["content"][0]["text"], "屏幕截图已捕获并提供给当前模型（1920×1080，Display 1）。")
@@ -145,7 +142,7 @@ class AnalyzeScreenToolTest(unittest.IsolatedAsyncioTestCase):
             {"question": "游戏画面显示了什么？", "source": "game"},
         )
 
-        self.assertEqual(permissions.requests[0]["patterns"], ["screen-screenshot:game"])
+        self.assertEqual(permissions.requests, [])
         self.assertEqual(captures.requests[0]["source"], "game")
         self.assertEqual(result["details"]["requestedSource"], "game")
 

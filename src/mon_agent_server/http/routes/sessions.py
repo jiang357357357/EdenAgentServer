@@ -28,9 +28,8 @@ def handle_sessions(handler: Any, path: str, query: dict[str, list[str]], method
         token = require_core_token(handler.headers)
         limit = handler.query_int(query, "limit", 50)
         sessions = handler.app.core_client.list_agent_sessions(token, limit)
-        for session in sessions:
-            handler.app.store.upsert_session_info(session)
-        handler.json_response(sessions)
+        merged_sessions = [handler.app.store.upsert_session_info(session) for session in sessions]
+        handler.json_response(merged_sessions)
         return True
 
     if method == "POST" and path == "/session":
@@ -89,6 +88,9 @@ def handle_sessions(handler: Any, path: str, query: dict[str, list[str]], method
             handler.app.hydrate(token, session_id)
         else:
             handler.app.ensure_hydrated(token, session_id)
+        # Hydration rebuilds the actual model context. Publish its token count so
+        # the composer and compaction logic use the same source of truth.
+        handler.app.runtime.emit_session(session_id)
         include_compactions = (query.get("includeCompactions") or [""])[0].strip().lower() in {"1", "true", "yes"}
         handler.json_response(
             handler.app.store.list_messages(
@@ -125,7 +127,18 @@ def handle_sessions(handler: Any, path: str, query: dict[str, list[str]], method
         token = require_core_token(handler.headers)
         body = handler.read_json_body()
         handler.app.ensure_hydrated(token, session_id)
-        handler.app.runtime.compact_async(session_id, body.get("instructions"), token)
+        instructions = str(body.get("instructions") or "").strip()
+        command = f"/compact {instructions}" if instructions else "/compact"
+        command_message = handler.app.store.append_command_message(session_id, command)
+        handler.app.runtime.emit_message(session_id, command_message["info"])
+        for part in command_message["parts"]:
+            handler.app.runtime.emit_part(session_id, part)
+        handler.app.core_client.sync_agent_message(
+            token,
+            handler.app.store.require_session(session_id)["info"],
+            command_message,
+        )
+        handler.app.runtime.compact_async(session_id, instructions, token)
         handler.json_response({"accepted": True, "sessionID": session_id}, status=202)
         return True
 

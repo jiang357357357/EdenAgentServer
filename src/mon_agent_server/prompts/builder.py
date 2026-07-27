@@ -312,7 +312,7 @@ def build_agent_tool_section(
             "只有闲聊、反问式表达或不影响继续执行的小问题，才可以直接写在回复正文里。",
             "用户上传的文本附件会直接出现在本轮消息中；图片附件会通过视觉通道提供。",
             "进行写入文件或执行 shell 命令前，系统会向用户请求权限。",
-            "读取、列出或搜索工作区外路径时，也必须等待用户明确授权。",
+            "读取、列出、搜索和屏幕观察属于只读操作，可直接执行；写入、编辑、命令执行及外部发送仍须经过权限检查。",
             "如果工具被拒绝、拦截或失败，先根据结果调整方案；不要重复调用完全相同的失败工具。",
             "本轮任务协议会说明来源、目标和输出格式；当任务协议与一般工具建议冲突时，以本轮任务协议为准。",
         ]
@@ -328,6 +328,7 @@ def build_agent_system_prompt(
     environment: dict[str, Any] | None = None,
     active_skill_ids: Iterable[str] | None = None,
     skill_resource_prompt: str | None = None,
+    delegation_mode: str = "auto",
 ) -> str:
     character = (core or {}).get("character")
     sections = [
@@ -346,6 +347,31 @@ def build_agent_system_prompt(
     )
     if current_action_context and source != "self_awake":
         sections.extend(["# 当前前端动作", current_action_context])
+    if source == "user_chat" and delegation_mode != "disabled":
+        if delegation_mode == "explicit":
+            delegation_rule = "只有用户、AGENTS.md 或已加载技能明确要求委派时，才创建子智能体。"
+        elif delegation_mode == "proactive":
+            delegation_rule = "大型任务应优先拆成少量边界清晰的后台子任务；小型精确任务仍直接处理。"
+        else:
+            delegation_rule = "自主识别适合后台执行的信息获取或独立任务，并主动创建子智能体。"
+        sections.extend(
+            [
+                "# 父子智能体委派策略",
+                "\n".join(
+                    [
+                        f"当前委派模式：{delegation_mode}。{delegation_rule}",
+                        "面对宽泛实时资讯、多来源研究、需要调整关键词的搜索，不要先 load_skill(web-research) 让 Root 自己搜索；直接 spawn_agent(role=researcher)。",
+                        "判断是否委派时综合考虑不确定性、搜索空间、上下文污染、并行收益和结论深度；不要按关键词、工具次数或搜索次数机械判断。",
+                        "实时外部信息、多来源检索和需要调整关键词的调查交给 researcher；位置未知、跨目录模块、调用链和全量引用查找交给 explore；长日志、测试失败和跨组件根因分析交给 general。",
+                        "用户个人文件、游戏存档或应用数据的位置不明确，涉及 Steam、Proton、Wine、模拟器等多个候选根目录或需要递归判断时，直接交给 file_locator；它只进行受边界约束的只读定位。",
+                        "精确路径、单个已知标准目录、精确文件、精确符号、单个已知网址、结构化天气或时间查询，以及对子智能体结论的一次窄验证，直接由当前智能体处理。",
+                        "普通信息获取任务使用 background=true、required_for_final=true、fork_turns=none；只有结果确实可有可无时才显式设 required_for_final=false。任务依赖近期指代或附件时才继承必要的最近上下文。",
+                        "创建后台必要任务后继续进行不重叠的分析并可先给阶段性回复；不要轮询或调用 wait_agent 阻塞，协调批次会在结果齐备后自动整合。",
+                        "子智能体进行宽搜索后不要重复相同范围的搜索。验收其覆盖度、矛盾、可追溯证据和无依据推断；缺失时优先 followup_task 补查。",
+                    ]
+                ),
+            ]
+        )
     sections.extend(
         [
             "# 语言",

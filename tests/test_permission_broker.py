@@ -21,6 +21,38 @@ class PermissionBrokerTest(unittest.TestCase):
         self.assertEqual(broker.set_mode("full_access"), {"mode": "full_access"})
         self.assertTrue(broker.is_always_allowed("bash", "pytest"))
 
+    def test_always_permission_is_scoped_to_session(self) -> None:
+        broker = PermissionBroker(EventBus(), timeout_seconds=1)
+        result: list[str] = []
+        thread = threading.Thread(
+            target=lambda: result.append(
+                broker.ask(
+                    {
+                        "sessionID": "ses-a",
+                        "permission": "访问工作区外路径",
+                        "patterns": ["/home/user/.steam"],
+                        "always": ["/home/user/.steam"],
+                    }
+                )
+            ),
+            daemon=True,
+        )
+        thread.start()
+        for _ in range(100):
+            if broker.list():
+                break
+            threading.Event().wait(0.001)
+        self.assertTrue(broker.reply(broker.list()[0]["id"], "always"))
+        thread.join(timeout=1)
+
+        self.assertEqual(result, ["always"])
+        self.assertTrue(
+            broker.is_explicitly_allowed("访问工作区外路径", "/home/user/.steam", "ses-a")
+        )
+        self.assertFalse(
+            broker.is_explicitly_allowed("访问工作区外路径", "/home/user/.steam", "ses-b")
+        )
+
     def test_permission_request_times_out_and_is_cleaned_up(self) -> None:
         broker = PermissionBroker(EventBus(), timeout_seconds=0.01)
 

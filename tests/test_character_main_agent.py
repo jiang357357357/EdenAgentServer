@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,32 @@ def tool_call_message(name: str, arguments: dict[str, Any]) -> AssistantMessageE
 
 
 class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_character_model_timeout_raises_actionable_error(self) -> None:
+        store = SessionStore()
+        session = store.create_session("超时测试")
+        user_message = store.append_user_message(session["id"], "你好", [])
+        runtime = MonAgentRuntime(Path.cwd(), store, EventRecorder(), None, None, object())
+        runtime.model_request_timeout_seconds = 0.01
+        config = RuntimeModelConfig(
+            {"id": "hanging", "name": "Hanging", "api": "fake", "provider": "fake", "input": ["text"]},
+            None, "fake/hanging", "test", {"assistant": {}, "character": {}, "aiEntity": {}},
+        )
+
+        async def hanging_stream(_model, _context, _options):
+            await asyncio.Event().wait()
+
+        with (
+            patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=hanging_stream),
+            self.assertRaisesRegex(RuntimeError, "模型请求超时.*fake/hanging"),
+        ):
+            await runtime._run_character_main_agent(
+                session_id=session["id"], parts=[{"type": "text", "text": "你好"}],
+                user_message=user_message, auth_token=None, runtime_config=config,
+                run_state=RunState(speaker={}), beat=DirectorBeat(1, "回应"), scene=None,
+                execution=None, previous_replies=[], environment=None, skill_owner_key=None,
+            )
+        runtime.close()
+
     async def test_character_main_agent_has_identity_and_on_demand_skills(self) -> None:
         store = SessionStore()
         session = store.create_session("回复测试")
@@ -95,12 +122,43 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("read", captured["tools"])
         self.assertIn("switch_character_action", captured["tools"])
         self.assertNotIn("web_search", captured["tools"])
-        self.assertNotIn("spawn_agent", captured["tools"])
+        self.assertIn("spawn_agent", captured["tools"])
         self.assertIn("冷静、克制", captured["systemPrompt"])
         self.assertIn("web-research", captured["systemPrompt"])
         self.assertIn("multi-agent", captured["systemPrompt"])
+        self.assertIn("当前委派模式：auto", captured["systemPrompt"])
+        self.assertIn("researcher", captured["systemPrompt"])
+        self.assertIn("不要轮询或调用 wait_agent", captured["systemPrompt"])
         self.assertNotIn("角色回复子智能体", captured["systemPrompt"])
         self.assertFalse(any(event["type"].startswith("subagent.") for event in events.events))
+        runtime.close()
+
+    async def test_explicit_delegation_mode_is_reflected_in_system_prompt(self) -> None:
+        store = SessionStore()
+        session = store.create_session("显式委派")
+        user_message = store.append_user_message(session["id"], "你好", [])
+        runtime = MonAgentRuntime(Path.cwd(), store, EventRecorder(), None, None, object())
+        with patch.dict("os.environ", {"MON_AGENT_DELEGATION_MODE": "explicit"}):
+            config = RuntimeModelConfig(
+                {"id": "fake", "name": "Fake", "api": "fake", "provider": "fake", "input": ["text"]},
+                None, "Fake", "test", {"assistant": {}, "character": {}, "aiEntity": {}},
+            )
+        captured: dict[str, str] = {}
+
+        async def fake_stream(_model, context, _options):
+            captured["prompt"] = context["systemPrompt"]
+            return stream_message("完成")
+
+        with patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=fake_stream):
+            await runtime._run_character_main_agent(
+                session_id=session["id"], parts=[{"type": "text", "text": "你好"}],
+                user_message=user_message, auth_token=None, runtime_config=config,
+                run_state=RunState(speaker={}), beat=DirectorBeat(1, "回应"), scene=None,
+                execution=None, previous_replies=[], environment=None, skill_owner_key=None,
+            )
+
+        self.assertIn("当前委派模式：explicit", captured["prompt"])
+        self.assertIn("明确要求委派", captured["prompt"])
         runtime.close()
 
     async def test_character_loads_web_research_in_the_same_agent_run(self) -> None:

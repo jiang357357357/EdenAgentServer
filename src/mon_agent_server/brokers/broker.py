@@ -23,7 +23,7 @@ class PermissionBroker:
     def __init__(self, events: EventBus, timeout_seconds: float = DEFAULT_PERMISSION_TIMEOUT_SECONDS) -> None:
         self._events = events
         self._waiters: dict[str, _PermissionWaiter] = {}
-        self._always_allowed: set[str] = set()
+        self._always_allowed: set[tuple[str | None, str, str]] = set()
         self._mode: PermissionMode = "ask"
         self._timeout_seconds = max(0.01, float(timeout_seconds))
         self._lock = threading.Lock()
@@ -43,11 +43,25 @@ class PermissionBroker:
         self._events.emit({"type": "permission.mode", "properties": {"mode": next_mode}})
         return {"mode": next_mode}
 
-    def is_always_allowed(self, permission: str, pattern: str) -> bool:
+    def is_explicitly_allowed(self, permission: str, pattern: str, session_id: str | None = None) -> bool:
+        with self._lock:
+            return (
+                (session_id, permission, pattern) in self._always_allowed
+                or (session_id, permission, "*") in self._always_allowed
+                or (None, permission, pattern) in self._always_allowed
+                or (None, permission, "*") in self._always_allowed
+            )
+
+    def is_always_allowed(self, permission: str, pattern: str, session_id: str | None = None) -> bool:
         with self._lock:
             if self._mode == "full_access":
                 return True
-            return f"{permission}:{pattern}" in self._always_allowed or f"{permission}:*" in self._always_allowed
+            return (
+                (session_id, permission, pattern) in self._always_allowed
+                or (session_id, permission, "*") in self._always_allowed
+                or (None, permission, pattern) in self._always_allowed
+                or (None, permission, "*") in self._always_allowed
+            )
 
     def ask(self, request: dict[str, Any]) -> str:
         request_id = create_id("per")
@@ -112,7 +126,9 @@ class PermissionBroker:
             if reply == "always":
                 patterns = waiter.request.get("always") or waiter.request.get("patterns") or []
                 for pattern in patterns:
-                    self._always_allowed.add(f"{waiter.request.get('permission')}:{pattern}")
+                    self._always_allowed.add(
+                        (waiter.request.get("sessionID"), str(waiter.request.get("permission")), str(pattern))
+                    )
             if message:
                 waiter.request.setdefault("metadata", {})["userMessage"] = message
             waiter.reply = reply

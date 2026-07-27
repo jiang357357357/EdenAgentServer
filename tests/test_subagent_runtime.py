@@ -3,10 +3,11 @@ from __future__ import annotations
 import unittest
 import asyncio
 import threading
+from concurrent.futures import Future
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from mon_agent_core import AgentControl, AssistantMessageEventStream
 
@@ -126,6 +127,7 @@ class SubagentRuntimeIntegrationTest(unittest.IsolatedAsyncioTestCase):
                     "task_name": "inspect_project",
                     "role": "researcher",
                     "fork_turns": "none",
+                    "required_for_final": False,
                 },
             )
             result = await dispatcher(
@@ -140,6 +142,11 @@ class SubagentRuntimeIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(persisted["role"], "researcher")
         self.assertEqual(persisted["status"], "completed")
         self.assertTrue(any(event["type"] == "subagent.completed" for event in events.events))
+        batch_id = spawned["coordinationBatchID"]
+        batch = runtime.subagent_repository.get_coordination_batch(session["id"], batch_id)
+        self.assertEqual(batch["status"], "completed")
+        self.assertEqual(batch["optionalTaskIDs"], [spawned["id"]])
+        self.assertEqual(batch["pendingResults"][spawned["id"]]["status"], "completed")
 
     async def test_turn_budget_stops_tool_loop_and_is_checkpointed(self) -> None:
         temporary = TemporaryDirectory()
@@ -189,7 +196,7 @@ class SubagentRuntimeIntegrationTest(unittest.IsolatedAsyncioTestCase):
         )
         with patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=tool_loop_stream):
             spawned = await dispatcher(
-                "spawn", {"message": "循环", "task_name": "limited", "role": "limited"}
+                "spawn", {"message": "循环", "task_name": "limited", "role": "limited", "required_for_final": False}
             )
             result = await dispatcher(
                 "wait_agent", {"targets": [spawned["agentPath"]], "timeout_ms": 2_000}
@@ -203,6 +210,188 @@ class SubagentRuntimeIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(checkpoint["budget"]["maxTurns"], 1)
         self.assertEqual(checkpoint["budgetUsage"]["turnCount"], 1)
         self.assertEqual(checkpoint["budgetUsage"]["toolCallCount"], 1)
+
+    async def test_required_task_readies_batch_and_requests_aggregation(self) -> None:
+        store = SessionStore()
+        session = store.create_session("必要任务")
+        events = EventRecorder()
+        runtime = MonAgentRuntime(Path.cwd(), store, events, None, None, object())
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        runtime.subagent_repository = SubagentThreadRepository(temporary.name)
+        config = RuntimeModelConfig(
+            {"id": "fake", "name": "Fake", "api": "fake", "provider": "fake", "input": ["text"]},
+            None,
+            "Fake",
+            "test",
+            None,
+        )
+
+        async def fake_stream(_model, _context, _options):
+            message = {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "必要结果"}],
+                "stopReason": "stop",
+                "timestamp": 1,
+            }
+            stream = AssistantMessageEventStream()
+            stream.push({"type": "start", "partial": {**message, "content": []}})
+            stream.push({"type": "done", "message": message})
+            return stream
+
+        dispatcher = runtime._make_subagent_dispatcher(
+            session_id=session["id"], parent_path="/root", runtime_config=config,
+            auth_token=None, environment=None, skill_owner_key=None, messages_provider=lambda: [],
+            parent_run_id="run_parent_required",
+        )
+        with (
+            patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=fake_stream),
+            patch.object(runtime, "_schedule_ready_aggregation", return_value=True) as schedule,
+        ):
+            spawned = await dispatcher(
+                "spawn",
+                {
+                    "message": "完成必要调查",
+                    "task_name": "required_research",
+                },
+            )
+            await dispatcher("wait_agent", {"targets": [spawned["id"]], "timeout_ms": 2_000})
+            for _ in range(50):
+                batch = runtime.subagent_repository.get_coordination_batch(
+                    session["id"], spawned["coordinationBatchID"]
+                )
+                if batch and batch.get("status") == "ready" and schedule.call_count:
+                    break
+                await asyncio.sleep(0.01)
+
+        assert batch is not None
+        self.assertEqual(batch["status"], "ready")
+        self.assertEqual(batch["sourceTurnID"], "run_parent_required")
+        self.assertEqual(batch["requiredTaskIDs"], [spawned["id"]])
+        schedule.assert_called_once_with(session["id"])
+        self.assertTrue(
+            any(
+                event["type"] == "subagent.batch.updated"
+                and event["properties"]["status"] == "collecting"
+                and event["properties"]["requiredTotal"] == 1
+                and event["properties"]["requiredTerminal"] == 0
+                for event in events.events
+            )
+        )
+        self.assertTrue(any(event["type"] == "subagent.batch.ready" for event in events.events))
+
+    async def test_spawn_persists_delegation_metadata_before_fast_child_finishes(self) -> None:
+        store = SessionStore()
+        session = store.create_session("快速子任务")
+        runtime = MonAgentRuntime(Path.cwd(), store, EventRecorder(), None, None, object())
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        runtime.subagent_repository = SubagentThreadRepository(temporary.name)
+        config = RuntimeModelConfig(
+            {"id": "fake", "name": "Fake", "api": "fake", "provider": "fake", "input": ["text"]},
+            None, "Fake", "test", None,
+        )
+
+        async def immediate_stream(_model, _context, _options):
+            message = {
+                "role": "assistant", "content": [{"type": "text", "text": "立即完成"}],
+                "stopReason": "stop", "timestamp": 1,
+            }
+            stream = AssistantMessageEventStream()
+            stream.push({"type": "start", "partial": {**message, "content": []}})
+            stream.push({"type": "done", "message": message})
+            return stream
+
+        dispatcher = runtime._make_subagent_dispatcher(
+            session_id=session["id"], parent_path="/root", runtime_config=config,
+            auth_token=None, environment=None, skill_owner_key=None, messages_provider=lambda: [],
+        )
+        with (
+            patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=immediate_stream),
+            patch.object(runtime, "_schedule_ready_aggregation", return_value=True),
+        ):
+            spawned = await dispatcher(
+                "spawn",
+                {
+                    "message": "快速查找", "task_name": "fast_lookup", "role": "explore",
+                    "task_category": "code_exploration", "role_reason": "需要跨文件定位",
+                    "required_reason": "结论依赖准确位置",
+                    "target_scope": {"kind": "workspace", "targets": ["Server/src"]},
+                },
+            )
+            await dispatcher("wait_agent", {"targets": [spawned["id"]], "timeout_ms": 2_000})
+
+        thread = runtime.subagent_repository.get_thread(session["id"], spawned["id"])
+        batch = runtime.subagent_repository.get_coordination_batch(session["id"], spawned["coordinationBatchID"])
+        self.assertEqual(thread["metadata"]["taskCategory"], "code_exploration")
+        self.assertEqual(thread["metadata"]["targetScope"]["targets"], ["Server/src"])
+        self.assertIn(spawned["id"], batch["requiredTaskIDs"])
+        self.assertIn(spawned["id"], batch["pendingResults"])
+        await runtime._agent_controls[session["id"]].close()
+        await asyncio.sleep(0)
+        runtime.close()
+
+    async def test_subagent_dispatcher_rejects_recursive_spawn(self) -> None:
+        runtime = MonAgentRuntime(Path.cwd(), SessionStore(), EventRecorder(), None, None, object())
+        config = RuntimeModelConfig(
+            {"id": "fake", "name": "Fake", "api": "fake", "provider": "fake", "input": ["text"]},
+            None,
+            "Fake",
+            "test",
+            None,
+        )
+        dispatcher = runtime._make_subagent_dispatcher(
+            session_id="ses_recursive", parent_path="/root/child", runtime_config=config,
+            auth_token=None, environment=None, skill_owner_key=None, messages_provider=lambda: [],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "不允许递归"):
+            await dispatcher("spawn", {"message": "再拆分", "task_name": "nested"})
+
+    async def test_aggregation_uses_hidden_internal_run_and_completes_batch(self) -> None:
+        runtime = MonAgentRuntime(Path.cwd(), SessionStore(), EventRecorder(), None, None, object())
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        runtime.subagent_repository = SubagentThreadRepository(temporary.name)
+        runtime.subagent_repository.upsert_coordination_batch(
+            "ses_aggregate",
+            {
+                "batchID": "batch_aggregate",
+                "status": "aggregating",
+                "objectiveEpoch": 0,
+                "requiredTaskIDs": ["agt_1"],
+                "optionalTaskIDs": [],
+                "terminalTaskIDs": ["agt_1"],
+                "pendingResults": {"agt_1": {"status": "completed", "result": {"content": "结论"}}},
+                "deliveredResultKeys": ["agt_1:attempt_1"],
+                "aggregationScheduled": True,
+                "createdAt": 1,
+            },
+        )
+
+        with patch.object(runtime, "_run_prompt", new=AsyncMock()) as run_prompt:
+            await runtime._run_aggregation("ses_aggregate", "batch_aggregate")
+
+        run_prompt.assert_awaited_once()
+        call = run_prompt.await_args
+        self.assertEqual(call.kwargs["internal_batch_id"], "batch_aggregate")
+        self.assertIn("subagent_batch_result", call.args[1][0]["text"])
+        batch = runtime.subagent_repository.get_coordination_batch("ses_aggregate", "batch_aggregate")
+        self.assertEqual(batch["status"], "completed")
+
+    async def test_user_prompt_is_queued_while_aggregation_is_running(self) -> None:
+        runtime = MonAgentRuntime(Path.cwd(), SessionStore(), EventRecorder(), None, None, object())
+        running: Future[None] = Future()
+        runtime._running["ses_queue"] = running
+        runtime._running_kinds["ses_queue"] = "aggregation"
+
+        runtime.prompt_async("ses_queue", [{"type": "text", "text": "新的用户消息"}], "token")
+
+        self.assertIs(runtime._running["ses_queue"], running)
+        self.assertEqual(
+            runtime._pending_user_prompts["ses_queue"],
+            [([{"type": "text", "text": "新的用户消息"}], "token")],
+        )
 
     async def test_tool_budget_blocks_additional_tool_execution(self) -> None:
         temporary = TemporaryDirectory()
@@ -250,7 +439,7 @@ class SubagentRuntimeIntegrationTest(unittest.IsolatedAsyncioTestCase):
         )
         with patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=tool_loop_stream):
             spawned = await dispatcher(
-                "spawn", {"message": "循环", "task_name": "tool_limited", "role": "limited"}
+                "spawn", {"message": "循环", "task_name": "tool_limited", "role": "limited", "required_for_final": False}
             )
             result = await dispatcher(
                 "wait_agent", {"targets": [spawned["agentPath"]], "timeout_ms": 2_000}
@@ -306,7 +495,7 @@ class SubagentRuntimeIntegrationTest(unittest.IsolatedAsyncioTestCase):
         with patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=fake_stream):
             spawned = await first_dispatcher(
                 "spawn",
-                {"message": "第一次任务", "task_name": "saved_worker", "role": "reviewer"},
+                {"message": "第一次任务", "task_name": "saved_worker", "role": "reviewer", "required_for_final": False},
             )
             await first_dispatcher("wait_agent", {"targets": [spawned["agentPath"]], "timeout_ms": 2_000})
 
@@ -389,7 +578,7 @@ class SubagentRuntimeIntegrationTest(unittest.IsolatedAsyncioTestCase):
         with patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=fake_stream):
             spawned = await first_dispatcher(
                 "spawn",
-                {"message": "执行", "task_name": "durable_result", "role": "reviewer"},
+                {"message": "执行", "task_name": "durable_result", "role": "reviewer", "required_for_final": False},
             )
             for _ in range(50):
                 state = (await first_dispatcher("list_agents", {}))["agents"][0]

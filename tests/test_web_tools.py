@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import asyncio
 import unittest
 from datetime import date
 from unittest.mock import patch
@@ -8,6 +9,7 @@ from unittest.mock import patch
 from mon_agent_server.tools.web import (
     bing_freshness_filter,
     clear_search_cache,
+    create_web_tools,
     normalize_bing_url,
     parse_bing_results,
     search_provider_order,
@@ -164,6 +166,20 @@ class WebSearchProviderTest(unittest.TestCase):
         self.assertEqual(results[0]["hostname"], "example.com")
         self.assertEqual(results[0]["provider"], "exa")
         self.assertEqual(results[1]["published_at"], "2026-07-22")
+
+
+class WebToolTimeoutTest(unittest.IsolatedAsyncioTestCase):
+    async def test_web_search_has_total_async_timeout(self) -> None:
+        async def hanging_to_thread(*_args, **_kwargs):
+            await asyncio.Event().wait()
+
+        tool = next(item for item in create_web_tools() if item.name == "web_search")
+        with (
+            patch("mon_agent_server.tools.web.asyncio.to_thread", new=hanging_to_thread),
+            patch("mon_agent_server.tools.web._total_tool_timeout_seconds", return_value=0.01),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "网页搜索总超时"):
+                await tool.execute("call-timeout", {"query": "测试"})
 
 
 class FakeProvider:

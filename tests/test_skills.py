@@ -48,7 +48,7 @@ class SkillCatalogTest(unittest.TestCase):
             },
         )
 
-    def test_user_chat_starts_with_only_core_tools(self) -> None:
+    def test_user_chat_starts_with_core_and_coordination_tools(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
         names = _tool_names(runtime.active_tools())
 
@@ -63,6 +63,16 @@ class SkillCatalogTest(unittest.TestCase):
                 "ls",
                 "grep",
                 "find",
+                "external_ls",
+                "external_read",
+                "external_find",
+                "external_grep",
+                "spawn_agent",
+                "send_message",
+                "followup_task",
+                "list_agents",
+                "wait_agent",
+                "interrupt_agent",
             },
         )
         self.assertNotIn("loaded_tools", names)
@@ -108,10 +118,10 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertIn("apply_patch", _tool_names(runtime.active_tools()))
 
-    def test_multi_agent_tools_are_only_exposed_after_skill_load(self) -> None:
+    def test_multi_agent_skill_adds_policy_without_gating_control_tools(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
 
-        self.assertNotIn("spawn_agent", _tool_names(runtime.active_tools()))
+        self.assertIn("spawn_agent", _tool_names(runtime.active_tools()))
         result = runtime.load(["multi-agent"])
 
         self.assertTrue(result["success"])

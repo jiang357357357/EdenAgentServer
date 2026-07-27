@@ -33,6 +33,15 @@ _SEARCH_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _SEARCH_CACHE_LOCK = threading.Lock()
 
 
+def _total_tool_timeout_seconds(env_name: str, default_ms: int) -> float:
+    raw = os.environ.get(env_name, str(default_ms)).strip()
+    try:
+        timeout_ms = int(raw)
+    except ValueError:
+        timeout_ms = default_ms
+    return min(max(timeout_ms, 1_000), 120_000) / 1_000
+
+
 def _cache_ttl_seconds() -> int:
     raw = os.environ.get("MON_AGENT_SEARCH_CACHE_TTL_SECONDS", "120").strip()
     try:
@@ -182,15 +191,20 @@ def create_web_tools() -> list[AgentTool]:
         max_results = min(max(int(round(float(params.get("max_results") or 5))), 1), 10)
         raw_domains = params.get("domains")
         domains = raw_domains if isinstance(raw_domains, list) else None
-        result = await asyncio.to_thread(
-            web_search,
-            str(params["query"]),
-            max_results,
-            params.get("language"),
-            params.get("time_range"),
-            None,
-            domains,
-        )
+        total_timeout = _total_tool_timeout_seconds("MON_AGENT_SEARCH_TOTAL_TIMEOUT_MS", 30_000)
+        try:
+            async with asyncio.timeout(total_timeout):
+                result = await asyncio.to_thread(
+                    web_search,
+                    str(params["query"]),
+                    max_results,
+                    params.get("language"),
+                    params.get("time_range"),
+                    None,
+                    domains,
+                )
+        except TimeoutError as error:
+            raise RuntimeError(f"网页搜索总超时：所有搜索入口未在 {total_timeout:g} 秒内返回可用结果。") from error
         return text_result(truncate(_search_text(result), 20_000), result)
 
     async def web_fetch_execute(
@@ -200,7 +214,12 @@ def create_web_tools() -> list[AgentTool]:
         _on_update: Any = None,
     ) -> dict[str, Any]:
         max_chars = min(max(int(round(float(params.get("max_chars") or 28_000))), 2_000), 60_000)
-        result = await asyncio.to_thread(fetch_web_page, str(params["url"]))
+        total_timeout = _total_tool_timeout_seconds("MON_AGENT_FETCH_TOTAL_TIMEOUT_MS", 30_000)
+        try:
+            async with asyncio.timeout(total_timeout):
+                result = await asyncio.to_thread(fetch_web_page, str(params["url"]))
+        except TimeoutError as error:
+            raise RuntimeError(f"网页抓取总超时：目标页面未在 {total_timeout:g} 秒内返回。") from error
         body = truncate(
             f"{'标题: ' + result['title'] + chr(10) + chr(10) if result.get('title') else ''}{result['body']}",
             max_chars,

@@ -56,12 +56,24 @@ def create_subagent_tools(context: MonToolContext) -> list[AgentTool]:
         return text_result(f"已中断 {result.get('agentPath')}。", result)
 
     target_schema = {"type": "string", "description": "子智能体的 agentPath 或 agentID。"}
+    role_descriptions = context.subagent_role_descriptions or {}
+    role_catalog = "\n".join(
+        f"- {name}: {role_descriptions.get(name, '后台任务角色')}"
+        for name in context.subagent_role_names
+    )
     return [
         AgentTool(
             name="spawn_agent",
             label="创建子智能体",
             description=(
-                "把一个边界清晰、可独立完成的任务交给后台子智能体。简单问题、闲聊或必须由当前角色直接完成的任务不要创建子智能体。"
+                "把边界清晰、可独立完成的任务交给后台子智能体。"
+                "宽泛实时资讯、多来源核验、需要调整搜索词的研究必须优先使用 researcher；"
+                "未知代码位置、跨文件调用链和全量引用查找必须优先使用 explore；"
+                "位置不明的个人文件、游戏存档、应用数据以及跨 Steam/Proton/Wine/模拟器候选目录的查找必须优先使用 file_locator；"
+                "日志归因和跨组件诊断使用 general。"
+                "创建后不要由父智能体重复相同范围的搜索，只继续不重叠工作；结果缺失时复用原线程 followup。"
+                "精确路径、单个已知标准目录、精确文件、精确符号、单个已知 URL、结构化天气时间和一次窄验证由父智能体直接完成。"
+                + (f"\n\n当前可用角色：\n{role_catalog}" if role_catalog else "")
             ),
             parameters={
                 "type": "object",
@@ -71,7 +83,7 @@ def create_subagent_tools(context: MonToolContext) -> list[AgentTool]:
                     "role": {
                         "type": "string",
                         **({"enum": list(context.subagent_role_names)} if context.subagent_role_names else {}),
-                        "description": "后台任务角色；省略时使用 general。",
+                        "description": "后台任务角色；省略时使用 general。" + (f"\n{role_catalog}" if role_catalog else ""),
                     },
                     "fork_turns": {
                         "description": "继承上下文：none、all 或最近 N 个用户轮次。",
@@ -79,6 +91,31 @@ def create_subagent_tools(context: MonToolContext) -> list[AgentTool]:
                             {"type": "string", "enum": ["none", "all"]},
                             {"type": "integer", "minimum": 0, "maximum": 20},
                         ],
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": "是否后台运行。默认为 true；false 时等待任务进入终态后再返回。",
+                    },
+                    "required_for_final": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "该结果是否为当前最终整合回复所必需。默认为 true；纯预取或可选扩展任务才设为 false。",
+                    },
+                    "task_category": {
+                        "type": "string",
+                        "enum": ["external_research", "code_exploration", "user_file_location", "diagnosis", "implementation", "review", "other"],
+                        "description": "任务类别，用于委派审计和指标统计。",
+                    },
+                    "role_reason": {"type": "string", "maxLength": 500, "description": "选择该角色的简短理由。"},
+                    "required_reason": {"type": "string", "maxLength": 500, "description": "该结果为何影响最终答复。"},
+                    "target_scope": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {"type": "string", "enum": ["web", "workspace", "user_files", "logs", "mixed", "other"]},
+                            "targets": {"type": "array", "items": {"type": "string", "maxLength": 1000}, "maxItems": 20},
+                        },
+                        "required": ["kind", "targets"],
+                        "additionalProperties": False,
                     },
                 },
                 "required": ["message", "task_name"],

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from mon_agent_core.harness.compaction import estimate_context_tokens
+
 from ..core import CoreAuthenticationExpiredError
 from ..ids import create_id, now_ms
 from .messages import text_from_tool_result
@@ -161,6 +163,12 @@ class RuntimeEmitterMixin:
             tool_name = str(event.get("toolName"))
             started = run_state.tool_starts.get(call_id)
             body = text_from_tool_result(event.get("result") or {})
+            if event.get("isError") and (
+                "WorkspacePathError" in body
+                or "超出工作区" in body
+                or "outside the workspace" in body.lower()
+            ):
+                run_state.root_workspace_path_error = True
             run_state.finished_tool_calls.add(call_id)
             self.emit_runtime_thinking(session_id, run_state, f"工具 {tool_name} {'执行失败' if event.get('isError') else '执行完成'}。")
             if run_state.assistant_message_id:
@@ -277,6 +285,9 @@ class RuntimeEmitterMixin:
 
     def emit_session(self, session_id: str) -> None:
         session = self.store.require_session(session_id)
+        session["info"]["contextTokens"] = int(
+            estimate_context_tokens(self.store.context_messages(session_id)).get("tokens") or 0
+        )
         self.events.emit({"type": "session.updated", "properties": {"sessionID": session_id, "info": session["info"]}})
 
     def emit_session_error(self, session_id: str, error: Any) -> None:

@@ -4,6 +4,26 @@ from mon_agent_server.store import SessionStore
 
 
 class StoreTest(unittest.TestCase):
+    def test_core_refresh_does_not_regress_terminal_subagent_state(self):
+        store = SessionStore()
+        session = store.create_session("")
+        thread_id = "agt_test"
+        store.upsert_agent_thread(
+            session["id"],
+            {"id": thread_id, "status": "completed", "updatedAt": 20, "result": {"content": "done"}},
+        )
+
+        refreshed = store.upsert_session_info(
+            {
+                "id": session["id"],
+                "time": {"updated": 30},
+                "agentThreads": [{"id": thread_id, "status": "running", "updatedAt": 10}],
+            }
+        )
+
+        self.assertEqual(refreshed["agentThreads"][0]["status"], "completed")
+        self.assertEqual(refreshed["agentThreads"][0]["result"]["content"], "done")
+
     def test_session_store_creates_and_appends_messages(self):
         store = SessionStore()
         session = store.create_session("")

@@ -9,6 +9,7 @@ from .character_actions import create_character_action_tools
 from .context import MonToolContext
 from .email import create_email_tools
 from .environment import create_environment_tools
+from .external_files import create_external_file_tools
 from .interaction import create_interaction_tools
 from .loaded import create_loaded_tools
 from .memo import create_memo_tools
@@ -33,6 +34,7 @@ def create_mon_agent_tools(
     tools.extend(create_loaded_tools(tools))
     tools.extend(create_web_tools())
     tools.extend(create_environment_tools(context))
+    tools.extend(create_external_file_tools(root, context))
     tools.extend(create_interaction_tools(context))
     tools.extend(create_character_action_tools(context))
     tools.extend(create_self_awake_tools(root, context))

@@ -22,6 +22,11 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "ls",
         "grep",
         "find",
+        "external_ls",
+        "external_find",
+        "external_read",
+        "external_grep",
+        "search_user_files",
         "web_search",
         "web_fetch",
         "get_calendar_context",
@@ -220,9 +225,28 @@ BUILTIN_SUBAGENTS: tuple[SubagentDefinition, ...] = (
     ),
     SubagentDefinition(
         name="researcher",
-        description="资料搜索、代码阅读与证据整理",
+        description="外部资料搜索、多来源核验与证据整理",
         developer_instructions="先定位可信来源，再归纳结论。明确区分事实、推断和未验证信息。",
         skills=("web-research",),
+        sandbox_mode="read-only",
+        budget=SubagentBudget(max_turns=24, max_tool_calls=48, timeout_seconds=300),
+    ),
+    SubagentDefinition(
+        name="explore",
+        description="只读探索代码位置、调用链和跨文件引用",
+        developer_instructions="先缩小搜索范围，再读取关键实现。交付准确文件路径、符号、关联关系和可追溯证据，不修改工作区。",
+        skills=("workspace-development",),
+        sandbox_mode="read-only",
+    ),
+    SubagentDefinition(
+        name="file_locator",
+        description="在明确、有限的目录范围内只读定位个人文件、游戏存档和应用数据",
+        developer_instructions=(
+            "只进行定位和证据核验，不复制、修改、删除或执行文件。先根据平台和应用形成少量候选根目录，"
+            "工作区外必须使用 external_ls、external_find、external_read、external_grep，不要使用受工作区限制的 ls/find/read/grep。"
+            "每次只选择一个明确存在的候选根目录；优先返回真实路径、识别依据、最近修改时间和仍需确认的候选。"
+            "不得扩大到 /、/home 或整个用户主目录，也不得执行任何写入。"
+        ),
         sandbox_mode="read-only",
     ),
     SubagentDefinition(
@@ -289,6 +313,10 @@ class SubagentCatalog:
     @property
     def definitions(self) -> tuple[SubagentDefinition, ...]:
         return tuple(self._definitions[name] for name in self.names)
+
+    @property
+    def descriptions(self) -> dict[str, str]:
+        return {definition.name: definition.description for definition in self.definitions}
 
     def resolve(self, name: Any) -> SubagentDefinition:
         normalized = str(name or "general").strip().lower()

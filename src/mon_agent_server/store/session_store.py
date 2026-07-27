@@ -57,10 +57,36 @@ class SessionStore:
             existing = self._sessions.get(info["id"], {})
             existing_info = existing.get("info", {})
             incoming_runtime = info.get("characterRuntime") if isinstance(info.get("characterRuntime"), dict) else None
+            incoming_threads = list(info.get("agentThreads") or [])
+            local_threads = list(existing_info.get("agentThreads") or [])
+            threads_by_id = {
+                str(item.get("id")): dict(item)
+                for item in incoming_threads
+                if isinstance(item, dict) and item.get("id")
+            }
+            terminal = {"completed", "failed", "interrupted", "cancelled"}
+            for item in local_threads:
+                if not isinstance(item, dict) or not item.get("id"):
+                    continue
+                key = str(item["id"])
+                incoming = threads_by_id.get(key)
+                if (
+                    incoming is None
+                    or str(item.get("status")) in terminal
+                    or int(item.get("updatedAt") or 0) >= int(incoming.get("updatedAt") or 0)
+                ):
+                    threads_by_id[key] = dict(item)
+            merged_messages = {
+                str(item.get("id")): dict(item)
+                for item in [*(info.get("agentMessages") or []), *(existing_info.get("agentMessages") or [])]
+                if isinstance(item, dict) and item.get("id")
+            }
             merged = {
                 **existing_info,
                 **info,
                 "time": {**existing_info.get("time", {}), **info.get("time", {})},
+                "agentThreads": list(threads_by_id.values()),
+                "agentMessages": list(merged_messages.values()),
             }
             self._sessions[info["id"]] = {
                 "info": merged,
@@ -309,6 +335,72 @@ class SessionStore:
             session["messages"].append(message)
             self._touch(session)
         return message
+
+    def append_command_message(self, session_id: str, command: str) -> dict[str, Any]:
+        """Persist a UI-only slash command marker in the chronological message stream."""
+        current = now_ms()
+        message_id = create_id("msg")
+        part = {
+            "id": f"{message_id}_text_0",
+            "messageID": message_id,
+            "sessionID": session_id,
+            "type": "text",
+            "text": command,
+            "time": {"start": current, "end": current},
+        }
+        message = {
+            "info": {
+                "id": message_id,
+                "role": "assistant",
+                "kind": "slash-command",
+                "time": {"created": current, "completed": current},
+            },
+            "parts": [part],
+        }
+        with self._lock:
+            session = self.require_session(session_id)
+            session["messages"].append(message)
+            self._touch(session)
+        return message
+
+    def append_internal_user_message(self, session_id: str, text: str) -> dict[str, Any]:
+        """Append a model-visible user message that is hidden from chat history."""
+
+        current = now_ms()
+        message_id = create_id("msg")
+        model_message = {
+            "role": "user",
+            "timestamp": current,
+            "content": [{"type": "text", "text": str(text or "")}],
+        }
+        message = {
+            "info": {
+                "id": message_id,
+                "role": "user",
+                "hidden": True,
+                "internal": True,
+                "time": {"created": current, "completed": current},
+            },
+            "parts": [
+                {
+                    "id": f"{message_id}_text_0",
+                    "messageID": message_id,
+                    "sessionID": session_id,
+                    "type": "text",
+                    "text": str(text or ""),
+                    "time": {"start": current, "end": current},
+                }
+            ],
+        }
+        with self._lock:
+            session = self.require_session(session_id)
+            session["messages"].append(message)
+            sequence = len(session["modelEvents"]) + 1
+            session["modelEvents"].append(
+                ContextManager.event_for_message(model_message, sequence=sequence).dump()
+            )
+            self._touch(session)
+        return deepcopy(message)
 
     def append_compaction_message(
         self,

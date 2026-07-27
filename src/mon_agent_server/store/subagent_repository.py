@@ -123,6 +123,137 @@ class SubagentThreadRepository:
                 self._write_json_atomic(self._session_dir(session_id) / "mailboxes.json", payload)
             return consumed
 
+    def upsert_coordination_batch(self, session_id: str, batch: dict[str, Any]) -> dict[str, Any]:
+        batch_id = str(batch.get("batchID") or "").strip()
+        if not batch_id:
+            raise ValueError("持久化协调批次时缺少 batchID。")
+        with self._lock:
+            path = self._coordination_dir(session_id) / f"{_storage_key(batch_id)}.json"
+            current = self._read_json(path) or {}
+            saved = {
+                **current,
+                **deepcopy(batch),
+                "batchID": batch_id,
+                "sessionID": session_id,
+                "updatedAt": now_ms(),
+            }
+            self._write_json_atomic(path, saved)
+            self._write_session_manifest(session_id)
+            return deepcopy(saved)
+
+    def get_coordination_batch(self, session_id: str, batch_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            path = self._coordination_dir(session_id, create=False) / f"{_storage_key(batch_id)}.json"
+            batch = self._read_json(path)
+            return deepcopy(batch) if batch else None
+
+    def list_coordination_batches(self, session_id: str) -> list[dict[str, Any]]:
+        directory = self._coordination_dir(session_id, create=False)
+        if not directory.is_dir():
+            return []
+        with self._lock:
+            batches = [
+                value
+                for path in directory.glob("*.json")
+                if isinstance((value := self._read_json(path)), dict)
+            ]
+        return sorted(
+            (deepcopy(item) for item in batches),
+            key=lambda item: (int(item.get("createdAt") or 0), str(item.get("batchID") or "")),
+        )
+
+    def coordination_metrics(self, session_id: str) -> dict[str, Any]:
+        """Return deterministic operational metrics; semantic quality belongs to offline evals."""
+        batches = self.list_coordination_batches(session_id)
+        threads = self.list_threads(session_id)
+        terminal = [item for item in threads if str(item.get("status") or "") not in ACTIVE_SUBAGENT_STATUSES]
+        completed = [item for item in terminal if str(item.get("status") or "") == "completed"]
+        required_total = sum(len(item.get("requiredTaskIDs") or []) for item in batches)
+        required_consumed = sum(
+            len(item.get("requiredTaskIDs") or [])
+            for item in batches
+            if str(item.get("status") or "") == "completed"
+        )
+        role_counts: dict[str, int] = {}
+        category_counts: dict[str, int] = {}
+        durations: list[int] = []
+        for thread in threads:
+            role = str(thread.get("role") or "general")
+            role_counts[role] = role_counts.get(role, 0) + 1
+            metadata = thread.get("metadata") if isinstance(thread.get("metadata"), dict) else {}
+            category = str(metadata.get("taskCategory") or "other")
+            category_counts[category] = category_counts.get(category, 0) + 1
+            if thread.get("completedAt") and thread.get("createdAt"):
+                durations.append(max(0, int(thread["completedAt"]) - int(thread["createdAt"])))
+        return {
+            "batchCount": len(batches),
+            "taskCount": len(threads),
+            "terminalCount": len(terminal),
+            "completedCount": len(completed),
+            "completionRate": (len(completed) / len(terminal)) if terminal else None,
+            "requiredResultUtilization": (required_consumed / required_total) if required_total else None,
+            "averageTaskDurationMs": (sum(durations) / len(durations)) if durations else None,
+            "roleCounts": role_counts,
+            "categoryCounts": category_counts,
+            "batchStatusCounts": {
+                status: sum(1 for item in batches if str(item.get("status") or "") == status)
+                for status in sorted({str(item.get("status") or "unknown") for item in batches})
+            },
+        }
+
+    def record_coordination_result(
+        self,
+        session_id: str,
+        batch_id: str,
+        *,
+        task_id: str,
+        attempt_id: str,
+        result: dict[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
+        """Persist one terminal task result and advance the batch atomically.
+
+        Returns ``(batch, inserted)``. Replayed terminal events keep the stored
+        batch unchanged and return ``inserted=False``.
+        """
+
+        with self._lock:
+            path = self._coordination_dir(session_id, create=False) / f"{_storage_key(batch_id)}.json"
+            batch = self._read_json(path)
+            if batch is None:
+                raise KeyError(f"找不到协调批次：{batch_id}")
+            if str(batch.get("status") or "") == "cancelled":
+                return deepcopy(batch), False
+            result_key = f"{task_id}:{attempt_id}"
+            delivered = [str(item) for item in batch.get("deliveredResultKeys") or []]
+            if result_key in delivered:
+                return deepcopy(batch), False
+            terminal = [str(item) for item in batch.get("terminalTaskIDs") or []]
+            pending = dict(batch.get("pendingResults") or {})
+            delivered.append(result_key)
+            if task_id not in terminal:
+                terminal.append(task_id)
+            pending[task_id] = deepcopy(result)
+            required = {str(item) for item in batch.get("requiredTaskIDs") or []}
+            optional = {str(item) for item in batch.get("optionalTaskIDs") or []}
+            terminal_set = set(terminal)
+            if required and required <= terminal_set:
+                status = "ready"
+            elif not required and optional and optional <= terminal_set:
+                status = "completed"
+            else:
+                status = "collecting"
+            saved = {
+                **batch,
+                "terminalTaskIDs": terminal,
+                "pendingResults": pending,
+                "deliveredResultKeys": delivered,
+                "status": status,
+                "readyAt": (batch.get("readyAt") or now_ms()) if status == "ready" else batch.get("readyAt"),
+                "updatedAt": now_ms(),
+            }
+            self._write_json_atomic(path, saved)
+            return deepcopy(saved), True
+
     def list_mailbox(self, session_id: str, receiver: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
             messages = self._read_mailboxes(session_id)["messages"]
@@ -198,6 +329,63 @@ class SubagentThreadRepository:
             reconciled.append(updated)
         return reconciled
 
+    def reconcile_coordination_batches(
+        self,
+        session_id: str,
+        *,
+        aggregation_max_retries: int = 2,
+    ) -> list[dict[str, Any]]:
+        """Repair batches after process restart and consume recovered terminal threads."""
+        threads = {str(item.get("id") or ""): item for item in self.list_threads(session_id)}
+        changed: list[dict[str, Any]] = []
+        for original in self.list_coordination_batches(session_id):
+            batch_id = str(original.get("batchID") or "")
+            batch = original
+            registered = [
+                str(item)
+                for item in [*(batch.get("requiredTaskIDs") or []), *(batch.get("optionalTaskIDs") or [])]
+            ]
+            terminal = set(str(item) for item in batch.get("terminalTaskIDs") or [])
+            for task_id in registered:
+                thread = threads.get(task_id)
+                if task_id in terminal or not thread or str(thread.get("status") or "") in ACTIVE_SUBAGENT_STATUSES:
+                    continue
+                metadata = thread.get("metadata") if isinstance(thread.get("metadata"), dict) else {}
+                batch, inserted = self.record_coordination_result(
+                    session_id,
+                    batch_id,
+                    task_id=task_id,
+                    attempt_id=str(metadata.get("attemptID") or "recovered"),
+                    result={
+                        "taskID": task_id,
+                        "attemptID": str(metadata.get("attemptID") or "recovered"),
+                        "taskName": str(thread.get("taskName") or ""),
+                        "agentPath": str(thread.get("agentPath") or ""),
+                        "role": str(thread.get("role") or "general"),
+                        "status": str(thread.get("status") or "interrupted"),
+                        "result": thread.get("result") if isinstance(thread.get("result"), dict) else None,
+                        "error": str(thread.get("error") or "") or None,
+                        "completedAt": thread.get("completedAt") or now_ms(),
+                    },
+                )
+                if inserted:
+                    terminal.add(task_id)
+            status = str(batch.get("status") or "")
+            retry_count = int(batch.get("aggregationRetryCount") or 0)
+            if status == "aggregating":
+                batch = self.upsert_coordination_batch(
+                    session_id,
+                    {**batch, "status": "ready", "aggregationScheduled": False, "recoveredAt": now_ms()},
+                )
+            elif status == "aggregation_failed" and retry_count <= aggregation_max_retries:
+                batch = self.upsert_coordination_batch(
+                    session_id,
+                    {**batch, "status": "ready", "aggregationScheduled": False, "recoveredAt": now_ms()},
+                )
+            if batch != original:
+                changed.append(batch)
+        return changed
+
     def thread_details(
         self,
         session_id: str,
@@ -233,6 +421,12 @@ class SubagentThreadRepository:
 
     def _thread_dir(self, session_id: str, agent_id: str, *, create: bool = True) -> Path:
         directory = self._session_dir(session_id, create=create) / _storage_key(agent_id)
+        if create:
+            directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def _coordination_dir(self, session_id: str, *, create: bool = True) -> Path:
+        directory = self._session_dir(session_id, create=create) / "coordination"
         if create:
             directory.mkdir(parents=True, exist_ok=True)
         return directory

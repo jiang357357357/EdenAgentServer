@@ -1,7 +1,23 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import Any
+
+
+DELEGATION_MODES = ("disabled", "explicit", "auto", "proactive")
+
+
+@dataclass(frozen=True, slots=True)
+class DelegationPolicy:
+    mode: str = "auto"
+
+    @classmethod
+    def from_environment(cls) -> "DelegationPolicy":
+        mode = str(os.environ.get("MON_AGENT_DELEGATION_MODE") or "auto").strip().lower()
+        if mode not in DELEGATION_MODES:
+            mode = "auto"
+        return cls(mode=mode)
 
 
 class RuntimeModelConfig:
@@ -13,6 +29,7 @@ class RuntimeModelConfig:
         self.core = core
         self.supports_images = "image" in (model.get("input") or [])
         self.thinking_level = "medium" if model.get("reasoning") else "off"
+        self.delegation_policy = DelegationPolicy.from_environment()
 
 
 def runtime_context_window(model: dict[str, Any]) -> int:

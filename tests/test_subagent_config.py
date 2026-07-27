@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock, patch
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from mon_agent_server.runtime.manager import MonAgentRuntime
-from mon_agent_server.runtime.config import RuntimeModelConfig
+from mon_agent_server.runtime.config import DelegationPolicy, RuntimeModelConfig
 from mon_agent_server.runtime.state import RunState
 from mon_agent_server.runtime.subagents import (
     SubagentBudget,
@@ -14,11 +15,28 @@ from mon_agent_server.runtime.subagents import (
     load_subagent_catalog,
 )
 from mon_agent_server.skills import create_skill_runtime
+from mon_agent_server.store import SessionStore
 from mon_agent_server.tools import MonToolContext
 from mon_agent_server.tools.subagents import create_subagent_tools
 
 
+class EventRecorder:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    def emit(self, event: dict) -> None:
+        self.events.append(event)
+
+
 class SubagentCatalogTest(unittest.TestCase):
+    def test_delegation_policy_defaults_to_auto_and_rejects_invalid_mode(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(DelegationPolicy.from_environment().mode, "auto")
+        with patch.dict("os.environ", {"MON_AGENT_DELEGATION_MODE": "explicit"}, clear=True):
+            self.assertEqual(DelegationPolicy.from_environment().mode, "explicit")
+        with patch.dict("os.environ", {"MON_AGENT_DELEGATION_MODE": "unexpected"}, clear=True):
+            self.assertEqual(DelegationPolicy.from_environment().mode, "auto")
+
     def test_project_definition_overrides_user_and_builtin_definitions(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -70,6 +88,9 @@ sandbox_mode = "read-only"
             self.assertEqual(reviewer.budget, SubagentBudget(12, 24, 300))
             self.assertIn("planner", catalog.names)
             self.assertIn("coder", catalog.names)
+            self.assertIn("explore", catalog.names)
+            self.assertIn("file_locator", catalog.names)
+            self.assertEqual(catalog.resolve("file_locator").sandbox_mode, "read-only")
 
     def test_invalid_definition_reports_its_file(self) -> None:
         with TemporaryDirectory() as directory:
@@ -160,6 +181,7 @@ class SubagentToolPolicyTest(unittest.IsolatedAsyncioTestCase):
         names = {tool.name for tool in runtime.active_tools()}
 
         self.assertIn("read", names)
+        self.assertIn("external_find", names)
         self.assertIn("spawn_agent", names)
         self.assertNotIn("write", names)
         self.assertNotIn("edit", names)
@@ -202,6 +224,130 @@ class SubagentToolPolicyTest(unittest.IsolatedAsyncioTestCase):
             spawn.parameters["properties"]["role"]["enum"],
             ["general", "planner", "reviewer"],
         )
+        self.assertIn("background", spawn.parameters["properties"])
+        self.assertIn("required_for_final", spawn.parameters["properties"])
+        self.assertTrue(spawn.parameters["properties"]["required_for_final"]["default"])
+        self.assertIn("task_category", spawn.parameters["properties"])
+        self.assertIn("target_scope", spawn.parameters["properties"])
+        self.assertIn("code_exploration", spawn.parameters["properties"]["task_category"]["enum"])
+        self.assertIn("多来源核验", spawn.description)
+        self.assertIn("researcher", spawn.description)
+        self.assertIn("file_locator", spawn.description)
+        self.assertIn("user_file_location", spawn.parameters["properties"]["task_category"]["enum"])
+        self.assertIn("user_files", spawn.parameters["properties"]["target_scope"]["properties"]["kind"]["enum"])
+
+    async def test_root_repeated_web_search_is_soft_blocked_and_spawn_recovers(self) -> None:
+        runtime = MonAgentRuntime(Path.cwd(), SessionStore(), EventRecorder(), None, None, object())
+        runtime.permissions = Mock()
+        runtime.permissions.is_always_allowed.return_value = True
+        state = RunState()
+        hook = runtime._before_tool_call("ses_route", state, delegation_mode="auto")
+
+        first = await hook(
+            {"toolCall": {"id": "search-1", "name": "web_search"}, "args": {"query": "蔚蓝档案最新资讯", "max_results": 10}}
+        )
+        second = await hook(
+            {"toolCall": {"id": "search-2", "name": "web_search"}, "args": {"query": "蔚蓝档案活动更新", "max_results": 10}}
+        )
+        recovered = await hook(
+            {
+                "toolCall": {"id": "spawn-1", "name": "spawn_agent"},
+                "args": {"role": "researcher", "task_name": "blue_archive_news"},
+            }
+        )
+
+        self.assertIsNone(first)
+        self.assertTrue(second["block"])
+        self.assertIn("spawn_agent", second["reason"])
+        self.assertIsNone(recovered)
+        self.assertTrue(state.delegation_recovered)
+        event_types = [event["type"] for event in runtime.events.events]
+        self.assertIn("delegation.tool_blocked", event_types)
+        self.assertIn("delegation.recovered", event_types)
+        runtime.close()
+
+    async def test_proactive_blocks_broad_search_but_allows_precise_query(self) -> None:
+        runtime = MonAgentRuntime(Path.cwd(), SessionStore(), EventRecorder(), None, None, object())
+        runtime.permissions = Mock()
+        runtime.permissions.is_always_allowed.return_value = True
+        broad = await runtime._before_tool_call(
+            "ses_broad", RunState(), delegation_mode="proactive"
+        )({"toolCall": {"name": "web_search"}, "args": {"query": "AI 行业最新资讯", "max_results": 10}})
+        precise = await runtime._before_tool_call(
+            "ses_precise", RunState(), delegation_mode="proactive"
+        )({"toolCall": {"name": "web_search"}, "args": {"query": "Python 3.12 release date", "max_results": 3}})
+
+        self.assertTrue(broad["block"])
+        self.assertIsNone(precise)
+        runtime.close()
+
+    async def test_auto_allows_one_narrow_local_lookup_then_delegates_repeat(self) -> None:
+        runtime = MonAgentRuntime(Path.cwd(), SessionStore(), EventRecorder(), None, None, object())
+        runtime.permissions = Mock()
+        runtime.permissions.is_always_allowed.return_value = True
+        state = RunState()
+        hook = runtime._before_tool_call("ses_local", state, delegation_mode="auto")
+
+        first = await hook(
+            {"toolCall": {"name": "ls"}, "args": {"path": "/home/manager/.steam/steam"}}
+        )
+        second = await hook(
+            {"toolCall": {"name": "find"}, "args": {"path": "/home/manager/.local/share", "pattern": "save*"}}
+        )
+        recovered = await hook(
+            {"toolCall": {"name": "spawn_agent"}, "args": {"role": "file_locator", "task_name": "locate_game_save"}}
+        )
+
+        self.assertIsNone(first)
+        self.assertTrue(second["block"])
+        self.assertIn("role=file_locator", second["reason"])
+        self.assertIsNone(recovered)
+        self.assertTrue(state.delegation_recovered)
+        runtime.close()
+
+    async def test_root_cannot_block_on_background_agent(self) -> None:
+        runtime = MonAgentRuntime(Path.cwd(), SessionStore(), EventRecorder(), None, None, object())
+        runtime.permissions = Mock()
+        runtime.permissions.is_always_allowed.return_value = True
+
+        blocked = await runtime._before_tool_call(
+            "ses_wait", RunState(), delegation_mode="auto"
+        )({"toolCall": {"name": "wait_agent"}, "args": {"timeout_ms": 60000}})
+
+        self.assertTrue(blocked["block"])
+        self.assertIn("不应调用 wait_agent", blocked["reason"])
+        runtime.close()
+
+    async def test_proactive_blocks_broad_local_lookup_but_allows_exact_path(self) -> None:
+        runtime = MonAgentRuntime(Path.cwd(), SessionStore(), EventRecorder(), None, None, object())
+        runtime.permissions = Mock()
+        runtime.permissions.is_always_allowed.return_value = True
+        broad = await runtime._before_tool_call(
+            "ses_broad_local", RunState(), delegation_mode="proactive"
+        )({"toolCall": {"name": "find"}, "args": {"path": "/home", "pattern": "*save*", "max_depth": 8}})
+        precise = await runtime._before_tool_call(
+            "ses_exact_local", RunState(), delegation_mode="proactive"
+        )({"toolCall": {"name": "ls"}, "args": {"path": "/home/manager/.steam/steam/userdata/123/413150/remote"}})
+
+        self.assertTrue(broad["block"])
+        self.assertIn("file_locator", broad["reason"])
+        self.assertIsNone(precise)
+        runtime.close()
+
+    async def test_workspace_path_error_forces_file_locator_on_next_lookup(self) -> None:
+        runtime = MonAgentRuntime(Path.cwd(), SessionStore(), EventRecorder(), None, None, object())
+        runtime.permissions = Mock()
+        runtime.permissions.is_always_allowed.return_value = True
+        state = RunState()
+        state.root_workspace_path_error = True
+
+        blocked = await runtime._before_tool_call(
+            "ses_escape", state, delegation_mode="auto"
+        )({"toolCall": {"name": "ls"}, "args": {"path": "/home/manager/.steam"}})
+
+        self.assertTrue(blocked["block"])
+        self.assertIn("超出工作区", blocked["reason"])
+        runtime.close()
 
 
 if __name__ == "__main__":

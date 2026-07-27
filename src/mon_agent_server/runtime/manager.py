@@ -4,6 +4,7 @@ import asyncio
 import base64
 from collections.abc import Callable
 from concurrent.futures import Future
+import json
 import os
 import threading
 import time
@@ -55,6 +56,10 @@ from .subagents import (
     build_subagent_system_prompt,
     load_subagent_catalog,
 )
+
+
+class NoCompactionNeeded(RuntimeError):
+    """The manual compaction command is valid, but there is no old context to summarize."""
 
 
 def _bounded_env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
@@ -224,13 +229,34 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         self.subagent_max_depth = _bounded_env_int(
             "MON_AGENT_SUBAGENT_MAX_DEPTH", 2, minimum=1, maximum=8
         )
+        self.subagent_max_tasks_per_batch = _bounded_env_int(
+            "MON_AGENT_SUBAGENT_MAX_TASKS_PER_BATCH", 8, minimum=1, maximum=64
+        )
+        self.subagent_max_result_chars = _bounded_env_int(
+            "MON_AGENT_SUBAGENT_MAX_RESULT_CHARS", 200_000, minimum=1_000, maximum=2_000_000
+        )
+        self.subagent_aggregation_max_retries = _bounded_env_int(
+            "MON_AGENT_AGGREGATION_MAX_RETRIES", 2, minimum=0, maximum=10
+        )
+        self.subagent_aggregation_timeout_seconds = _bounded_env_int(
+            "MON_AGENT_AGGREGATION_TIMEOUT_SECONDS", 180, minimum=10, maximum=1_800
+        )
+        self.pending_user_prompt_limit = _bounded_env_int(
+            "MON_AGENT_PENDING_USER_PROMPT_LIMIT", 16, minimum=1, maximum=128
+        )
+        self.model_request_timeout_seconds = _bounded_env_int(
+            "MON_AGENT_MODEL_TIMEOUT_SECONDS", 120, minimum=10, maximum=1_800
+        )
         self._subagent_global_semaphore = asyncio.Semaphore(self.subagent_max_concurrent_global)
         self._host = RuntimeHost()
         self._running: dict[str, Future[Any]] = {}
+        self._running_kinds: dict[str, str] = {}
+        self._pending_user_prompts: dict[str, list[tuple[list[dict[str, Any]], str | None]]] = {}
         self._agents: dict[str, Agent] = {}
         self._cancelled_sessions: set[str] = set()
         self._agent_controls: dict[str, AgentControl] = {}
         self._session_runtime_auth: dict[str, tuple[str | None, dict[str, Any] | None]] = {}
+        self._open_coordination_batch_ids: dict[str, str] = {}
         self._reconciled_subagent_sessions: set[str] = set()
         self._restored_subagent_controls: set[str] = set()
         self._lock = threading.Lock()
@@ -246,6 +272,24 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 self._cancelled_sessions.add(session_id)
             agent = self._agents.get(session_id)
             control = self._agent_controls.get(session_id)
+        cancelled_at = now_ms()
+        for batch in self.subagent_repository.list_coordination_batches(session_id):
+            if str(batch.get("status") or "") in {"collecting", "ready", "aggregating"}:
+                saved = self.subagent_repository.upsert_coordination_batch(
+                    session_id,
+                    {**batch, "status": "cancelled", "aggregationScheduled": False, "cancelledAt": cancelled_at},
+                )
+                self.events.emit(
+                    {
+                        "type": "subagent.batch.cancelled",
+                        "properties": {
+                            "sessionID": session_id,
+                            "batchID": saved.get("batchID"),
+                            "status": "cancelled",
+                            "updatedAt": saved.get("updatedAt"),
+                        },
+                    }
+                )
         if agent is not None:
             agent.abort()
         active_subagents = False
@@ -300,9 +344,16 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
     def prompt_async(self, session_id: str, parts: list[dict[str, Any]], auth_token: str | None) -> None:
         with self._lock:
             if session_id in self._running:
+                if self._running_kinds.get(session_id) == "aggregation":
+                    queue = self._pending_user_prompts.setdefault(session_id, [])
+                    if len(queue) >= self.pending_user_prompt_limit:
+                        raise RuntimeError(f"等待处理的用户消息已达到上限 {self.pending_user_prompt_limit}。")
+                    queue.append((parts, auth_token))
+                    return
                 raise RuntimeError("Session is already running")
             future = self._host.submit(self._run_prompt(session_id, parts, auth_token))
             self._running[session_id] = future
+            self._running_kinds[session_id] = "user"
             future.add_done_callback(lambda completed: self._finish_submission(session_id, completed))
 
     def compact_async(self, session_id: str, custom_instructions: str | None, auth_token: str | None) -> None:
@@ -317,6 +368,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 raise RuntimeError("Session is already running")
             future = self._host.submit(self._run_manual_compaction(session_id, instructions or None, auth_token))
             self._running[session_id] = future
+            self._running_kinds[session_id] = "compaction"
             future.add_done_callback(lambda completed: self._finish_submission(session_id, completed))
 
     def _finish_submission(self, session_id: str, completed: Future[Any]) -> None:
@@ -325,11 +377,144 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         except Exception as error:
             self.emit_session_error(session_id, error)
         finally:
+            should_schedule = False
+            pending_user: tuple[list[dict[str, Any]], str | None] | None = None
             with self._lock:
                 if self._running.get(session_id) is completed:
                     self._running.pop(session_id, None)
+                    self._running_kinds.pop(session_id, None)
                     self._agents.pop(session_id, None)
                     self._cancelled_sessions.discard(session_id)
+                    self._open_coordination_batch_ids.pop(session_id, None)
+                    queued = self._pending_user_prompts.get(session_id) or []
+                    if queued:
+                        pending_user = queued.pop(0)
+                        if not queued:
+                            self._pending_user_prompts.pop(session_id, None)
+                    else:
+                        should_schedule = True
+            if pending_user is not None:
+                self.prompt_async(session_id, pending_user[0], pending_user[1])
+            elif should_schedule:
+                self._schedule_ready_aggregation(session_id)
+
+    def _schedule_ready_aggregation(self, session_id: str) -> bool:
+        ready = next(
+            (
+                batch
+                for batch in self.subagent_repository.list_coordination_batches(session_id)
+                if batch.get("status") == "ready" and not batch.get("aggregationScheduled")
+            ),
+            None,
+        )
+        if ready is None:
+            return False
+        with self._lock:
+            if session_id in self._running:
+                return False
+            batch_id = str(ready.get("batchID") or "")
+            if not batch_id:
+                return False
+            saved = self.subagent_repository.upsert_coordination_batch(
+                session_id,
+                {
+                    **ready,
+                    "aggregationScheduled": True,
+                    "status": "aggregating",
+                    "aggregationStartedAt": ready.get("aggregationStartedAt") or now_ms(),
+                },
+            )
+            future = self._host.submit(self._run_aggregation(session_id, batch_id))
+            self._running[session_id] = future
+            self._running_kinds[session_id] = "aggregation"
+            future.add_done_callback(lambda completed: self._finish_submission(session_id, completed))
+        self.events.emit(
+            {
+                "type": "subagent.batch.aggregating",
+                "properties": {
+                    "sessionID": session_id,
+                    "batchID": batch_id,
+                    "status": saved.get("status"),
+                    "updatedAt": saved.get("updatedAt"),
+                },
+            }
+        )
+        return True
+
+    async def _run_aggregation(self, session_id: str, batch_id: str) -> None:
+        batch = await asyncio.to_thread(
+            self.subagent_repository.get_coordination_batch,
+            session_id,
+            batch_id,
+        )
+        if not batch or batch.get("status") != "aggregating":
+            return
+        results = batch.get("pendingResults") if isinstance(batch.get("pendingResults"), dict) else {}
+        serialized_results = json.dumps(results, ensure_ascii=False, separators=(",", ":"))
+        if len(serialized_results) > self.subagent_max_result_chars:
+            serialized_results = serialized_results[: self.subagent_max_result_chars] + "…[结果已按运行时上限截断]"
+        prompt = "\n".join(
+            [
+                f'<subagent_batch_result batch_id="{batch_id}" objective_epoch="{int(batch.get("objectiveEpoch") or 0)}">',
+                serialized_results,
+                "</subagent_batch_result>",
+                "请验证并整合以上子智能体结果，不要逐字复制。说明失败任务对结论的影响。",
+                "这是内部最终整合阶段；不要再创建子智能体。",
+            ]
+        )
+        auth_token, _core = self._session_runtime_auth.get(session_id, (None, None))
+        try:
+            async with asyncio.timeout(self.subagent_aggregation_timeout_seconds):
+                await self._run_prompt(
+                    session_id,
+                    [{"type": "text", "text": prompt}],
+                    auth_token,
+                    internal_batch_id=batch_id,
+                    continuation_run_id=str(batch.get("sourceTurnID") or "") or None,
+                )
+        except Exception:
+            retry_count = int(batch.get("aggregationRetryCount") or 0) + 1
+            can_retry = retry_count <= self.subagent_aggregation_max_retries
+            failed = await asyncio.to_thread(
+                self.subagent_repository.upsert_coordination_batch,
+                session_id,
+                {
+                    **batch,
+                    "status": "ready" if can_retry else "aggregation_failed",
+                    "aggregationScheduled": False,
+                    "aggregationRetryCount": retry_count,
+                    "failedAt": now_ms(),
+                },
+            )
+            self.events.emit(
+                {
+                    "type": "subagent.batch.failed",
+                    "properties": {
+                        "sessionID": session_id,
+                        "batchID": batch_id,
+                        "status": failed.get("status"),
+                        "retryCount": retry_count,
+                        "updatedAt": failed.get("updatedAt"),
+                    },
+                }
+            )
+            raise
+        completed = await asyncio.to_thread(
+            self.subagent_repository.upsert_coordination_batch,
+            session_id,
+            {**batch, "status": "completed", "aggregationScheduled": True, "completedAt": now_ms()},
+        )
+        self.events.emit(
+            {
+                "type": "subagent.batch.completed",
+                "properties": {
+                    "sessionID": session_id,
+                    "batchID": batch_id,
+                    "status": completed.get("status"),
+                    "updatedAt": completed.get("updatedAt"),
+                },
+            }
+        )
 
     def close(self) -> None:
         self._host.close()
@@ -376,6 +561,10 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         first_restore = session_id not in self._reconciled_subagent_sessions
         if first_restore:
             self.subagent_repository.reconcile_inflight(session_id)
+            self.subagent_repository.reconcile_coordination_batches(
+                session_id,
+                aggregation_max_retries=self.subagent_aggregation_max_retries,
+            )
             self._reconciled_subagent_sessions.add(session_id)
         threads = self.subagent_repository.list_threads(session_id)
         for thread in threads:
@@ -387,6 +576,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                         "properties": {"sessionID": session_id, "agent": thread},
                     }
                 )
+            self._schedule_ready_aggregation(session_id)
         return threads
 
     def get_subagent_thread_details(
@@ -578,6 +768,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             }
         )
         if agent.get("status") in {"completed", "failed", "interrupted", "cancelled"}:
+            await self._record_coordination_terminal_result(session_id, agent)
             auth_token, core = self._session_runtime_auth.get(session_id, (None, None))
             if auth_token:
                 try:
@@ -586,6 +777,70 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     logger.exception(
                         f"子智能体终态同步到 Core 失败: session={session_id} agent={agent.get('id')}"
                     )
+
+    async def _record_coordination_terminal_result(
+        self,
+        session_id: str,
+        agent: dict[str, Any],
+    ) -> None:
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        batch_id = str(metadata.get("coordinationBatchID") or "").strip()
+        task_id = str(agent.get("id") or "").strip()
+        if not batch_id or not task_id:
+            return
+        attempt_id = str(metadata.get("attemptID") or "initial")
+        result_payload = agent.get("result") if isinstance(agent.get("result"), dict) else None
+        normalized_result = {
+            "taskID": task_id,
+            "attemptID": attempt_id,
+            "taskName": str(agent.get("taskName") or ""),
+            "agentPath": str(agent.get("agentPath") or ""),
+            "role": str(agent.get("role") or "general"),
+            "status": str(agent.get("status") or "failed"),
+            "result": result_payload,
+            "error": str(agent.get("error") or "") or None,
+            "completedAt": agent.get("completedAt") or now_ms(),
+        }
+        try:
+            batch, inserted = await asyncio.to_thread(
+                self.subagent_repository.record_coordination_result,
+                session_id,
+                batch_id,
+                task_id=task_id,
+                attempt_id=attempt_id,
+                result=normalized_result,
+            )
+        except KeyError:
+            logger.warning(
+                "子智能体终态缺少协调批次: session={} batch={} agent={}",
+                session_id,
+                batch_id,
+                task_id,
+            )
+            return
+        if not inserted:
+            return
+        event_type = "subagent.batch.ready" if batch.get("status") == "ready" else "subagent.batch.updated"
+        self.events.emit(
+            {
+                "type": event_type,
+                "properties": {
+                    "sessionID": session_id,
+                    "batchID": batch_id,
+                    "status": batch.get("status"),
+                    "requiredTotal": len(batch.get("requiredTaskIDs") or []),
+                    "requiredTerminal": len(
+                        set(batch.get("requiredTaskIDs") or [])
+                        & set(batch.get("terminalTaskIDs") or [])
+                    ),
+                    "optionalTotal": len(batch.get("optionalTaskIDs") or []),
+                    "objectiveEpoch": int(batch.get("objectiveEpoch") or 0),
+                    "updatedAt": batch.get("updatedAt"),
+                },
+            }
+        )
+        if batch.get("status") == "ready":
+            self._schedule_ready_aggregation(session_id)
 
     async def _resolve_runtime_config(
         self,
@@ -686,6 +941,14 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 after_tokens,
                 now_ms() - started,
             )
+        except NoCompactionNeeded as notice:
+            logger.info("session {} manual compaction skipped: {}", session_id, notice)
+            self.emit_runtime_thinking(session_id, run_state, str(notice), done=True)
+            self.finish_runtime_message(session_id, run_state)
+            self.events.emit(
+                {"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "idle"}}}
+            )
+            self.emit_session(session_id)
         except Exception as error:
             logger.error(f"session {session_id} 主动压缩失败: {error}", exc_info=True)
             self.emit_runtime_thinking(session_id, run_state, runtime_error_summary(error), done=True)
@@ -817,10 +1080,13 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         messages_provider: Callable[[], list[dict[str, Any]]],
         parent_policy: SubagentToolPolicy | None = None,
         parent_budget: SubagentBudget | None = None,
+        parent_run_id: str | None = None,
     ):
         async def dispatch(action: str, params: dict[str, Any]) -> dict[str, Any]:
             control = self._agent_control_for(session_id)
             if action == "spawn":
+                if parent_path != AgentControl.ROOT_PATH:
+                    raise RuntimeError("当前子智能体角色不允许递归创建下级智能体。")
                 role = self.subagent_catalog.resolve(params.get("role"))
                 role_policy = role.tool_policy
                 effective_policy = parent_policy.restrict(role_policy) if parent_policy else role_policy
@@ -835,6 +1101,77 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 if not task:
                     raise ValueError("子智能体任务说明不能为空。")
                 fork_turns = params.get("fork_turns", "none")
+                background = bool(params.get("background", True))
+                required_for_final = bool(params.get("required_for_final", True))
+                category_by_role = {
+                    "researcher": "external_research",
+                    "explore": "code_exploration",
+                    "file_locator": "user_file_location",
+                    "coder": "implementation",
+                    "reviewer": "review",
+                }
+                task_category = str(params.get("task_category") or category_by_role.get(role.name, "other"))
+                valid_categories = {"external_research", "code_exploration", "user_file_location", "diagnosis", "implementation", "review", "other"}
+                if task_category not in valid_categories:
+                    raise ValueError(f"不支持的子任务类别：{task_category}")
+                role_reason = str(params.get("role_reason") or "").strip()[:500] or None
+                required_reason = str(params.get("required_reason") or "").strip()[:500] or None
+                raw_scope = params.get("target_scope")
+                target_scope = None
+                if raw_scope is not None:
+                    if not isinstance(raw_scope, dict):
+                        raise ValueError("target_scope 必须是对象。")
+                    scope_kind = str(raw_scope.get("kind") or "")
+                    if scope_kind not in {"web", "workspace", "user_files", "logs", "mixed", "other"}:
+                        raise ValueError("target_scope.kind 无效。")
+                    raw_targets = raw_scope.get("targets")
+                    if not isinstance(raw_targets, list) or len(raw_targets) > 20:
+                        raise ValueError("target_scope.targets 必须是最多 20 项的数组。")
+                    target_scope = {"kind": scope_kind, "targets": [str(item)[:1000] for item in raw_targets]}
+                batch_id = self._open_coordination_batch_ids.get(session_id)
+                batch = (
+                    self.subagent_repository.get_coordination_batch(session_id, batch_id)
+                    if batch_id
+                    else None
+                )
+                if not batch or batch.get("status") != "collecting":
+                    batch_id = create_id("batch")
+                    batch = self.subagent_repository.upsert_coordination_batch(
+                        session_id,
+                        {
+                            "batchID": batch_id,
+                            "sourceTurnID": parent_run_id,
+                            "objectiveEpoch": 0,
+                            "status": "collecting",
+                            "requiredTaskIDs": [],
+                            "optionalTaskIDs": [],
+                            "terminalTaskIDs": [],
+                            "pendingResults": {},
+                            "deliveredResultKeys": [],
+                            "aggregationScheduled": False,
+                            "createdAt": now_ms(),
+                        },
+                    )
+                    self._open_coordination_batch_ids[session_id] = batch_id
+                    self.events.emit(
+                        {
+                            "type": "subagent.batch.created",
+                            "properties": {
+                                "sessionID": session_id,
+                                "batchID": batch_id,
+                                "status": "collecting",
+                                "requiredTotal": 0,
+                                "requiredTerminal": 0,
+                                "optionalTotal": 0,
+                                "objectiveEpoch": 0,
+                                "updatedAt": batch.get("updatedAt"),
+                            },
+                        }
+                    )
+                current_task_count = len(batch.get("requiredTaskIDs") or []) + len(batch.get("optionalTaskIDs") or [])
+                if current_task_count >= self.subagent_max_tasks_per_batch:
+                    raise RuntimeError(f"单个协调批次最多允许 {self.subagent_max_tasks_per_batch} 个子任务。")
+                attempt_id = create_id("attempt")
                 inherited_messages = fork_messages(messages_provider(), fork_turns)
                 child_state: dict[str, Any] = {"budgetUsage": _subagent_budget_usage()}
 
@@ -868,9 +1205,57 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                         "model": child_runtime_config.label,
                         "thinkingLevel": child_runtime_config.thinking_level,
                         "budget": effective_budget.to_payload(),
+                        "coordinationBatchID": batch_id,
+                        "requiredForFinal": required_for_final,
+                        "background": background,
+                        "objectiveEpoch": int(batch.get("objectiveEpoch") or 0),
+                        "attemptID": attempt_id,
+                        "taskCategory": task_category,
+                        "roleReason": role_reason,
+                        "requiredReason": required_reason,
+                        "targetScope": target_scope,
+                        "delegationMode": runtime_config.delegation_policy.mode,
                     },
+                    start=False,
                 )
-                return snapshot.to_payload()
+                task_key = "requiredTaskIDs" if required_for_final else "optionalTaskIDs"
+                task_ids = [str(item) for item in batch.get(task_key) or []]
+                if snapshot.id not in task_ids:
+                    task_ids.append(snapshot.id)
+                batch = self.subagent_repository.upsert_coordination_batch(
+                    session_id,
+                    {**batch, task_key: task_ids},
+                )
+                self.events.emit(
+                    {
+                        "type": "subagent.batch.updated",
+                        "properties": {
+                            "sessionID": session_id,
+                            "batchID": batch_id,
+                            "status": batch.get("status"),
+                            "requiredTotal": len(batch.get("requiredTaskIDs") or []),
+                            "requiredTerminal": len(
+                                set(batch.get("requiredTaskIDs") or [])
+                                & set(batch.get("terminalTaskIDs") or [])
+                            ),
+                            "optionalTotal": len(batch.get("optionalTaskIDs") or []),
+                            "objectiveEpoch": int(batch.get("objectiveEpoch") or 0),
+                            "updatedAt": batch.get("updatedAt"),
+                        },
+                    }
+                )
+                await control.start(snapshot.id, task)
+                payload = snapshot.to_payload()
+                payload["coordinationBatchID"] = batch_id
+                payload["requiredForFinal"] = required_for_final
+                if not background:
+                    timeout_ms = min(60_000, max(0, int(params.get("timeout_ms") or 60_000)))
+                    payload["wait"] = await control.wait(
+                        [snapshot.id],
+                        timeout=timeout_ms / 1000,
+                        receiver=parent_path,
+                    )
+                return payload
             if action == "send_message":
                 message = await control.send_message(
                     str(params.get("target") or ""),
@@ -1042,8 +1427,8 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             raise RuntimeError(f"子智能体运行时间预算已耗尽：最多 {budget.timeout_seconds} 秒。")
         started_at = time.monotonic()
         try:
-            async with self._subagent_global_semaphore:
-                async with asyncio.timeout(remaining_seconds):
+            async with asyncio.timeout(remaining_seconds):
+                async with self._subagent_global_semaphore:
                     await agent.prompt(message)
         except TimeoutError as error:
             budget_usage["exceededReason"] = (
@@ -1243,6 +1628,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             get_current_files=lambda: files,
             agent_path="/root",
             subagent_role_names=self.subagent_catalog.names,
+            subagent_role_descriptions=self.subagent_catalog.descriptions,
         )
         is_tool_owner = (
             execution is None
@@ -1266,6 +1652,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             skill_owner_key=skill_owner_key,
             messages_provider=lambda: self.store.context_messages(session_id),
             parent_policy=collaboration_policy,
+            parent_run_id=run_state.run_id,
         )
         skill_runtime = create_skill_runtime(
             self.workspace_root,
@@ -1333,6 +1720,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 environment=environment,
                 active_skill_ids=active_skill_ids,
                 skill_resource_prompt=skill_runtime.prompt_section(),
+                delegation_mode=runtime_config.delegation_policy.mode,
             )
 
         agent_messages = await self.compact_agent_messages_if_needed(
@@ -1357,7 +1745,12 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     "messages": agent_messages,
                 },
                 get_api_key=lambda _provider: runtime_config.api_key,
-                before_tool_call=self._before_tool_call(session_id, run_state, agent_path="/root"),
+                before_tool_call=self._before_tool_call(
+                    session_id,
+                    run_state,
+                    agent_path="/root",
+                    delegation_mode=runtime_config.delegation_policy.mode,
+                ),
                 prepare_next_turn_with_context=lambda turn, _signal: skill_runtime.prepare_next_turn(
                     turn, system_prompt_for
                 ),
@@ -1380,7 +1773,20 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             turn_id=run_state.run_id,
         )
         self.emit_runtime_thinking(session_id, run_state, "正在发送给 Python AgentCore，并等待模型回复。")
-        await agent.prompt({"role": "user", "timestamp": now_ms(), "content": content})
+        try:
+            async with asyncio.timeout(self.model_request_timeout_seconds):
+                await agent.prompt({"role": "user", "timestamp": now_ms(), "content": content})
+        except TimeoutError as error:
+            model_label = runtime_config.label or str(runtime_config.model.get("id") or "unknown")
+            logger.error(
+                "主智能体模型请求超时: session={} model={} timeout={}s",
+                session_id,
+                model_label,
+                self.model_request_timeout_seconds,
+            )
+            raise RuntimeError(
+                f"模型请求超时：{model_label} 在 {self.model_request_timeout_seconds} 秒内没有完成响应。"
+            ) from error
         self._raise_if_cancelled(session_id)
         if run_state.error_message:
             raise RuntimeError(run_state.error_message)
@@ -1500,7 +1906,15 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         )
         self.events.emit({"type": f"orchestrator.{event_suffix}", "properties": payload})
 
-    async def _run_prompt(self, session_id: str, parts: list[dict[str, Any]], auth_token: str | None) -> None:
+    async def _run_prompt(
+        self,
+        session_id: str,
+        parts: list[dict[str, Any]],
+        auth_token: str | None,
+        *,
+        internal_batch_id: str | None = None,
+        continuation_run_id: str | None = None,
+    ) -> None:
         session = self.store.require_session(session_id)
         started = now_ms()
         active_run_state: RunState | None = None
@@ -1510,11 +1924,14 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         active_main_run_id: str | None = None
         participants: list[dict[str, Any]] = []
         self.events.emit({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "busy"}}})
-        user_message = self.store.append_user_message(session_id, content_text(parts), prompt_files(parts))
-        self.emit_message(session_id, user_message["info"])
-        for part in user_message["parts"]:
-            self.emit_part(session_id, part)
-        self.emit_session(session_id)
+        if internal_batch_id:
+            user_message = self.store.append_internal_user_message(session_id, content_text(parts))
+        else:
+            user_message = self.store.append_user_message(session_id, content_text(parts), prompt_files(parts))
+            self.emit_message(session_id, user_message["info"])
+            for part in user_message["parts"]:
+                self.emit_part(session_id, part)
+            self.emit_session(session_id)
         try:
             self._raise_if_cancelled(session_id)
             participants = [item for item in session["info"].get("participants", []) if item.get("assistantID") is not None]
@@ -1624,7 +2041,11 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     if director_enabled
                     else {}
                 )
-                active_run_state = RunState(speaker=speaker, orchestration=orchestration)
+                active_run_state = RunState(
+                    speaker=speaker,
+                    orchestration=orchestration,
+                    run_id=continuation_run_id,
+                )
                 if director_enabled:
                     active_director_run = self.store.upsert_director_run(
                         session_id,
@@ -1653,7 +2074,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                             },
                         }
                     )
-                _, reply = await self._run_character_main_agent(
+                message, reply = await self._run_character_main_agent(
                     session_id=session_id,
                     parts=parts,
                     user_message=user_message,
@@ -1667,6 +2088,29 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     environment=environment,
                     skill_owner_key=skill_owner_key,
                 )
+                if message:
+                    batch_id = internal_batch_id or self._open_coordination_batch_ids.get(session_id)
+                    batch = (
+                        self.subagent_repository.get_coordination_batch(session_id, batch_id)
+                        if batch_id
+                        else None
+                    )
+                    required_pending = bool(
+                        batch
+                        and batch.get("requiredTaskIDs")
+                        and not set(batch.get("requiredTaskIDs") or [])
+                        <= set(batch.get("terminalTaskIDs") or [])
+                    )
+                    completion_state = "provisional" if required_pending and not internal_batch_id else "final"
+                    updated_message = self.store.upsert_message(
+                        session_id,
+                        {
+                            **message["info"],
+                            "completionState": completion_state,
+                            "coordinationBatchID": batch_id,
+                        },
+                    )
+                    self.emit_message(session_id, updated_message["info"])
                 previous_replies.append(
                     {
                         "beatIndex": beat_index,
@@ -1795,6 +2239,8 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                         except Exception:
                             logger.exception("多人会话失败消息持久化到 Core 失败")
             self.emit_session_error(session_id, error)
+            if internal_batch_id:
+                raise
 
     async def compact_agent_messages_if_needed(
         self,
@@ -1862,14 +2308,14 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             return messages
         if not preparation.value:
             if force:
-                raise RuntimeError("当前会话刚完成压缩，没有新增内容可继续压缩。")
+                raise NoCompactionNeeded("当前会话刚完成压缩，没有新增内容可继续压缩。")
             return messages
         if force and not (
             preparation.value.get("messagesToSummarize")
             or preparation.value.get("turnPrefixMessages")
             or preparation.value.get("previousSummary")
         ):
-            raise RuntimeError("当前上下文仍在保留范围内，没有可压缩的旧对话。")
+            raise NoCompactionNeeded("当前上下文仍在保留范围内，无需压缩。")
 
         result = await compact_context(
             preparation.value,
@@ -1939,6 +2385,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         *,
         agent_path: str = "/root",
         tool_policy: SubagentToolPolicy | None = None,
+        delegation_mode: str = "disabled",
     ):
         async def before_tool_call(context: dict[str, Any], _signal: Any = None) -> dict[str, Any] | None:
             if getattr(_signal, "aborted", False):
@@ -1946,6 +2393,107 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             tool_call = context.get("toolCall") or {}
             tool_name = tool_call.get("name") or ""
             args = context.get("args") or {}
+            if agent_path == "/root" and delegation_mode in {"auto", "proactive"}:
+                if tool_name == "wait_agent":
+                    return {
+                        "block": True,
+                        "reason": (
+                            "Root 不应调用 wait_agent 阻塞用户回复。后台子智能体结果会由协调器自动回流并触发统一汇总；"
+                            "请现在继续不重叠的本地分析，或向用户发送简短阶段性回复后结束本轮。"
+                        ),
+                    }
+                if tool_name == "spawn_agent":
+                    role = str(args.get("role") or "general")
+                    if run_state.delegation_recommended and role in {"researcher", "explore", "file_locator", "general"}:
+                        run_state.delegation_recovered = True
+                        self.events.emit(
+                            {
+                                "type": "delegation.recovered",
+                                "properties": {
+                                    "sessionID": session_id,
+                                    "runID": run_state.run_id,
+                                    "role": role,
+                                    "taskName": args.get("task_name"),
+                                },
+                            }
+                        )
+                elif tool_name == "web_search":
+                    run_state.root_web_search_count += 1
+                    query = str(args.get("query") or "").strip().lower()
+                    broad_markers = (
+                        "最新", "资讯", "新闻", "动态", "调研", "研究", "全面", "比较", "现状",
+                        "latest", "news", "updates", "research", "compare", "overview",
+                    )
+                    broad_search = any(marker in query for marker in broad_markers) or int(args.get("max_results") or 0) >= 8
+                    should_block = (
+                        delegation_mode == "proactive" and broad_search
+                    ) or run_state.root_web_search_count > 1
+                    if should_block:
+                        run_state.delegation_recommended = True
+                        reason = (
+                            "Root 不应继续展开宽泛或重复网页检索。请改用 spawn_agent，"
+                            "role=researcher、background=true、required_for_final=true、fork_turns=none，"
+                            "把搜索目标、关键词歧义和期望来源写入 message。"
+                            "只有精确事实、指定来源或对子结果的一次窄验证才可由 Root 直接搜索。"
+                        )
+                        self.events.emit(
+                            {
+                                "type": "delegation.tool_blocked",
+                                "properties": {
+                                    "sessionID": session_id,
+                                    "runID": run_state.run_id,
+                                    "toolName": tool_name,
+                                    "query": str(args.get("query") or "")[:500],
+                                    "mode": delegation_mode,
+                                    "recommendedRole": "researcher",
+                                    "searchCount": run_state.root_web_search_count,
+                                    "reason": reason,
+                                },
+                            }
+                        )
+                        return {"block": True, "reason": reason}
+                elif tool_name in {"ls", "find", "grep", "external_ls", "external_find", "external_grep", "search_user_files"}:
+                    run_state.root_local_search_count += 1
+                    path = str(args.get("path") or args.get("root") or args.get("directory") or "").strip().lower()
+                    pattern = str(args.get("pattern") or args.get("query") or args.get("name") or "").strip().lower()
+                    broad_roots = {"/", "/home", "/home/", "~", "~/", "$home", "..", "../", "."}
+                    broad_local_search = (
+                        path in broad_roots
+                        or "*" in path
+                        or "**" in pattern
+                        or tool_name == "search_user_files"
+                        or int(args.get("max_depth") or args.get("depth") or 0) >= 4
+                    )
+                    should_block = (
+                        (delegation_mode == "proactive" and broad_local_search)
+                        or run_state.root_local_search_count > 1
+                        or run_state.root_workspace_path_error
+                    )
+                    if should_block:
+                        run_state.delegation_recommended = True
+                        trigger = "先前访问已因超出工作区失败" if run_state.root_workspace_path_error else "查找范围宽泛或需要重复探测"
+                        reason = (
+                            f"Root 不应继续进行跨目录个人文件查找（{trigger}）。请改用 spawn_agent，"
+                            "role=file_locator、background=true、required_for_final=true、fork_turns=none，"
+                            "在 message 中写明目标文件、游戏平台等线索和候选目录；外部读取可直接执行，但必须保持只读和有界。"
+                            "只有精确路径或单个已知标准目录可由 Root 直接检查。"
+                        )
+                        self.events.emit(
+                            {
+                                "type": "delegation.tool_blocked",
+                                "properties": {
+                                    "sessionID": session_id,
+                                    "runID": run_state.run_id,
+                                    "toolName": tool_name,
+                                    "path": path[:500],
+                                    "mode": delegation_mode,
+                                    "recommendedRole": "file_locator",
+                                    "searchCount": run_state.root_local_search_count,
+                                    "reason": reason,
+                                },
+                            }
+                        )
+                        return {"block": True, "reason": reason}
             if tool_policy is not None and not tool_policy.allows(tool_name):
                 return {
                     "block": True,

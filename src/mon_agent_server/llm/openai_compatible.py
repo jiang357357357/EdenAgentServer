@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 import json
+import os
 import ssl
 import time
 import urllib.error
@@ -179,12 +180,16 @@ def _stream_openai_compatible_sync(
 
     max_attempts = max(1, min(5, int(options.get("maxRetries", 2)) + 1))
     max_delay_ms = max(0, int(options.get("maxRetryDelayMs") or 5_000))
+    try:
+        idle_timeout_seconds = max(10, min(300, int(os.environ.get("MON_AGENT_MODEL_IDLE_TIMEOUT_SECONDS", "60"))))
+    except ValueError:
+        idle_timeout_seconds = 60
     attempt = 1
     stream_options_fallback_used = False
     while True:
         stream_started = False
         try:
-            with urllib.request.urlopen(request_for_payload(), timeout=120) as response:
+            with urllib.request.urlopen(request_for_payload(), timeout=idle_timeout_seconds) as response:
                 consume(response)
             if not stream_started:
                 raise EOFError("模型流在返回任何事件前结束")
