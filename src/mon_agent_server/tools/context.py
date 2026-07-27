@@ -25,6 +25,7 @@ class MonToolContext:
     get_message_id: Callable[[], str | None] | None = None
     get_current_files: Callable[[], list[dict[str, Any]]] | None = None
     agent_path: str = "/root"
+    permission_mode: str = "restricted"
     subagent_role_names: tuple[str, ...] = ()
     subagent_role_descriptions: dict[str, str] | None = None
     subagent_dispatch: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None

@@ -40,7 +40,6 @@ class RuntimePermissionMixin:
             "send_message",
             "followup_task",
             "list_agents",
-            "wait_agent",
             "interrupt_agent",
         }
 

@@ -117,6 +117,7 @@ def handle_sessions(handler: Any, path: str, query: dict[str, list[str]], method
         token = require_core_token(handler.headers)
         body = handler.read_json_body()
         handler.app.ensure_hydrated(token, session_id)
+        handler.app.hydrate_permission_mode(token, session_id)
         handler.app.runtime.prompt_async(session_id, body.get("parts") or [], token)
         handler.json_response(True)
         return True

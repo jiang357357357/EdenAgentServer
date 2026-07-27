@@ -312,8 +312,8 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
     def _log_abort_cleanup_error(completed: Future[Any]) -> None:
         try:
             completed.result()
-        except Exception:
-            logger.exception("后台中止子智能体失败")
+        except Exception as error:
+            logger.error(f"后台中止子智能体失败: {error}", exc_info=True)
 
     @staticmethod
     async def _interrupt_all_subagents(control: AgentControl) -> bool:
@@ -773,9 +773,10 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             if auth_token:
                 try:
                     await self.sync_core_session(session_id, auth_token, core)
-                except Exception:
-                    logger.exception(
-                        f"子智能体终态同步到 Core 失败: session={session_id} agent={agent.get('id')}"
+                except Exception as error:
+                    logger.error(
+                        f"子智能体终态同步到 Core 失败: session={session_id} agent={agent.get('id')}: {error}",
+                        exc_info=True,
                     )
 
     async def _record_coordination_terminal_result(
@@ -1318,6 +1319,11 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 environment=environment,
                 emit_event=self.events.emit,
                 agent_path=thread.snapshot.path,
+                permission_mode=(
+                    self.permissions.mode_for_session(thread.snapshot.root_session_id)
+                    if self.permissions is not None
+                    else "restricted"
+                ),
                 subagent_role_names=self.subagent_catalog.names,
             )
             tool_context.subagent_dispatch = self._make_subagent_dispatcher(
@@ -1627,6 +1633,11 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             get_message_id=lambda: run_state.assistant_message_id,
             get_current_files=lambda: files,
             agent_path="/root",
+            permission_mode=(
+                self.permissions.mode_for_session(session_id)
+                if self.permissions is not None
+                else "restricted"
+            ),
             subagent_role_names=self.subagent_catalog.names,
             subagent_role_descriptions=self.subagent_catalog.descriptions,
         )
@@ -1731,6 +1742,37 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             user_message["info"]["time"]["created"],
             auth_token,
         )
+
+        async def prepare_root_next_turn(turn: dict[str, Any], _signal: Any) -> dict[str, Any] | None:
+            skill_update = skill_runtime.prepare_next_turn(turn, system_prompt_for)
+            current_context = (
+                skill_update.get("context")
+                if isinstance(skill_update, dict) and isinstance(skill_update.get("context"), dict)
+                else turn.get("context")
+            )
+            if not isinstance(current_context, dict):
+                return skill_update
+            tool_results = turn.get("toolResults")
+            if not isinstance(tool_results, list) or not tool_results:
+                return skill_update
+            current_messages = current_context.get("messages")
+            if not isinstance(current_messages, list):
+                return skill_update
+            compacted_messages = await self.compact_agent_messages_if_needed(
+                session_id,
+                run_state,
+                runtime_config,
+                current_messages,
+                user_message["info"]["time"]["created"],
+                auth_token,
+            )
+            if compacted_messages is current_messages:
+                return skill_update
+            return {
+                **(skill_update or {}),
+                "context": {**current_context, "messages": compacted_messages},
+            }
+
         agent = Agent(
             AgentOptions(
                 session_id=session_id,
@@ -1751,9 +1793,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     agent_path="/root",
                     delegation_mode=runtime_config.delegation_policy.mode,
                 ),
-                prepare_next_turn_with_context=lambda turn, _signal: skill_runtime.prepare_next_turn(
-                    turn, system_prompt_for
-                ),
+                prepare_next_turn_with_context=prepare_root_next_turn,
             )
         )
         with self._lock:
@@ -2343,6 +2383,11 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             "details": compaction.get("details"),
         }
         compacted_messages = build_session_context([*entries, compaction_entry])["messages"]
+        # Provider usage describes the request before compaction. Keeping it on
+        # retained messages makes estimate_context_tokens report the stale,
+        # pre-compaction size and can immediately trigger another compaction.
+        for compacted_message in compacted_messages:
+            compacted_message.pop("usage", None)
         tokens_after = int(estimate_context_tokens(compacted_messages).get("tokens") or 0)
         self.store.replace_context_messages(session_id, compacted_messages)
         hidden_message = self.store.append_compaction_message(
@@ -2393,107 +2438,6 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             tool_call = context.get("toolCall") or {}
             tool_name = tool_call.get("name") or ""
             args = context.get("args") or {}
-            if agent_path == "/root" and delegation_mode in {"auto", "proactive"}:
-                if tool_name == "wait_agent":
-                    return {
-                        "block": True,
-                        "reason": (
-                            "Root 不应调用 wait_agent 阻塞用户回复。后台子智能体结果会由协调器自动回流并触发统一汇总；"
-                            "请现在继续不重叠的本地分析，或向用户发送简短阶段性回复后结束本轮。"
-                        ),
-                    }
-                if tool_name == "spawn_agent":
-                    role = str(args.get("role") or "general")
-                    if run_state.delegation_recommended and role in {"researcher", "explore", "file_locator", "general"}:
-                        run_state.delegation_recovered = True
-                        self.events.emit(
-                            {
-                                "type": "delegation.recovered",
-                                "properties": {
-                                    "sessionID": session_id,
-                                    "runID": run_state.run_id,
-                                    "role": role,
-                                    "taskName": args.get("task_name"),
-                                },
-                            }
-                        )
-                elif tool_name == "web_search":
-                    run_state.root_web_search_count += 1
-                    query = str(args.get("query") or "").strip().lower()
-                    broad_markers = (
-                        "最新", "资讯", "新闻", "动态", "调研", "研究", "全面", "比较", "现状",
-                        "latest", "news", "updates", "research", "compare", "overview",
-                    )
-                    broad_search = any(marker in query for marker in broad_markers) or int(args.get("max_results") or 0) >= 8
-                    should_block = (
-                        delegation_mode == "proactive" and broad_search
-                    ) or run_state.root_web_search_count > 1
-                    if should_block:
-                        run_state.delegation_recommended = True
-                        reason = (
-                            "Root 不应继续展开宽泛或重复网页检索。请改用 spawn_agent，"
-                            "role=researcher、background=true、required_for_final=true、fork_turns=none，"
-                            "把搜索目标、关键词歧义和期望来源写入 message。"
-                            "只有精确事实、指定来源或对子结果的一次窄验证才可由 Root 直接搜索。"
-                        )
-                        self.events.emit(
-                            {
-                                "type": "delegation.tool_blocked",
-                                "properties": {
-                                    "sessionID": session_id,
-                                    "runID": run_state.run_id,
-                                    "toolName": tool_name,
-                                    "query": str(args.get("query") or "")[:500],
-                                    "mode": delegation_mode,
-                                    "recommendedRole": "researcher",
-                                    "searchCount": run_state.root_web_search_count,
-                                    "reason": reason,
-                                },
-                            }
-                        )
-                        return {"block": True, "reason": reason}
-                elif tool_name in {"ls", "find", "grep", "external_ls", "external_find", "external_grep", "search_user_files"}:
-                    run_state.root_local_search_count += 1
-                    path = str(args.get("path") or args.get("root") or args.get("directory") or "").strip().lower()
-                    pattern = str(args.get("pattern") or args.get("query") or args.get("name") or "").strip().lower()
-                    broad_roots = {"/", "/home", "/home/", "~", "~/", "$home", "..", "../", "."}
-                    broad_local_search = (
-                        path in broad_roots
-                        or "*" in path
-                        or "**" in pattern
-                        or tool_name == "search_user_files"
-                        or int(args.get("max_depth") or args.get("depth") or 0) >= 4
-                    )
-                    should_block = (
-                        (delegation_mode == "proactive" and broad_local_search)
-                        or run_state.root_local_search_count > 1
-                        or run_state.root_workspace_path_error
-                    )
-                    if should_block:
-                        run_state.delegation_recommended = True
-                        trigger = "先前访问已因超出工作区失败" if run_state.root_workspace_path_error else "查找范围宽泛或需要重复探测"
-                        reason = (
-                            f"Root 不应继续进行跨目录个人文件查找（{trigger}）。请改用 spawn_agent，"
-                            "role=file_locator、background=true、required_for_final=true、fork_turns=none，"
-                            "在 message 中写明目标文件、游戏平台等线索和候选目录；外部读取可直接执行，但必须保持只读和有界。"
-                            "只有精确路径或单个已知标准目录可由 Root 直接检查。"
-                        )
-                        self.events.emit(
-                            {
-                                "type": "delegation.tool_blocked",
-                                "properties": {
-                                    "sessionID": session_id,
-                                    "runID": run_state.run_id,
-                                    "toolName": tool_name,
-                                    "path": path[:500],
-                                    "mode": delegation_mode,
-                                    "recommendedRole": "file_locator",
-                                    "searchCount": run_state.root_local_search_count,
-                                    "reason": reason,
-                                },
-                            }
-                        )
-                        return {"block": True, "reason": reason}
             if tool_policy is not None and not tool_policy.allows(tool_name):
                 return {
                     "block": True,
@@ -2503,7 +2447,12 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     ),
                 }
             pattern = self.permission_pattern(tool_name, args)
-            if self.is_safe_tool(tool_name) or self.permissions.is_always_allowed(tool_name, pattern):
+            permission_mode = self.permissions.mode_for_session(session_id)
+            if (
+                self.is_safe_tool(tool_name)
+                or self.permissions.is_always_allowed(tool_name, pattern, session_id)
+                or (permission_mode == "full_access" and tool_name != "bash")
+            ):
                 return None
             reply = await asyncio.to_thread(
                 self.permissions.ask,

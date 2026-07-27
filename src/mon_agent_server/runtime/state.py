@@ -24,11 +24,6 @@ class RunState:
         self.tool_inputs: dict[str, Any] = {}
         self.tool_starts: dict[str, int] = {}
         self.finished_tool_calls: set[str] = set()
-        self.root_web_search_count = 0
-        self.root_local_search_count = 0
-        self.root_workspace_path_error = False
-        self.delegation_recommended = False
-        self.delegation_recovered = False
         self.text_part_snapshots: dict[str, str] = {}
         self.speaker = dict(speaker or {})
         self.orchestration = dict(orchestration or {})

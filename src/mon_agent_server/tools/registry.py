@@ -46,7 +46,18 @@ def create_mon_agent_tools(
     tools.extend(create_vision_tools(root, context))
     tools.extend(create_subagent_tools(context))
 
-    coding_tools = create_all_tools(str(root))
+    def outside_write_allowed() -> bool:
+        if context.permissions is not None:
+            return context.permissions.mode_for_session(context.session_id) == "takeover"
+        return context.permission_mode == "takeover"
+    coding_tools = create_all_tools(
+        str(root),
+        {
+            "write": {"allow_outside_cwd": outside_write_allowed},
+            "edit": {"allow_outside_cwd": outside_write_allowed},
+            "apply_patch": {"allow_outside_cwd": outside_write_allowed},
+        },
+    )
     allowed = allowed_tool_names(profile, tools, coding_tools)
     for name, tool in coding_tools.items():
         if name in allowed:

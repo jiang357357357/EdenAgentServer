@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import json
 from typing import Any, Iterable
 
+from mon_agent_core.harness.compaction import estimate_tokens
+
 from ..ids import create_id, now_ms
 
 
@@ -32,7 +34,11 @@ class ContextManager:
     """Compile the canonical session event stream into model-visible messages."""
 
     MAX_TEXT_CHARS = 40_000
-    MAX_TOOL_RESULT_CHARS = 20_000
+    MAX_TOOL_RESULT_CHARS = 12_000
+    TOOL_RESULT_PROTECTED_USER_TURNS = 2
+    TOOL_RESULT_PROTECTED_TOKENS = 4_000
+    TOOL_RESULT_PRUNE_MINIMUM_TOKENS = 2_000
+    PRUNED_TOOL_RESULT_TEXT = "[旧工具结果已清理；如仍需细节请重新调用工具]"
 
     @classmethod
     def event_for_message(
@@ -86,6 +92,31 @@ class ContextManager:
                     continue
                 pending_calls.discard(call_id)
             messages.append(cls._truncate_message(payload))
+        return cls._prune_old_tool_results(messages)
+
+    @classmethod
+    def _prune_old_tool_results(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        user_positions = [index for index, message in enumerate(messages) if message.get("role") == "user"]
+        if len(user_positions) < cls.TOOL_RESULT_PROTECTED_USER_TURNS:
+            return messages
+        protected_from = user_positions[-cls.TOOL_RESULT_PROTECTED_USER_TURNS]
+        candidates: list[tuple[int, int]] = []
+        protected_tokens = 0
+        for index in range(protected_from - 1, -1, -1):
+            message = messages[index]
+            if message.get("role") != "toolResult":
+                continue
+            tokens = max(estimate_tokens(message), 1)
+            if protected_tokens + tokens <= cls.TOOL_RESULT_PROTECTED_TOKENS:
+                protected_tokens += tokens
+                continue
+            candidates.append((index, tokens))
+        if sum(tokens for _index, tokens in candidates) < cls.TOOL_RESULT_PRUNE_MINIMUM_TOKENS:
+            return messages
+        for index, _tokens in candidates:
+            messages[index]["content"] = [
+                {"type": "text", "text": cls.PRUNED_TOOL_RESULT_TEXT}
+            ]
         return messages
 
     @staticmethod

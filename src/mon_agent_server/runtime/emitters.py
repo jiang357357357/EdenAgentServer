@@ -163,12 +163,6 @@ class RuntimeEmitterMixin:
             tool_name = str(event.get("toolName"))
             started = run_state.tool_starts.get(call_id)
             body = text_from_tool_result(event.get("result") or {})
-            if event.get("isError") and (
-                "WorkspacePathError" in body
-                or "超出工作区" in body
-                or "outside the workspace" in body.lower()
-            ):
-                run_state.root_workspace_path_error = True
             run_state.finished_tool_calls.add(call_id)
             self.emit_runtime_thinking(session_id, run_state, f"工具 {tool_name} {'执行失败' if event.get('isError') else '执行完成'}。")
             if run_state.assistant_message_id:

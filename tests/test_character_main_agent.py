@@ -128,7 +128,9 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("multi-agent", captured["systemPrompt"])
         self.assertIn("当前委派模式：auto", captured["systemPrompt"])
         self.assertIn("researcher", captured["systemPrompt"])
-        self.assertIn("不要轮询或调用 wait_agent", captured["systemPrompt"])
+        self.assertIn("根据任务范围、不确定性、上下文成本和并行收益", captured["systemPrompt"])
+        self.assertIn("负责验证、整合和最终表达", captured["systemPrompt"])
+        self.assertNotIn("不要轮询或调用 wait_agent", captured["systemPrompt"])
         self.assertNotIn("角色回复子智能体", captured["systemPrompt"])
         self.assertFalse(any(event["type"].startswith("subagent.") for event in events.events))
         runtime.close()
@@ -210,6 +212,50 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("当前已加载技能", observed_prompts[0])
         self.assertIn("当前已加载技能", observed_prompts[1])
         self.assertIn('<skill name="web-research"', observed_prompts[1])
+        runtime.close()
+
+    async def test_character_compacts_during_tool_loop_and_continues_same_run(self) -> None:
+        store = SessionStore()
+        session = store.create_session("轮内压缩测试")
+        user_message = store.append_user_message(session["id"], "先调用工具再继续", [])
+        runtime = MonAgentRuntime(Path.cwd(), store, EventRecorder(), None, None, object())
+        config = RuntimeModelConfig(
+            {"id": "fake", "name": "Fake", "api": "fake", "provider": "fake", "input": ["text"]},
+            "key", "Fake", "test", {"assistant": {}, "character": {}, "aiEntity": {}},
+        )
+        stream_contexts: list[list[dict[str, Any]]] = []
+        compact_calls: list[list[dict[str, Any]]] = []
+
+        async def fake_stream(_model, context, _options):
+            stream_contexts.append(list(context["messages"]))
+            if len(stream_contexts) == 1:
+                return tool_call_message("load_skill", {"skills": ["web-research"]})
+            return stream_message("压缩后继续完成。")
+
+        async def fake_compact(_session_id, _run_state, _runtime_config, messages, *_args, **_kwargs):
+            compact_calls.append(list(messages))
+            if len(compact_calls) == 1:
+                return messages
+            return [
+                {"role": "compactionSummary", "summary": "旧上下文摘要"},
+                *messages[-2:],
+            ]
+
+        with (
+            patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=fake_stream),
+            patch.object(runtime, "compact_agent_messages_if_needed", new=fake_compact),
+        ):
+            _, reply = await runtime._run_character_main_agent(
+                session_id=session["id"], parts=[{"type": "text", "text": "先调用工具再继续"}],
+                user_message=user_message, auth_token=None, runtime_config=config,
+                run_state=RunState(speaker={}), beat=DirectorBeat(1, "执行"), scene=None,
+                execution=None, previous_replies=[], environment=None, skill_owner_key=None,
+            )
+
+        self.assertEqual(reply, "压缩后继续完成。")
+        self.assertEqual(len(compact_calls), 2)
+        self.assertTrue(any(message.get("role") == "toolResult" for message in compact_calls[1]))
+        self.assertIn("旧上下文摘要", str(stream_contexts[1]))
         runtime.close()
 
     async def test_non_tool_owner_cannot_gain_mutation_tools_from_a_skill(self) -> None:

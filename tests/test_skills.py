@@ -71,7 +71,6 @@ class SkillCatalogTest(unittest.TestCase):
                 "send_message",
                 "followup_task",
                 "list_agents",
-                "wait_agent",
                 "interrupt_agent",
             },
         )
@@ -117,6 +116,9 @@ class SkillCatalogTest(unittest.TestCase):
 
         self.assertTrue(result["success"])
         self.assertIn("apply_patch", _tool_names(runtime.active_tools()))
+        prompt = runtime.prompt_section()
+        self.assertIn("修改代码、构建、测试", prompt)
+        self.assertNotIn("绕过 file_locator", prompt)
 
     def test_multi_agent_skill_adds_policy_without_gating_control_tools(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
@@ -127,8 +129,10 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertTrue(result["success"])
         names = _tool_names(runtime.active_tools())
         self.assertIn("spawn_agent", names)
-        self.assertIn("wait_agent", names)
+        self.assertNotIn("wait_agent", names)
         self.assertIn("interrupt_agent", names)
+        self.assertIn("可独立完成的任务可交给子智能体", runtime.prompt_section())
+        self.assertIn("验证、整合和表达", runtime.prompt_section())
 
     def test_self_awake_has_system_skills_but_not_user_mutation_tools(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="self_awake")
@@ -168,6 +172,7 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertIn("<available_skills>", initial)
         self.assertIn("memo-management", initial)
         self.assertIn("workspace-development", initial)
+        self.assertIn("工作区外使用对应的 external 工具", initial)
         self.assertIn("当前已加载技能", active)
         self.assertIn("create_reminder", active)
 

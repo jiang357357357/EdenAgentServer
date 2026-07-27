@@ -85,6 +85,42 @@ class ContextManagerTests(unittest.TestCase):
         self.assertEqual([message["role"] for message in messages], ["user", "user"])
         self.assertEqual(messages[-1]["content"], "重新请求")
 
+    def test_prunes_large_old_tool_results_but_keeps_recent_two_user_turns(self):
+        large = "x" * 20_000
+        events = [
+            event(1, "user_message", {"role": "user", "content": "第一轮"}),
+            event(2, "assistant_message", {"role": "assistant", "content": [{"type": "toolCall", "id": "old_1", "name": "grep"}]}),
+            event(3, "tool_result", {"role": "toolResult", "toolCallId": "old_1", "content": large}),
+            event(4, "assistant_message", {"role": "assistant", "content": [{"type": "toolCall", "id": "old_2", "name": "ls"}]}),
+            event(5, "tool_result", {"role": "toolResult", "toolCallId": "old_2", "content": large}),
+            event(6, "assistant_message", {"role": "assistant", "content": [{"type": "toolCall", "id": "old_3", "name": "read"}]}),
+            event(7, "tool_result", {"role": "toolResult", "toolCallId": "old_3", "content": large}),
+            event(8, "user_message", {"role": "user", "content": "第二轮"}),
+            event(9, "assistant_message", {"role": "assistant", "content": [{"type": "toolCall", "id": "recent", "name": "read"}]}),
+            event(10, "tool_result", {"role": "toolResult", "toolCallId": "recent", "content": large}),
+            event(11, "user_message", {"role": "user", "content": "第三轮"}),
+        ]
+
+        messages = ContextManager.compile(events)
+        results = {message["toolCallId"]: message["content"] for message in messages if message["role"] == "toolResult"}
+
+        self.assertEqual(results["old_1"][0]["text"], ContextManager.PRUNED_TOOL_RESULT_TEXT)
+        self.assertIsInstance(results["old_3"], str)
+        self.assertIsInstance(results["recent"], str)
+
+    def test_does_not_prune_small_old_tool_history(self):
+        events = [
+            event(1, "user_message", {"role": "user", "content": "第一轮"}),
+            event(2, "assistant_message", {"role": "assistant", "content": [{"type": "toolCall", "id": "old", "name": "read"}]}),
+            event(3, "tool_result", {"role": "toolResult", "toolCallId": "old", "content": "small"}),
+            event(4, "user_message", {"role": "user", "content": "第二轮"}),
+            event(5, "user_message", {"role": "user", "content": "第三轮"}),
+        ]
+
+        messages = ContextManager.compile(events)
+
+        self.assertEqual(messages[2]["content"], "small")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -47,7 +47,6 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "send_message",
         "followup_task",
         "list_agents",
-        "wait_agent",
         "interrupt_agent",
     }
 )
@@ -244,8 +243,8 @@ BUILTIN_SUBAGENTS: tuple[SubagentDefinition, ...] = (
         developer_instructions=(
             "只进行定位和证据核验，不复制、修改、删除或执行文件。先根据平台和应用形成少量候选根目录，"
             "工作区外必须使用 external_ls、external_find、external_read、external_grep，不要使用受工作区限制的 ls/find/read/grep。"
-            "每次只选择一个明确存在的候选根目录；优先返回真实路径、识别依据、最近修改时间和仍需确认的候选。"
-            "不得扩大到 /、/home 或整个用户主目录，也不得执行任何写入。"
+            "优先从高概率目录开始，必要时可以只读搜索 /、/home 或整个用户主目录。"
+            "优先返回真实路径、识别依据、最近修改时间和仍需确认的候选，不得执行任何写入。"
         ),
         sandbox_mode="read-only",
     ),
@@ -370,11 +369,10 @@ def build_subagent_system_prompt(
             ),
             "# 角色职责",
             f"{definition.description}\n{definition.developer_instructions}",
-            "# 工作区与权限",
+            "# 工作区",
             (
                 f"当前共享工作区：{workspace_root}\n"
-                f"工具策略：{effective_policy.sandbox_mode}。运行时会机械执行此限制；不要尝试绕过或通过下级智能体扩大权限。\n"
-                "保留用户已有修改；不要假设自己拥有高于父会话的权限。"
+                "保留用户已有修改，只处理任务范围内的内容。"
             ),
             "# 协作协议",
             (

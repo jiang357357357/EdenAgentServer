@@ -12,14 +12,24 @@ class PermissionBrokerTest(unittest.TestCase):
     def test_default_mode_requires_approval(self) -> None:
         broker = PermissionBroker(EventBus())
 
-        self.assertEqual(broker.mode(), {"mode": "ask"})
+        self.assertEqual(broker.mode(), {"mode": "restricted"})
         self.assertFalse(broker.is_always_allowed("write", "src/app.py"))
 
-    def test_full_access_remains_explicit_opt_in(self) -> None:
+    def test_takeover_is_the_global_auto_allow_mode(self) -> None:
         broker = PermissionBroker(EventBus())
 
-        self.assertEqual(broker.set_mode("full_access"), {"mode": "full_access"})
+        self.assertEqual(broker.set_mode("takeover"), {"mode": "takeover"})
         self.assertTrue(broker.is_always_allowed("bash", "pytest"))
+
+    def test_persisted_modes_are_isolated_by_user_scope_and_session(self) -> None:
+        broker = PermissionBroker(EventBus())
+        broker.hydrate_mode("takeover", "user-a", "ses-a")
+        broker.hydrate_mode("ask", "user-b", "ses-b")
+
+        self.assertEqual(broker.mode("user-a"), {"mode": "takeover"})
+        self.assertEqual(broker.mode("user-b"), {"mode": "restricted"})
+        self.assertTrue(broker.is_always_allowed("bash", "pytest", "ses-a"))
+        self.assertFalse(broker.is_always_allowed("bash", "pytest", "ses-b"))
 
     def test_always_permission_is_scoped_to_session(self) -> None:
         broker = PermissionBroker(EventBus(), timeout_seconds=1)

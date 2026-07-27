@@ -4,6 +4,24 @@ from mon_agent_server.core import CoreClient
 
 
 class CoreContextTest(unittest.TestCase):
+    def test_agent_permission_settings_use_persistent_core_endpoint(self):
+        client = CoreClient("http://core.test")
+        calls = []
+        client._request = lambda path, token, method="GET", payload=None: calls.append(
+            (path, token, method, payload)
+        ) or {"permission_mode": "full_access"}
+
+        self.assertEqual(client.get_agent_settings("token")["permission_mode"], "full_access")
+        self.assertEqual(
+            client.update_agent_settings("token", {"permission_mode": "restricted"})["permission_mode"],
+            "full_access",
+        )
+        self.assertEqual(calls[0], ("/api/agent/settings/my/", "token", "GET", None))
+        self.assertEqual(
+            calls[1],
+            ("/api/agent/settings/my/", "token", "PATCH", {"permission_mode": "restricted"}),
+        )
+
     def test_session_sync_separates_canonical_context_from_ui_payload(self):
         client = CoreClient("http://core.test")
         captured = {}

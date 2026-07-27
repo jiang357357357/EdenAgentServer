@@ -25,7 +25,7 @@ def by_name(tools, name):
 
 
 class ExternalFileToolsTest(unittest.IsolatedAsyncioTestCase):
-    async def test_reads_only_inside_explicit_authorized_root(self):
+    async def test_reads_inside_selected_root_without_permission(self):
         with TemporaryDirectory() as workspace, TemporaryDirectory() as external:
             root = Path(external)
             (root / "saves").mkdir()
@@ -63,7 +63,7 @@ class ExternalFileToolsTest(unittest.IsolatedAsyncioTestCase):
                 [{"path": "Steam/game/save-slot.dat", "type": "file"}],
             )
 
-    async def test_rejects_path_traversal_and_symlink_escape(self):
+    async def test_allows_reading_symlinks_and_absolute_paths_without_permission(self):
         with TemporaryDirectory() as workspace, TemporaryDirectory() as external, TemporaryDirectory() as secret:
             root = Path(external)
             (Path(secret) / "token.txt").write_text("hidden", encoding="utf-8")
@@ -72,30 +72,28 @@ class ExternalFileToolsTest(unittest.IsolatedAsyncioTestCase):
                 Path(workspace), MonToolContext(session_id="ses_test", permissions=AllowBroker())
             )
 
-            with self.assertRaisesRegex(RuntimeError, "越过已授权目录"):
-                await by_name(tools, "external_read").run(
-                    "call_link", {"root": str(root), "path": "link.txt"}
-                )
-            with self.assertRaisesRegex(RuntimeError, "越过已授权目录"):
-                await by_name(tools, "external_read").run(
-                    "call_parent", {"root": str(root), "path": f"../{Path(secret).name}/token.txt"}
-                )
+            linked = await by_name(tools, "external_read").run(
+                "call_link", {"root": str(root), "path": "link.txt"}
+            )
+            absolute = await by_name(tools, "external_read").run(
+                "call_absolute", {"root": str(root), "path": str(Path(secret) / "token.txt")}
+            )
+            self.assertIn("hidden", linked["content"][0]["text"])
+            self.assertIn("hidden", absolute["content"][0]["text"])
 
-    async def test_rejects_broad_roots_before_permission(self):
+    async def test_allows_broad_roots_without_permission(self):
         with TemporaryDirectory() as workspace:
             broker = AllowBroker()
             tools = create_external_file_tools(
                 Path(workspace), MonToolContext(session_id="ses_test", permissions=broker)
             )
-            with self.assertRaisesRegex(RuntimeError, "过宽"):
-                await by_name(tools, "external_ls").run("call_root", {"root": "/"})
+            root_result = await by_name(tools, "external_ls").run("call_root", {"root": "/"})
+            self.assertTrue(root_result["details"]["entries"])
             if Path("/home").is_dir():
-                with self.assertRaisesRegex(RuntimeError, "过宽"):
-                    await by_name(tools, "external_ls").run("call_home", {"root": "/home"})
-            with self.assertRaisesRegex(RuntimeError, "过宽"):
-                await by_name(tools, "external_ls").run(
-                    "call_user_home", {"root": str(Path.home())}
-                )
+                await by_name(tools, "external_ls").run("call_home", {"root": "/home"})
+            await by_name(tools, "external_ls").run(
+                "call_user_home", {"root": str(Path.home())}
+            )
             self.assertEqual(broker.requests, [])
 
     async def test_reads_outside_workspace_without_permission_context(self):

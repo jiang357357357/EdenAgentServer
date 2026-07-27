@@ -10,6 +10,12 @@ from ..ids import create_id
 PermissionReply = str
 PermissionMode = str
 DEFAULT_PERMISSION_TIMEOUT_SECONDS = 300.0
+PERMISSION_MODES = frozenset({"restricted", "full_access", "takeover"})
+
+
+def normalize_permission_mode(mode: str | None) -> PermissionMode:
+    # Compatibility with settings persisted before the three-level policy.
+    return "restricted" if mode == "ask" else mode if mode in PERMISSION_MODES else "restricted"
 
 
 @dataclass(slots=True)
@@ -24,7 +30,9 @@ class PermissionBroker:
         self._events = events
         self._waiters: dict[str, _PermissionWaiter] = {}
         self._always_allowed: set[tuple[str | None, str, str]] = set()
-        self._mode: PermissionMode = "ask"
+        self._mode: PermissionMode = "restricted"
+        self._scoped_modes: dict[str, PermissionMode] = {}
+        self._session_scopes: dict[str, str] = {}
         self._timeout_seconds = max(0.01, float(timeout_seconds))
         self._lock = threading.Lock()
 
@@ -32,16 +40,35 @@ class PermissionBroker:
         with self._lock:
             return [waiter.request for waiter in self._waiters.values()]
 
-    def mode(self) -> dict[str, Any]:
+    def mode(self, scope: str | None = None) -> dict[str, Any]:
         with self._lock:
-            return {"mode": self._mode}
+            return {"mode": self._scoped_modes.get(scope, self._mode) if scope else self._mode}
 
-    def set_mode(self, mode: str) -> dict[str, Any]:
-        next_mode = mode if mode in {"ask", "full_access"} else "ask"
+    def hydrate_mode(self, mode: str, scope: str | None = None, session_id: str | None = None) -> dict[str, Any]:
+        next_mode = normalize_permission_mode(mode)
         with self._lock:
-            self._mode = next_mode
-        self._events.emit({"type": "permission.mode", "properties": {"mode": next_mode}})
+            if scope:
+                self._scoped_modes[scope] = next_mode
+                if session_id:
+                    self._session_scopes[session_id] = scope
+            else:
+                self._mode = next_mode
         return {"mode": next_mode}
+
+    def set_mode(self, mode: str, scope: str | None = None) -> dict[str, Any]:
+        result = self.hydrate_mode(mode, scope)
+        next_mode = result["mode"]
+        self._events.emit({"type": "permission.mode", "properties": {"mode": next_mode}})
+        return result
+
+    def bind_session(self, session_id: str, scope: str) -> None:
+        with self._lock:
+            self._session_scopes[session_id] = scope
+
+    def mode_for_session(self, session_id: str | None = None) -> PermissionMode:
+        with self._lock:
+            scope = self._session_scopes.get(session_id) if session_id else None
+            return self._scoped_modes.get(scope, self._mode) if scope else self._mode
 
     def is_explicitly_allowed(self, permission: str, pattern: str, session_id: str | None = None) -> bool:
         with self._lock:
@@ -54,7 +81,9 @@ class PermissionBroker:
 
     def is_always_allowed(self, permission: str, pattern: str, session_id: str | None = None) -> bool:
         with self._lock:
-            if self._mode == "full_access":
+            scope = self._session_scopes.get(session_id) if session_id else None
+            mode = self._scoped_modes.get(scope, self._mode) if scope else self._mode
+            if mode == "takeover":
                 return True
             return (
                 (session_id, permission, pattern) in self._always_allowed

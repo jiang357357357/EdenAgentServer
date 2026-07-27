@@ -10,9 +10,6 @@ from mon_agent_core import AgentTool
 
 from .context import MonToolContext
 from .result import text_result
-from .workspace import maybe_ask_outside_workspace
-
-
 MAX_LIST_ENTRIES = 500
 MAX_FIND_RESULTS = 500
 MAX_READ_BYTES = 256 * 1024
@@ -24,35 +21,27 @@ MAX_GREP_MATCHES = 500
 def _validate_root(value: Any) -> Path:
     raw = str(value or "").strip()
     if not raw:
-        raise RuntimeError("root 必须是用户明确指定的外部目录")
+        raise RuntimeError("root 必须是一个目录")
     root = Path(raw).expanduser().resolve(strict=True)
     if not root.is_dir():
         raise RuntimeError(f"外部读取根目录不存在或不是目录: {raw}")
-    # Never turn a single approval into a filesystem-wide or all-users grant.
-    if root == Path(root.anchor) or root == Path("/home") or root == Path.home().resolve():
-        raise RuntimeError(f"拒绝过宽的外部读取根目录: {root}；请指定更具体的目录")
-    if len(root.parts) < 3:
-        raise RuntimeError(f"外部读取根目录范围过宽: {root}；请指定更具体的目录")
     return root
 
 
 def _resolve_scoped(root: Path, relative_path: Any = ".", *, require_file: bool = False) -> Path:
     raw = str(relative_path or ".").strip() or "."
     candidate = Path(raw).expanduser()
-    if candidate.is_absolute():
-        raise RuntimeError("path 必须是相对于已授权 root 的路径，不能使用绝对路径")
-    resolved = (root / candidate).resolve(strict=True)
-    try:
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise RuntimeError("目标路径越过已授权目录，可能包含 .. 或越界符号链接") from exc
+    resolved = candidate.resolve(strict=True) if candidate.is_absolute() else (root / candidate).resolve(strict=True)
     if require_file and not resolved.is_file():
         raise RuntimeError(f"目标不是普通文件: {raw}")
     return resolved
 
 
-async def _authorize(root: Path, workspace_root: Path, context: MonToolContext, tool_name: str, call_id: str, action: str) -> Path:
-    return await maybe_ask_outside_workspace(workspace_root, str(root), context, tool_name, call_id, action)
+def _display_path(root: Path, target: Path) -> str:
+    try:
+        return str(target.relative_to(root))
+    except ValueError:
+        return str(target)
 
 
 def _walk_files(root: Path, start: Path, max_depth: int) -> Iterable[Path]:
@@ -101,7 +90,6 @@ def _find_entries(root: Path, start: Path, query: str, max_depth: int) -> list[d
 def create_external_file_tools(workspace_root: Path, context: MonToolContext) -> list[AgentTool]:
     async def external_ls(call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
         root = _validate_root(params.get("root"))
-        await _authorize(root, workspace_root, context, "external_ls", call_id, "列出外部目录")
         target = _resolve_scoped(root, params.get("path", "."))
         if not target.is_dir():
             raise RuntimeError("external_ls 的目标必须是目录")
@@ -113,11 +101,10 @@ def create_external_file_tools(workspace_root: Path, context: MonToolContext) ->
         lines = [f"{item['type']}: {item['name']}" for item in entries]
         if truncated:
             lines.append(f"[结果最多显示 {MAX_LIST_ENTRIES} 项]")
-        return text_result("\n".join(lines) or "目录为空", {"root": str(root), "path": str(target.relative_to(root)), "entries": entries, "truncated": truncated})
+        return text_result("\n".join(lines) or "目录为空", {"root": str(root), "path": _display_path(root, target), "entries": entries, "truncated": truncated})
 
     async def external_read(call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
         root = _validate_root(params.get("root"))
-        await _authorize(root, workspace_root, context, "external_read", call_id, "读取外部文件")
         target = _resolve_scoped(root, params.get("path"), require_file=True)
         size = target.stat().st_size
         if size > MAX_READ_BYTES:
@@ -126,11 +113,10 @@ def create_external_file_tools(workspace_root: Path, context: MonToolContext) ->
         if b"\x00" in data:
             raise RuntimeError("external_read 仅支持文本文件")
         text = data.decode(str(params.get("encoding") or "utf-8"), errors="replace")
-        return text_result(text, {"root": str(root), "path": str(target.relative_to(root)), "bytes": len(data)})
+        return text_result(text, {"root": str(root), "path": _display_path(root, target), "bytes": len(data)})
 
     async def external_find(call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
         root = _validate_root(params.get("root"))
-        await _authorize(root, workspace_root, context, "external_find", call_id, "在外部目录查找文件")
         start = _resolve_scoped(root, params.get("path", "."))
         if not start.is_dir():
             raise RuntimeError("external_find 的起点必须是目录")
@@ -144,7 +130,6 @@ def create_external_file_tools(workspace_root: Path, context: MonToolContext) ->
 
     async def external_grep(call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
         root = _validate_root(params.get("root"))
-        await _authorize(root, workspace_root, context, "external_grep", call_id, "搜索外部文本文件")
         start = _resolve_scoped(root, params.get("path", "."))
         pattern = str(params.get("pattern") or "")
         if not pattern:
@@ -181,12 +166,12 @@ def create_external_file_tools(workspace_root: Path, context: MonToolContext) ->
         rendered = "\n".join(f"{item['path']}:{item['line']}: {item['text']}" for item in results)
         return text_result(rendered or "未找到匹配内容", {"root": str(root), "matches": results, "filesScanned": files_seen, "bytesScanned": bytes_seen, "truncated": len(results) >= MAX_GREP_MATCHES})
 
-    root_property = {"type": "string", "description": "明确、具体的只读搜索根目录；禁止使用 /、/home 或用户主目录。后续调用应复用同一个 root。"}
-    path_property = {"type": "string", "description": "相对于已授权 root 的目标路径，默认 .；进入子目录时修改 path，不要把子目录改成新的 root。禁止绝对路径和越界。"}
+    root_property = {"type": "string", "description": "只读操作的起始目录，可以是 /、/home、用户主目录或其他绝对目录。"}
+    path_property = {"type": "string", "description": "目标路径，默认 .；可以是相对于 root 的路径，也可以是绝对路径。"}
     common = {"root": root_property, "path": path_property}
     return [
-        AgentTool("external_ls", "列出外部目录", "直接只读列出工作区外的具体目录。不得扫描 /、/home 或用户主目录；保持 root 不变并用 path 浏览子目录。", {"type": "object", "properties": common, "required": ["root"]}, external_ls),
+        AgentTool("external_ls", "列出外部目录", "列出工作区外的目录。", {"type": "object", "properties": common, "required": ["root"]}, external_ls),
         AgentTool("external_read", "读取外部文本", "直接读取具体目录中的小型文本文件；不会读取二进制或超过 256 KiB 的文件。", {"type": "object", "properties": {**common, "encoding": {"type": "string"}}, "required": ["root", "path"]}, external_read),
-        AgentTool("external_find", "查找外部文件或目录", "在用户授权的具体目录内按名称递归查找文件或目录；用于游戏存档等个人文件定位，结果和深度有限。", {"type": "object", "properties": {**common, "name": {"type": "string"}, "max_depth": {"type": "integer", "minimum": 1, "maximum": 8}}, "required": ["root", "name"]}, external_find),
-        AgentTool("external_grep", "搜索外部文本", "在用户授权的具体目录内只读搜索文本内容，跳过符号链接、二进制和大文件。", {"type": "object", "properties": {**common, "pattern": {"type": "string"}, "ignore_case": {"type": "boolean"}, "max_depth": {"type": "integer", "minimum": 1, "maximum": 8}}, "required": ["root", "pattern"]}, external_grep),
+        AgentTool("external_find", "查找外部文件或目录", "在任意目录内按名称递归查找文件或目录；用于游戏存档等个人文件定位，结果和深度有限。", {"type": "object", "properties": {**common, "name": {"type": "string"}, "max_depth": {"type": "integer", "minimum": 1, "maximum": 8}}, "required": ["root", "name"]}, external_find),
+        AgentTool("external_grep", "搜索外部文本", "在任意目录内搜索文本内容，跳过符号链接、二进制和大文件。", {"type": "object", "properties": {**common, "pattern": {"type": "string"}, "ignore_case": {"type": "boolean"}, "max_depth": {"type": "integer", "minimum": 1, "maximum": 8}}, "required": ["root", "pattern"]}, external_grep),
     ]

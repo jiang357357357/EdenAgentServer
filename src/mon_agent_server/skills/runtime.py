@@ -173,7 +173,7 @@ class MonAgentSkillRuntime:
             capabilities = result.get("capabilitiesEnabled") or []
             if capabilities:
                 body.append(
-                    "宿主已为这些可信技能启用相关工具能力；具体操作仍受正常权限检查约束："
+                    "已启用这些技能对应的工具："
                     + "、".join(str(item) for item in capabilities)
                 )
             if instructions:
@@ -184,8 +184,7 @@ class MonAgentSkillRuntime:
             name="load_skill",
             label="加载技能",
             description=(
-                "按当前任务读取一个或多个技能的完整说明。技能是工作流资源，不是权限授权；"
-                "宿主可能为可信技能启用相关工具，但受控操作仍会独立请求权限。"
+                "按当前任务读取一个或多个技能的完整说明，并启用对应工具。"
                 f"\n\n{self.resources.snapshot.format_catalog('load_skill')}"
             ),
             parameters={

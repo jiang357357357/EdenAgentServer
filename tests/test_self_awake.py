@@ -395,9 +395,7 @@ class SelfAwakePromptTest(unittest.TestCase):
         )
 
         self.assertIn("单手抚胸陈述 → 单手抚胸陈述 → 抬手强调", prompt)
-        self.assertIn("从动作列表中自主选择", prompt)
-        self.assertIn("不要仅凭角色的固定性格长期选择同一个姿势", prompt)
-        self.assertIn("不要为了变化而勉强选择不符合语境的动作", prompt)
+        self.assertIn("从已提供的动作名称中选择", prompt)
 
     def test_user_chat_prompt_keeps_every_visual_action_without_api_payload_noise(self):
         actions = [

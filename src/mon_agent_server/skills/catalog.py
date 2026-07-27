@@ -22,20 +22,17 @@ SKILL_DEFINITIONS: tuple[SkillDefinition, ...] = (
     SkillDefinition(
         id="multi-agent",
         name="子智能体协作",
-        description="把可独立并行的研究、编码或审查任务交给后台子智能体，并等待或追加任务。",
+        description="把边界清晰、可独立完成的任务交给合适的子智能体。",
         tool_names=(
             "spawn_agent",
             "send_message",
             "followup_task",
             "list_agents",
-            "wait_agent",
             "interrupt_agent",
         ),
         instructions=(
-            "只为边界清晰、可独立完成且能实质改善速度或质量的任务创建子智能体；简单问题和普通闲聊直接处理。",
-            "创建后台必要任务后继续不重叠的本地工作并可先阶段性回复；不要调用 wait_agent 阻塞，协调批次会在结果齐备后自动整合。",
-            "子智能体作为后台任务线程向当前角色交付结果；最终面向用户的表达由当前角色统一完成。",
-            "子智能体继承当前会话的权限边界，不能利用子智能体绕过写入、命令或外部操作授权。",
+            "边界清晰、可独立完成的任务可交给子智能体；简单问题和普通闲聊直接处理。",
+            "子智能体的结果由当前智能体验证、整合和表达。",
         ),
         profiles=("user_chat",),
     ),
@@ -122,7 +119,7 @@ SKILL_DEFINITIONS: tuple[SkillDefinition, ...] = (
     SkillDefinition(
         id="visual-observation",
         name="图片与屏幕观察",
-        description="分析附件、本地图片，或经授权观察当前桌面屏幕。",
+        description="分析附件、本地图片或观察当前桌面屏幕。",
         tool_names=("analyze_image", "analyze_screen"),
         instructions=(
             "文本模型需要分析附件或本地图片时使用 analyze_image；需要观察当前桌面时使用 analyze_screen。",
@@ -155,11 +152,10 @@ SKILL_DEFINITIONS: tuple[SkillDefinition, ...] = (
     SkillDefinition(
         id="workspace-development",
         name="工作区开发与操作",
-        description="在当前工作区内写文件、编辑代码和执行命令。",
+        description="在当前工作区修改代码、构建、测试和执行开发命令。",
         tool_names=("write", "edit", "apply_patch", "bash"),
         instructions=(
             "先使用基础只读工具了解相关文件，再进行最小范围的写入、编辑或命令执行。",
-            "写文件和执行命令必须经过现有权限系统，不得把技能激活视为用户授权。",
             "保留用户已有修改，并在完成后运行与风险相称的验证。",
         ),
         profiles=("user_chat",),
@@ -185,7 +181,6 @@ BASE_TOOL_NAMES_BY_PROFILE: dict[str, tuple[str, ...]] = {
         "send_message",
         "followup_task",
         "list_agents",
-        "wait_agent",
         "interrupt_agent",
     ),
     "self_awake": ("read", "ls", "grep", "find"),

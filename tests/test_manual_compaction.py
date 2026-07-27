@@ -36,6 +36,7 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
                 "role": "assistant",
                 "timestamp": 2,
                 "content": [{"type": "text", "text": "旧回答" * 12_000}],
+                "usage": {"input": 90_000, "output": 1_000, "cacheRead": 0},
             },
             {
                 "role": "user",
@@ -86,6 +87,7 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(captured["instructions"], "重点保留项目路径")
         self.assertEqual(compacted[0]["role"], "compactionSummary")
+        self.assertTrue(all("usage" not in message for message in compacted))
         self.assertEqual(store.context_messages(session_id), compacted)
         self.assertFalse(compaction_part["auto"])
         self.assertFalse(compaction_part["overflow"])

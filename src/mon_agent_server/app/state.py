@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 from typing import Any
 
 from ..brokers import PermissionBroker, QuestionBroker, ScreenCaptureBroker
@@ -53,6 +54,21 @@ class AppState:
         profile = self.core_client.get_user_profile(token)
         environment = profile.get("environment") if isinstance(profile.get("environment"), dict) else {}
         return merge_environment_context(base, environment)
+
+    @staticmethod
+    def permission_scope(token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def hydrate_permission_mode(self, token: str, session_id: str | None = None) -> dict[str, Any]:
+        settings = self.core_client.get_agent_settings(token)
+        mode = str(settings.get("permission_mode") or "restricted")
+        return self.permissions.hydrate_mode(mode, self.permission_scope(token), session_id)
+
+    def persist_permission_mode(self, token: str, mode: str) -> dict[str, Any]:
+        normalized = mode if mode in {"restricted", "full_access", "takeover"} else "restricted"
+        settings = self.core_client.update_agent_settings(token, {"permission_mode": normalized})
+        persisted = str(settings.get("permission_mode") or "restricted")
+        return self.permissions.set_mode(persisted, self.permission_scope(token))
 
     def hydrate(self, token: str, session_id: str) -> None:
         data = self.core_client.get_agent_session(token, session_id)

@@ -108,6 +108,14 @@ class CoreClient:
         raw = self._request("/api/assistants/current/", token)
         return raw if isinstance(raw, dict) else {}
 
+    def get_agent_settings(self, token: str) -> dict[str, Any]:
+        raw = self._request("/api/agent/settings/my/", token)
+        return raw if isinstance(raw, dict) else {}
+
+    def update_agent_settings(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        raw = self._request("/api/agent/settings/my/", token, method="PATCH", payload=payload)
+        return raw if isinstance(raw, dict) else {}
+
     def list_ai_entities(self, token: str) -> list[dict[str, Any]]:
         return unwrap_results(self._request("/api/ai/entities/", token))
 
