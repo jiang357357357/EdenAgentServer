@@ -24,6 +24,8 @@ class MonToolContext:
     set_character_action: Callable[[dict[str, Any]], None] | None = None
     get_message_id: Callable[[], str | None] | None = None
     get_current_files: Callable[[], list[dict[str, Any]]] | None = None
+    append_assistant_part: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    switch_session_assistant: Callable[[int | str], Awaitable[dict[str, Any]]] | None = None
     agent_path: str = "/root"
     permission_mode: str = "restricted"
     subagent_role_names: tuple[str, ...] = ()

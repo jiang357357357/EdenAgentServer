@@ -20,6 +20,19 @@ class SkillDefinition:
 
 SKILL_DEFINITIONS: tuple[SkillDefinition, ...] = (
     SkillDefinition(
+        id="assistant-switching",
+        name="助手查看与会话切换",
+        description="查看当前用户的助手，并让另一位助手在保留聊天历史的情况下接手当前会话。",
+        tool_names=("list_assistants", "switch_session_assistant"),
+        instructions=(
+            "目标助手不明确时先调用 list_assistants，依据明确的助手 ID 切换。",
+            "只有用户明确要求切换或接手当前会话时，才能调用 switch_session_assistant；不要自行更换助手。",
+            "切换只修改当前会话参与助手，不修改用户的全局默认助手。",
+            "切换保留当前会话全部历史；工具调用后的下一次模型续跑立即改用新助手，由新助手完成当前对话。",
+        ),
+        profiles=("user_chat",),
+    ),
+    SkillDefinition(
         id="multi-agent",
         name="子智能体协作",
         description="把边界清晰、可独立完成的任务交给合适的子智能体。",
@@ -122,8 +135,8 @@ SKILL_DEFINITIONS: tuple[SkillDefinition, ...] = (
         description="分析附件、本地图片或观察当前桌面屏幕。",
         tool_names=("analyze_image", "analyze_screen"),
         instructions=(
-            "文本模型需要分析附件或本地图片时使用 analyze_image；需要观察当前桌面时使用 analyze_screen。",
-            "多模态模型已经直接收到的用户图片不要重复分析；屏幕观察仍必须通过 analyze_screen。",
+            "分析附件或本地图片路径时使用 analyze_image；需要观察当前桌面时使用 analyze_screen。",
+            "多模态模型已经直接收到的附件图片无需重复分析；file:// 或绝对路径图片仍使用 analyze_image。",
         ),
     ),
     SkillDefinition(
@@ -182,6 +195,14 @@ BASE_TOOL_NAMES_BY_PROFILE: dict[str, tuple[str, ...]] = {
         "followup_task",
         "list_agents",
         "interrupt_agent",
+        "remember_memory",
+        "search_memories",
+        "update_memory",
+        "forget_memory",
+        "list_character_stickers",
+        "remember_character_sticker",
+        "send_character_sticker",
+        "delete_character_sticker",
     ),
     "self_awake": ("read", "ls", "grep", "find"),
 }

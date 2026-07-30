@@ -88,17 +88,23 @@ def handle_sessions(handler: Any, path: str, query: dict[str, list[str]], method
             handler.app.hydrate(token, session_id)
         else:
             handler.app.ensure_hydrated(token, session_id)
-        # Hydration rebuilds the actual model context. Publish its token count so
-        # the composer and compaction logic use the same source of truth.
-        handler.app.runtime.emit_session(session_id)
+        before = (query.get("before") or [""])[0].strip() or None
+        # Hydration rebuilds the actual model context. Publish its token count on
+        # the initial page only; older-page reads must not create event traffic.
+        if before is None:
+            handler.app.runtime.emit_session(session_id)
         include_compactions = (query.get("includeCompactions") or [""])[0].strip().lower() in {"1", "true", "yes"}
-        handler.json_response(
-            handler.app.store.list_messages(
+        try:
+            page = handler.app.store.list_message_page(
                 session_id,
-                handler.query_int(query, "limit", 100),
+                limit=handler.query_int(query, "limit", 50),
+                before=before,
                 include_compactions=include_compactions,
             )
-        )
+        except KeyError:
+            handler.json_response({"error": "消息分页游标不存在。"}, status=400)
+            return True
+        handler.json_response(page)
         return True
 
     if message_match and method == "POST":

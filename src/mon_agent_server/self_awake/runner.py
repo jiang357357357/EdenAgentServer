@@ -101,6 +101,19 @@ async def ensure_self_awake_notification(
             "error": str(observed.get("error") or ""),
         }
 
+    action = decision.get("action") if isinstance(decision.get("action"), dict) else {}
+    should_notify = bool(memo_due_notification_args(context)) or bool(
+        decision.get("should_interrupt_user")
+    ) or str(action.get("type") or "").strip() == "remind_user"
+    if not should_notify:
+        return {
+            "attempted": False,
+            "succeeded": False,
+            "source": "quiet_decision",
+            "delivered_channels": [],
+            "error": "",
+        }
+
     try:
         tools = create_mon_agent_tools(
             app.config.workspace_root,
@@ -124,7 +137,7 @@ async def ensure_self_awake_notification(
             "error": "",
         }
     except Exception as error:
-        logger.error(f"自醒强制通知失败: {error}", exc_info=True)
+        logger.error(f"自醒通知兜底失败: {error}", exc_info=True)
         return {
             "attempted": True,
             "succeeded": False,
@@ -213,6 +226,7 @@ async def run_self_awake_agent(
             supports_images=runtime_config.supports_images,
             active_skill_ids=active_skill_ids,
             skill_resource_prompt=skill_runtime.prompt_section(),
+            environment=context.get("environment") if isinstance(context.get("environment"), dict) else None,
         )
 
     system_prompt = system_prompt_for(skill_runtime.active_skill_ids)
@@ -242,10 +256,14 @@ async def run_self_awake_agent(
             },
             get_api_key=lambda _provider: runtime_config.api_key,
             before_tool_call=self_awake_before_tool_call(context),
-            prepare_next_turn_with_context=lambda turn, _signal: skill_runtime.prepare_next_turn(
-                turn,
-                system_prompt_for,
-            ),
+            prepare_next_turn_with_context=lambda turn, _signal: {
+                **(skill_runtime.prepare_next_turn(turn, system_prompt_for) or {}),
+                "context": {
+                    **turn["context"],
+                    "systemPrompt": system_prompt_for(skill_runtime.active_skill_ids),
+                    "tools": skill_runtime.active_tools(),
+                },
+            },
         )
     )
     notification = {"attempted": False, "succeeded": False, "error": ""}

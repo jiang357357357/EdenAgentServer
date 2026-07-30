@@ -5,6 +5,7 @@ from typing import Any
 
 from mon_agent_core.coding_agent.tools import create_all_tools
 
+from .assistants import create_assistant_tools
 from .character_actions import create_character_action_tools
 from .context import MonToolContext
 from .email import create_email_tools
@@ -13,10 +14,12 @@ from .external_files import create_external_file_tools
 from .interaction import create_interaction_tools
 from .loaded import create_loaded_tools
 from .memo import create_memo_tools
+from .memory import create_memory_tools
 from .notify import create_notify_tools
 from .profiles import allowed_tool_names
 from .qq import create_qq_tools
 from .self_awake_tools import create_self_awake_tools
+from .stickers import create_sticker_tools
 from .subagents import create_subagent_tools
 from .timer import create_timer_tools
 from .vision import create_vision_tools
@@ -32,6 +35,7 @@ def create_mon_agent_tools(
     root = Path(workspace_root).resolve()
     tools: list[Any] = []
     tools.extend(create_loaded_tools(tools))
+    tools.extend(create_assistant_tools(context))
     tools.extend(create_web_tools())
     tools.extend(create_environment_tools(context))
     tools.extend(create_external_file_tools(root, context))
@@ -39,6 +43,8 @@ def create_mon_agent_tools(
     tools.extend(create_character_action_tools(context))
     tools.extend(create_self_awake_tools(root, context))
     tools.extend(create_memo_tools(root, context))
+    tools.extend(create_memory_tools(context))
+    tools.extend(create_sticker_tools(context))
     tools.extend(create_timer_tools(root))
     tools.extend(create_email_tools(context))
     tools.extend(create_qq_tools(context))

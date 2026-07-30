@@ -4,6 +4,18 @@ from mon_agent_server.core import CoreClient
 
 
 class CoreContextTest(unittest.TestCase):
+    def test_list_assistants_uses_authenticated_core_endpoint(self):
+        client = CoreClient("http://core.test")
+        calls = []
+        client._request = lambda path, token, **_kwargs: calls.append((path, token)) or {
+            "results": [{"id": 2, "name": "助手 B"}]
+        }
+
+        assistants = client.list_assistants("token")
+
+        self.assertEqual(assistants, [{"id": 2, "name": "助手 B"}])
+        self.assertEqual(calls, [("/api/assistants/", "token")])
+
     def test_agent_permission_settings_use_persistent_core_endpoint(self):
         client = CoreClient("http://core.test")
         calls = []

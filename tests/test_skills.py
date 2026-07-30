@@ -45,6 +45,7 @@ class SkillCatalogTest(unittest.TestCase):
                 "email-communication",
                 "workspace-development",
                 "multi-agent",
+                "assistant-switching",
             },
         )
 
@@ -72,11 +73,23 @@ class SkillCatalogTest(unittest.TestCase):
                 "followup_task",
                 "list_agents",
                 "interrupt_agent",
+                "remember_memory",
+                "search_memories",
+                "update_memory",
+                "forget_memory",
+                "list_character_stickers",
+                "remember_character_sticker",
+                "send_character_sticker",
+                "delete_character_sticker",
             },
         )
         self.assertNotIn("loaded_tools", names)
         self.assertNotIn("create_memo", names)
         self.assertNotIn("web_search", names)
+        self.assertIn("remember_memory", names)
+        self.assertIn("search_memories", names)
+        self.assertIn("update_memory", names)
+        self.assertIn("forget_memory", names)
         self.assertNotIn("write", names)
 
     def test_activation_updates_tools_and_prompt_for_next_model_call(self) -> None:
@@ -119,6 +132,18 @@ class SkillCatalogTest(unittest.TestCase):
         prompt = runtime.prompt_section()
         self.assertIn("修改代码、构建、测试", prompt)
         self.assertNotIn("绕过 file_locator", prompt)
+
+    def test_assistant_switching_skill_exposes_bounded_tools(self) -> None:
+        runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
+
+        self.assertNotIn("switch_session_assistant", _tool_names(runtime.active_tools()))
+        result = runtime.load(["assistant-switching"])
+
+        self.assertTrue(result["success"])
+        names = _tool_names(runtime.active_tools())
+        self.assertIn("list_assistants", names)
+        self.assertIn("switch_session_assistant", names)
+        self.assertIn("保留当前会话全部历史", runtime.prompt_section())
 
     def test_multi_agent_skill_adds_policy_without_gating_control_tools(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
