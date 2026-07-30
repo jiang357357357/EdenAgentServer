@@ -190,7 +190,7 @@ def _format_actions(actions: list[dict[str, Any]], current: dict[str, Any] | Non
             "\n".join(
                 [
                     f"#{action.get('id')} {_action_label(action)}{marker}",
-                    f"   意图: {action.get('intent') or '-'} | 图片: {'有' if image else '无'} | 动态: {'有' if action.get('has_dynamic') else '无'}",
+                    f"   意图: {action.get('intent') or '-'} | 图片: {'有' if image else '无'} | 动态: {'有' if action.get('has_dynamic') else '无'} | Spine: {'有' if action.get('has_spine') or action.get('spine') else '无'}",
                     f"   说明: {action.get('description') or '-'}",
                 ]
             )
