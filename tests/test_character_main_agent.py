@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 from mon_agent_core import AssistantMessageEventStream
 
+from mon_agent_server.brokers import PermissionBroker
+from mon_agent_server.llm.messages import to_openai_messages
 from mon_agent_server.runtime.companion import DirectorBeat, DirectorExecution, DirectorScene
 from mon_agent_server.runtime.config import RuntimeModelConfig
 from mon_agent_server.runtime.manager import MonAgentRuntime
@@ -50,6 +52,127 @@ def tool_call_message(name: str, arguments: dict[str, Any]) -> AssistantMessageE
 
 
 class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_assistant_switch_continues_same_tool_loop_with_new_model_and_identity(self) -> None:
+        store = SessionStore()
+        session = store.create_session(
+            "即时接管",
+            [{"assistantID": 1, "assistantName": "助手 A", "characterID": 10, "characterName": "角色 A"}],
+        )
+        text = "/skill:assistant-switching 切换到助手 B"
+        user_message = store.append_user_message(session["id"], text, [])
+        events = EventRecorder()
+        permissions = PermissionBroker(events)
+        permissions.hydrate_mode("full_access")
+
+        class Core:
+            def __init__(self):
+                self.operations: list[tuple[str, Any, Any]] = []
+
+            def update_agent_session_participants(self, _token, info, assistant_ids):
+                self.operations.append(("participants", assistant_ids[0], None))
+                return {
+                    **info,
+                    "participants": [
+                        {
+                            "assistantID": assistant_ids[0],
+                            "assistantName": "助手 B",
+                            "characterID": 20,
+                            "characterName": "角色 B",
+                        }
+                    ],
+                    "participantAssistantIDs": list(assistant_ids),
+                }
+
+            def list_memories(self, _token, _params):
+                return []
+
+            def sync_agent_message(self, _token, _session, message, _core):
+                speaker = message["info"].get("speaker") or {}
+                core_assistant = ((_core or {}).get("assistant") or {}).get("id")
+                self.operations.append(("message", speaker.get("assistantID"), core_assistant))
+                return message
+
+        core = Core()
+        runtime = MonAgentRuntime(Path.cwd(), store, events, permissions, None, core)
+        config_a = RuntimeModelConfig(
+            {"id": "model-a", "name": "A", "api": "fake", "provider": "fake", "input": ["text"]},
+            "key-a",
+            "A",
+            "test",
+            {
+                "assistant": {"id": 1, "name": "助手 A"},
+                "character": {"id": 10, "name": "角色 A"},
+                "aiEntity": {},
+            },
+        )
+        config_b = RuntimeModelConfig(
+            {"id": "model-b", "name": "B", "api": "fake", "provider": "fake", "input": ["text"]},
+            "key-b",
+            "B",
+            "test",
+            {
+                "assistant": {"id": 2, "name": "助手 B"},
+                "character": {"id": 20, "name": "角色 B"},
+                "aiEntity": {},
+            },
+        )
+        observed: list[dict[str, Any]] = []
+
+        async def fake_stream(model, context, options):
+            observed.append(
+                {
+                    "model": model["id"],
+                    "prompt": context["systemPrompt"],
+                    "apiKey": options["apiKey"],
+                    "messages": to_openai_messages(context),
+                }
+            )
+            if len(observed) == 1:
+                return tool_call_message("switch_session_assistant", {"assistant_id": 2})
+            return stream_message("[助手 B]\n\n我是助手 B，已经接手这段对话。")
+
+        with (
+            patch.object(runtime, "_resolve_runtime_config", return_value=config_b),
+            patch("mon_agent_server.runtime.manager.session_from_map", side_effect=lambda value: value),
+            patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=fake_stream),
+        ):
+            _, reply = await runtime._run_character_main_agent(
+                session_id=session["id"],
+                parts=[{"type": "text", "text": text}],
+                user_message=user_message,
+                auth_token="token",
+                runtime_config=config_a,
+                run_state=RunState(speaker={"assistantID": 1, "assistantName": "助手 A"}),
+                beat=DirectorBeat(1, "切换助手"),
+                scene=None,
+                execution=None,
+                previous_replies=[],
+                environment=None,
+                skill_owner_key=None,
+            )
+
+        self.assertEqual(reply, "我是助手 B，已经接手这段对话。")
+        self.assertEqual([item["model"] for item in observed], ["model-a", "model-b"])
+        self.assertEqual([item["apiKey"] for item in observed], ["key-a", "key-b"])
+        self.assertIn("角色 A", observed[0]["prompt"])
+        self.assertIn("角色 B", observed[1]["prompt"])
+        switch_message = next(
+            item
+            for item in observed[1]["messages"]
+            if item.get("role") == "assistant" and item.get("tool_calls")
+        )
+        self.assertEqual(switch_message["content"], "[助手 A]")
+        self.assertEqual(
+            core.operations,
+            [
+                ("message", 1, 1),
+                ("participants", 2, None),
+                ("message", 2, 2),
+            ],
+        )
+        self.assertEqual(store.require_session(session["id"])["info"]["participantAssistantIDs"], [2])
+        runtime.close()
+
     async def test_character_model_timeout_raises_actionable_error(self) -> None:
         store = SessionStore()
         session = store.create_session("超时测试")
@@ -201,7 +324,7 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 scene=None,
                 execution=None,
                 previous_replies=[],
-                environment=None,
+                environment={"timezone": "Asia/Shanghai", "locale": "zh-CN"},
                 skill_owner_key=None,
             )
 
@@ -212,6 +335,8 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("当前已加载技能", observed_prompts[0])
         self.assertIn("当前已加载技能", observed_prompts[1])
         self.assertIn('<skill name="web-research"', observed_prompts[1])
+        self.assertIn("当前本地时间：", observed_prompts[0])
+        self.assertIn("当前本地时间：", observed_prompts[1])
         runtime.close()
 
     async def test_character_compacts_during_tool_loop_and_continues_same_run(self) -> None:

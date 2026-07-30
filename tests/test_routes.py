@@ -99,12 +99,37 @@ class RouteTest(unittest.TestCase):
     def test_compact_route_starts_manual_compaction(self):
         calls = []
 
+        command_message = {
+            "info": {"id": "msg-command", "role": "assistant"},
+            "parts": [{"id": "part-command", "type": "command", "command": "/compact 保留项目路径"}],
+        }
+
+        class Store:
+            def append_command_message(self, session_id, command):
+                calls.append(("command", session_id, command))
+                return command_message
+
+            def require_session(self, session_id):
+                return {"info": {"id": session_id}}
+
+        class CoreClient:
+            def sync_agent_message(self, token, session, message):
+                calls.append(("sync", token, session["id"], message["info"]["id"]))
+
         class Runtime:
+            def emit_message(self, session_id, info):
+                calls.append(("emit-message", session_id, info["id"]))
+
+            def emit_part(self, session_id, part):
+                calls.append(("emit-part", session_id, part["id"]))
+
             def compact_async(self, session_id, instructions, token):
                 calls.append((session_id, instructions, token))
 
         class App:
             runtime = Runtime()
+            store = Store()
+            core_client = CoreClient()
 
             def ensure_hydrated(self, token, session_id):
                 calls.append(("hydrate", session_id, token))
@@ -124,7 +149,11 @@ class RouteTest(unittest.TestCase):
 
         self.assertTrue(handled)
         self.assertEqual(calls[0], ("hydrate", "session 1", "core-token"))
-        self.assertEqual(calls[1], ("session 1", "保留项目路径", "core-token"))
+        self.assertEqual(calls[1], ("command", "session 1", "/compact 保留项目路径"))
+        self.assertEqual(calls[2], ("emit-message", "session 1", "msg-command"))
+        self.assertEqual(calls[3], ("emit-part", "session 1", "part-command"))
+        self.assertEqual(calls[4], ("sync", "core-token", "session 1", "msg-command"))
+        self.assertEqual(calls[5], ("session 1", "保留项目路径", "core-token"))
         self.assertEqual(handler.response, ({"accepted": True, "sessionID": "session 1"}, 202))
 
     def test_abort_route_stops_active_session(self):

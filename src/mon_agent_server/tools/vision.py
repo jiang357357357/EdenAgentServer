@@ -6,6 +6,7 @@ import mimetypes
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from mon_agent_core import AgentTool
 
@@ -13,6 +14,17 @@ from .context import MonToolContext
 from .core_access import core_call, require_core_access
 from .result import text_result
 from .workspace import maybe_ask_outside_workspace
+
+
+def _local_file_path(value: str) -> Path | None:
+    raw = str(value or "").strip()
+    if raw.startswith("file://"):
+        parsed = urlparse(raw)
+        if parsed.netloc not in ("", "localhost"):
+            return None
+        return Path(unquote(parsed.path)).expanduser().resolve()
+    path = Path(raw).expanduser()
+    return path.resolve() if path.is_absolute() else None
 
 
 def create_vision_tools(root: Path, context: MonToolContext) -> list[AgentTool]:
@@ -71,7 +83,18 @@ def create_vision_tools(root: Path, context: MonToolContext) -> list[AgentTool]:
         data = ""
         source = ""
         if params.get("path"):
-            file_path = await maybe_ask_outside_workspace(root, str(params["path"]), context, "analyze_image", tool_call_id, "读取图片")
+            raw_path = str(params["path"])
+            normalized_path = _local_file_path(raw_path)
+            file_path = await maybe_ask_outside_workspace(
+                root,
+                str(normalized_path or raw_path),
+                context,
+                "analyze_image",
+                tool_call_id,
+                "读取图片",
+            )
+            if not file_path.is_file():
+                raise RuntimeError(f"图片文件不存在: {file_path}")
             mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
             if not mime_type.startswith("image/"):
                 raise RuntimeError(f"不是支持的图片类型: {file_path}")
@@ -176,9 +199,14 @@ def create_vision_tools(root: Path, context: MonToolContext) -> list[AgentTool]:
             analyze_screen_execute,
         ),
     ]
-    if context.current_model_supports_images is False:
-        tools.insert(
-            0,
-            AgentTool("analyze_image", "图片分析", "把本轮附件图片或指定路径图片交给角色绑定的 Vision 服务分析。", {"type": "object", "properties": {"path": {"type": "string"}, "attachment_index": {"type": "number"}, "question": {"type": "string"}}}, analyze_image_execute),
-        )
+    tools.insert(
+        0,
+        AgentTool(
+            "analyze_image",
+            "图片分析",
+            "分析本轮附件或本机图片。path 支持绝对路径和 file:// URL；读取本机图片不受工作区限制。",
+            {"type": "object", "properties": {"path": {"type": "string"}, "attachment_index": {"type": "number"}, "question": {"type": "string"}}},
+            analyze_image_execute,
+        ),
+    )
     return tools

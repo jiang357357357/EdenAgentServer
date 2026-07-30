@@ -127,6 +127,52 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(messages, [{"role": "user", "content": "第一次请求"}, {"role": "user", "content": "重新请求"}])
 
+    def test_openai_messages_label_only_other_assistants(self):
+        messages = to_openai_messages(
+            {
+                "activeSpeaker": {"assistantID": 2, "assistantName": "助手 B"},
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "contextSpeaker": {"assistantID": 1, "assistantName": "助手 A"},
+                        "content": [{"type": "text", "text": "这是 A 的历史回复。"}],
+                    },
+                    {
+                        "role": "assistant",
+                        "contextSpeaker": {"assistantID": 2, "assistantName": "助手 B"},
+                        "content": [{"type": "text", "text": "这是 B 的历史回复。"}],
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(messages[0]["content"], "[助手 A] 这是 A 的历史回复。")
+        self.assertEqual(messages[1]["content"], "这是 B 的历史回复。")
+
+    def test_openai_messages_label_other_assistant_tool_call_without_extra_prompt(self):
+        messages = to_openai_messages(
+            {
+                "activeSpeaker": {"assistantID": 2, "assistantName": "助手 B"},
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "contextSpeaker": {"assistantID": 1, "assistantName": "助手 A"},
+                        "content": [
+                            {
+                                "type": "toolCall",
+                                "id": "switch-1",
+                                "name": "switch_session_assistant",
+                                "arguments": {"assistant_id": 2},
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(messages[0]["content"], "[助手 A]")
+        self.assertEqual(messages[0]["tool_calls"][0]["function"]["name"], "switch_session_assistant")
+
     def test_tool_result_image_is_forwarded_as_multimodal_context(self):
         messages = to_openai_messages(
             {

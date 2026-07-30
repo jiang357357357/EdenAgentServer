@@ -217,6 +217,39 @@ class SessionStore:
             ]
             return list(visible[-limit:])
 
+    def list_message_page(
+        self,
+        session_id: str,
+        *,
+        limit: int = 50,
+        before: str | None = None,
+        include_compactions: bool = False,
+    ) -> dict[str, Any]:
+        session = self.require_session(session_id)
+        page_size = min(max(int(limit), 1), 100)
+        with self._lock:
+            visible = [
+                message
+                for message in session["messages"]
+                if not is_hidden_message(message) or (include_compactions and message_compaction(message) is not None)
+            ]
+            end = len(visible)
+            if before:
+                cursor_index = next(
+                    (index for index, message in enumerate(visible) if str(message.get("info", {}).get("id")) == before),
+                    None,
+                )
+                if cursor_index is None:
+                    raise KeyError(f"Message cursor not found: {before}")
+                end = cursor_index
+            start = max(0, end - page_size)
+            items = visible[start:end]
+            return {
+                "items": deepcopy(items),
+                "hasMore": start > 0,
+                "nextCursor": str(items[0].get("info", {}).get("id")) if start > 0 and items else None,
+            }
+
     def hydrate_messages(
         self,
         session_id: str,

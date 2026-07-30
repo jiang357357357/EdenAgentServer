@@ -27,6 +27,9 @@ def message_content(blocks: Any) -> Any:
 
 def to_openai_messages(context: dict[str, Any]) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
+    active_speaker = context.get("activeSpeaker") if isinstance(context.get("activeSpeaker"), dict) else {}
+    active_assistant_id = active_speaker.get("assistantID")
+    handoff_from = context.get("handoffFrom") if isinstance(context.get("handoffFrom"), dict) else {}
     system_prompt = context.get("systemPrompt") or context.get("system_prompt")
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -52,6 +55,31 @@ def to_openai_messages(context: dict[str, Any]) -> list[dict[str, Any]]:
                 for block in content_blocks
                 if block.get("type") == "text" and str(block.get("text") or "").strip()
             )
+            context_speaker = (
+                message.get("contextSpeaker")
+                if isinstance(message.get("contextSpeaker"), dict)
+                else {}
+            )
+            if not context_speaker and any(
+                block.get("type") == "toolCall"
+                and block.get("name") == "switch_session_assistant"
+                for block in content_blocks
+            ):
+                context_speaker = handoff_from
+            speaker_id = context_speaker.get("assistantID")
+            speaker_name = str(
+                context_speaker.get("assistantName")
+                or context_speaker.get("characterName")
+                or ""
+            ).strip()
+            is_other_assistant = (
+                speaker_id is not None
+                and active_assistant_id is not None
+                and str(speaker_id) != str(active_assistant_id)
+            )
+            speaker_label = f"[{speaker_name or f'助手#{speaker_id}'}]"
+            if is_other_assistant:
+                text = f"{speaker_label} {text}".strip()
             tool_calls = []
             for block in content_blocks:
                 if block.get("type") == "toolCall":
@@ -65,7 +93,10 @@ def to_openai_messages(context: dict[str, Any]) -> list[dict[str, Any]]:
                             },
                         }
                     )
-            item: dict[str, Any] = {"role": "assistant", "content": text or None}
+            item: dict[str, Any] = {
+                "role": "assistant",
+                "content": text or (speaker_label if is_other_assistant else None),
+            }
             thinking_blocks = [
                 block
                 for block in content_blocks

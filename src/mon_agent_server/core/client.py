@@ -6,6 +6,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from typing import Any
 
 from ..ids import now_ms
@@ -100,6 +101,9 @@ class CoreClient:
         raw = self._request(f"/api/assistants/{urllib.parse.quote(str(assistant_id))}/", token)
         return raw if isinstance(raw, dict) else {}
 
+    def list_assistants(self, token: str) -> list[dict[str, Any]]:
+        return unwrap_results(self._request("/api/assistants/", token))
+
     def get_default_assistant(self, token: str) -> dict[str, Any]:
         raw = self._request("/api/assistants/default/", token)
         return raw if isinstance(raw, dict) else {}
@@ -142,6 +146,40 @@ class CoreClient:
 
     def list_character_visual_action_groups(self, token: str, character_id: int | str) -> list[dict[str, Any]]:
         return unwrap_results(self._request(f"/api/characters/{urllib.parse.quote(str(character_id))}/visual-action-groups/", token))
+
+    def list_character_stickers(self, token: str, character_id: int | str, query: str = "") -> list[dict[str, Any]]:
+        suffix = "?" + urllib.parse.urlencode({"enabled": "true", "q": query}) if query else "?enabled=true"
+        return unwrap_results(self._request(f"/api/characters/{urllib.parse.quote(str(character_id))}/stickers/{suffix}", token))
+
+    def create_character_sticker(self, token: str, character_id: int | str, fields: dict[str, Any],
+                                 filename: str, mime: str, image: bytes) -> dict[str, Any]:
+        boundary = "----MonAgent" + uuid.uuid4().hex
+        chunks: list[bytes] = []
+        for key, value in fields.items():
+            encoded = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
+            chunks.extend([f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{encoded}\r\n".encode()])
+        chunks.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"{filename}\"\r\nContent-Type: {mime}\r\n\r\n".encode())
+        chunks.extend([image, f"\r\n--{boundary}--\r\n".encode()])
+        request = urllib.request.Request(
+            f"{self.base_url}/api/characters/{urllib.parse.quote(str(character_id))}/stickers/",
+            data=b"".join(chunks),
+            headers={"accept":"application/json", "authorization":f"Token {token}",
+                     "content-type":f"multipart/form-data; boundary={boundary}"}, method="POST")
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return parse_json(response.read().decode()) or {}
+
+    def delete_character_sticker(
+        self,
+        token: str,
+        character_id: int | str,
+        sticker_id: int | str,
+    ) -> dict[str, Any]:
+        path = (
+            f"/api/characters/{urllib.parse.quote(str(character_id))}/stickers/"
+            f"{urllib.parse.quote(str(sticker_id))}/"
+        )
+        self._request(path, token, method="DELETE")
+        return {"deleted": True, "sticker_id": sticker_id}
 
     def sync_agent_session(self, token: str | None, session: dict[str, Any], core: dict[str, Any] | None = None) -> Any:
         if not token:
@@ -204,9 +242,27 @@ class CoreClient:
         info = session_from_map(session_map)
         message_maps = session_map.get("messages")
         if message_maps is None:
-            message_maps = unwrap_results(
-                self._request(f"/api/agent/sessions/{urllib.parse.quote(str(session_map['id']))}/messages/", token)
-            )
+            message_maps = []
+            before: str | None = None
+            while True:
+                params = {"limit": "100"}
+                if before:
+                    params["before"] = before
+                raw_messages = self._request(
+                    f"/api/agent/sessions/{urllib.parse.quote(str(session_map['id']))}/messages/"
+                    f"?{urllib.parse.urlencode(params)}",
+                    token,
+                )
+                if isinstance(raw_messages, dict) and isinstance(raw_messages.get("items"), list):
+                    message_maps = [*raw_messages["items"], *message_maps]
+                    if not raw_messages.get("has_more"):
+                        break
+                    before = str(raw_messages.get("next_cursor") or "") or None
+                    if not before:
+                        break
+                    continue
+                message_maps = unwrap_results(raw_messages)
+                break
         messages = sorted([message_from_map(item) for item in message_maps], key=lambda item: item["info"]["time"]["created"])
         model_events = session_map.get("session_events_payload")
         return {
@@ -428,6 +484,51 @@ class CoreClient:
 
     def mark_memo_triggered(self, token: str, memo_id: int) -> Any:
         return self._request(f"/api/memos/{urllib.parse.quote(str(memo_id))}/mark-triggered/", token, method="POST", payload={})
+
+    def remember_memory(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        raw = self._request("/api/agent/memories/remember/", token, method="POST", payload=payload)
+        return raw if isinstance(raw, dict) else {}
+
+    def list_memories(self, token: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        params = params or {}
+        limit = min(max(int(params.get("limit") or 20), 1), 100)
+        query = {
+            key: str(value).strip()
+            for key, value in params.items()
+            if key != "limit" and value not in (None, "")
+        }
+        raw = self._request(
+            f"/api/agent/memories/{'?' + urllib.parse.urlencode(query) if query else ''}",
+            token,
+        )
+        return unwrap_results(raw)[:limit]
+
+    def update_memory(self, token: str, memory_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        raw = self._request(
+            f"/api/agent/memories/{urllib.parse.quote(str(memory_id))}/",
+            token,
+            method="PATCH",
+            payload=payload,
+        )
+        return raw if isinstance(raw, dict) else {}
+
+    def forget_memory(self, token: str, memory_id: int) -> dict[str, Any]:
+        raw = self._request(
+            f"/api/agent/memories/{urllib.parse.quote(str(memory_id))}/forget/",
+            token,
+            method="POST",
+            payload={},
+        )
+        return raw if isinstance(raw, dict) else {}
+
+    def mark_memories_used(self, token: str, memory_ids: list[int]) -> dict[str, Any]:
+        raw = self._request(
+            "/api/agent/memories/mark-used/",
+            token,
+            method="POST",
+            payload={"ids": memory_ids},
+        )
+        return raw if isinstance(raw, dict) else {}
 
     def list_vision_configs(self, token: str) -> list[dict[str, Any]]:
         return unwrap_results(self._request("/api/vision/configs/", token))

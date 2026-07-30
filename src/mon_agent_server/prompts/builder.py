@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable
 
+from ..config.environment import current_time_context
 from ..skills.catalog import render_active_skill_instructions, render_skill_catalog
 from .attachments import attachment_context, dump_context
 from .parsers import fallback_self_awake_decision, parse_self_awake_decision, sanitize_self_awake_decision
@@ -161,6 +162,9 @@ def build_environment_awareness_section(environment: dict[str, Any] | None = Non
     locale = _clean_prompt_text(environment.get("locale"), 80)
     if timezone or locale:
         lines.append(f"时区：{timezone or '-'}，语言区域：{locale or '-'}")
+    clock = current_time_context(environment)
+    lines.append(f"当前本地时间：{clock['local_datetime']}（{clock['weekday']}，{clock['utc_offset']}）")
+    lines.append(f"当前 ISO 时间：{clock['iso_datetime']}")
     location = environment.get("location") if isinstance(environment.get("location"), dict) else {}
     location_text = " ".join(
         str(location.get(key) or "").strip()
@@ -217,12 +221,12 @@ def _build_skill_aware_tool_section(
     active_instructions = render_active_skill_instructions(active)
     if source == "self_awake":
         lines = [
-            "本轮工具采用按需技能机制；系统已经加载自醒和到期提醒技能，其他技能只在确实需要时通过 load_skill 读取。",
-            "后台自醒不等待用户，也不能调用尚未加载或不适合后台执行的能力。",
-            "每次后台自醒在输出最终 JSON 前必须且只能调用一次 notify_user；通知优先级、精准提醒内容和状态收尾以本轮任务协议为准。",
-            "除非上下文明确提供 due_memos_checked=true，否则最终 JSON 前至少调用一次 list_due_memos。",
-            "只有存在明确调试目标、事故日志或策略允许时才使用基础只读文件工具，不无目的浏览工作区。",
-            "工具被拒绝、拦截或失败后，根据结果调整判断，不重复调用完全相同的失败工具。",
+            "系统已经加载自醒和到期提醒技能；其他技能只在本轮目标确实需要时加载。",
+            "后台自醒不等待用户。先处理触发原因，再做必要观察，不无目的使用工具。",
+            "到期提醒、明确风险、用户期待的回访或值得关注的新进展可以通过 notify_user 告知用户；没有新信息时保持安静。每轮最多通知一次，具体通知和状态收尾遵循本轮任务协议。",
+            "除非上下文已经标记 due_memos_checked=true，否则输出最终 JSON 前检查一次到期提醒。",
+            "自醒轮次的下一次时间只写入最终 JSON 的 next_wake，不调用 set_self_awake_timer 与其竞争。",
+            "工具失败后根据结果调整判断，不重复完全相同的失败调用。",
         ]
     else:
         vision_instruction = (
@@ -235,6 +239,8 @@ def _build_skill_aware_tool_section(
             "read、ls、grep、find 用于当前工作区，工作区外使用对应的 external 工具。写入、编辑或执行开发命令前加载 workspace-development。",
             vision_instruction,
             "角色动作是可选表达；需要变化时从已提供的动作名称中选择并调用 switch_character_action，否则保持当前。",
+            "表情包是角色自然表达的一部分。用户明确要求时直接发送；闲聊、庆祝、安慰、调侃等场景中，如果存在贴合当前语气的表情包，可以主动发送。优先选择情绪和意图最匹配的内容；没有合适内容时不要勉强使用，并避免连续重复发送。",
+            "用户要求删除表情包时使用 delete_character_sticker；表情包与长期记忆是两个独立系统，不要用 remember_memory 或 forget_memory 代替表情包操作。",
             "缺少继续执行所必需的信息、需要用户选择或确认边界时，使用 ask_user 展示问题卡片；闲聊或不影响继续的小问题可以直接回复。",
             "工具被拒绝、拦截或失败后先调整方案，不重复调用完全相同的失败工具。",
         ]
@@ -258,19 +264,13 @@ def build_agent_tool_section(
     if source == "self_awake":
         return "\n".join(
             [
-                "本轮是后台自醒，唤醒上下文会保持很薄；你需要根据触发原因决定是否调用工具自己观察。",
-                "每次后台自醒在输出最终 JSON 前必须且只能调用一次 notify_user：普通自醒、日常状态和轻量进展使用 channel=auto、priority=normal，优先发 QQ；严重故障、安全或数据风险、重要截止事项使用 channel=auto、priority=high，优先发邮件。即使没有异常，也要用普通通知简短说明本轮观察结果。",
-                "每次后台自醒在输出最终 JSON 前，必须至少调用一次 list_due_memos 检查到期提醒；除非上下文明确提供 due_memos_checked=true。",
-                "需要了解自醒调度状态时，使用 get_self_awake_state；需要了解最近工作连续性时，先使用 list_self_awake_diaries 查看日记列表和工作记忆。",
-                "只有当某篇日记的标题、摘要或连续性线索与本轮判断相关时，才使用 read_self_awake_diary 读取完整正文。",
-                "需要确认到期提醒时，使用 list_due_memos，或使用 dispatch_due_memos 且 mark_dispatched=false 仅观察；下一次后台醒来时间只写入最终 JSON 的 next_wake，由 MonOs 统一调度。",
-                "需要判断节日、农历、纪念日或近期特殊日期时，使用 get_calendar_context；不要每次自醒都默认查询完整日历。",
-                "需要判断天气、温度、降水或出行影响时，使用 get_weather；不要每次自醒都默认查询天气。",
-                "没有明确调试目标、事故日志或策略允许时，不浏览工作区文件。",
-                "如果需要处理到期提醒，先调用 notify_user 主动通知用户；当前主动通知通道只有 QQ 和外部邮件，没有桌面通知。普通提醒与日常信息使用 priority=normal，由 auto 优先发 QQ；严重故障、安全或数据风险、重要截止事项使用 priority=high，由 auto 优先发邮件。",
-                "notify_user 成功后，再使用 mark_memo_triggered 标记对应提醒，避免重复提醒；普通一次性提醒会由工具自动完成并从进行中移走，待办和重复提醒只标记触发；不要在真实通知前使用 mark_dispatched=true。",
-                "后台自醒不等待用户；能用 notify_user 通知时就调用工具，仍需要用户参与但无法通知时，把意图写进最终 JSON 的 action 字段。",
-                "工具被拒绝、拦截或失败后，根据结果调整判断，不重复调用相同失败工具。",
+                "本轮是后台自醒。先处理触发原因，再按需要观察提醒、状态和连续工作线索。",
+                "到期提醒、明确风险、用户期待的回访或值得关注的新进展可以通过 notify_user 告知用户；没有新信息时保持安静。每轮最多通知一次。",
+                "普通事项使用 channel=auto、priority=normal；严重故障、安全或数据风险、重要截止事项使用 priority=high。",
+                "除非上下文已经标记 due_memos_checked=true，否则输出最终 JSON 前检查一次到期提醒；只观察时不要标记派发。",
+                "只有相关时才读取自醒日记、日历、天气或文件；不要无目的浏览。",
+                "下一次醒来时间只写入最终 JSON 的 next_wake，由 MonOs 统一调度，不调用 set_self_awake_timer。",
+                "通知和提醒状态收尾以本轮任务协议为准；工具失败后调整方案，不重复相同调用。",
             ]
         )
     vision_instruction = (
@@ -294,14 +294,17 @@ def build_agent_tool_section(
             "立绘动效从“无、上下跳动、向前靠近、向后退开、左右摇晃、连续弹跳、轻微上下浮动、快速颤抖、垂直震动、轻微下沉、强调放大”中选择，它用于让静态立绘整体运动。",
             "表情符号和立绘动效都是短暂演出；普通平静表达应自主选择“无”，明显情绪或反应时再选择符合语境的效果。",
             "如果系统提示提供的可用立绘动作不足以确定准确名称，先调用 list_character_actions 查看，再调用 switch_character_action。",
+            "表情包是角色自然表达的一部分。用户明确要求时直接发送；闲聊、庆祝、安慰、调侃等场景中，如果存在贴合当前语气的表情包，可以主动发送。优先选择情绪和意图最匹配的内容；没有合适内容时不要勉强使用，并避免连续重复发送。",
+            "用户要求删除表情包时使用 delete_character_sticker；表情包与长期记忆是两个独立系统，不要用 remember_memory 或 forget_memory 代替表情包操作。",
             "除非用户明确要求连续表演或动作测试，同一轮不要重复提交相同角色状态。",
             "你可以使用 ask_user 向用户确认关键信息；如果本轮任务声明为后台或非交互任务，不要调用 ask_user 等待用户。",
             "你可以使用 create_memo/create_reminder/list_memos/complete_memo/archive_memo/snooze_memo 管理用户备忘录、提醒和待办；当用户说“提醒我”“记一下”“待办”时优先使用这些工具。",
+            "长期记忆与备忘录不同：用户明确要求跨会话记住稳定偏好、事实、决策或流程时使用 remember_memory；需要查找更多历史细节时使用 search_memories；用户要求修正或遗忘时使用 update_memory 或 forget_memory。不要保存密码、密钥、临时进度或未经确认的猜测。",
             "你可以使用 notify_user 主动通知当前用户，通道只有 QQ 和外部邮件；channel=auto 时，priority=high 的重要事件优先发邮件，其他普通事件优先使用默认 QQBot/超级管理员。首选通道失败时会自动回退。",
             "你可以使用 list_due_memos 查询已到期提醒，使用 get_next_memo_wake 取得下一次提醒唤醒时间；dispatch_due_memos 仅在需要批量取出到期项时使用。",
             "到期提醒必须先确认已经 notify_user 成功或已经对用户产生真实提醒，再使用 mark_memo_triggered 或 dispatch_due_memos 的 mark_dispatched 标记，避免后台重复提醒。普通一次性 reminder 使用 mark_memo_triggered 后会自动完成；todo 或重复提醒不会自动完成，除非用户明确表示完成。",
             "当用户要求给自己发送 QQ 消息，但没有指定 QQBot、好友或群聊时，直接调用 send_qq_message 并省略 bot_id、target_type、target_qq_number；工具会使用默认 QQBot 和超级管理员。content 是必填文本内容；用户未指定消息内容时，不要默认追问，除非用户明确要求确认措辞、收件人或任务风险较高，否则根据当前意图、角色语气和上下文自己生成合适正文；不能发送固定默认消息。",
-            "你可以使用 set_self_awake_timer 安排 MonOs 自醒或后续后台检查；它负责让系统未来醒来，不等同于保存用户备忘录。",
+            "需要稍后继续观察、检查进展或主动回访用户时，可以使用 set_self_awake_timer 安排后台自醒。用户要求在明确时间收到提醒时使用 create_reminder；两者不要混用。",
             "当任务缺少继续执行所必需的信息、需要用户在多个方案中选择、或继续执行前需要确认边界时，必须调用 ask_user 展示问题卡片等待用户回答；不要只在正文里询问。",
             "调用 ask_user 时，问题、标题和选项都使用中文；能列出选项时给出 2 到 4 个清晰选项，并保留用户自定义回答的空间。",
             "只有闲聊、反问式表达或不影响继续执行的小问题，才可以直接写在回复正文里。",
@@ -322,6 +325,7 @@ def build_agent_system_prompt(
     active_skill_ids: Iterable[str] | None = None,
     skill_resource_prompt: str | None = None,
     delegation_mode: str = "auto",
+    relevant_memories: list[dict[str, Any]] | None = None,
 ) -> str:
     character = (core or {}).get("character")
     sections = [
@@ -331,6 +335,23 @@ def build_agent_system_prompt(
     assistant_context = build_assistant_context_section(core)
     if assistant_context:
         sections.extend(["# 助手配置", assistant_context])
+    memories = [
+        str(item.get("content") or "").strip()
+        for item in (relevant_memories or [])
+        if isinstance(item, dict) and str(item.get("content") or "").strip()
+    ]
+    if memories:
+        sections.extend(
+            [
+                "# 相关长期记忆",
+                "\n".join(
+                    [
+                        "以下是运行时召回的历史信息，仅在与当前请求相关时参考；若与用户当前陈述冲突，以当前陈述为准。",
+                        *[f"- {text}" for text in memories],
+                    ]
+                ),
+            ]
+        )
     environment_context = build_environment_awareness_section(environment)
     if environment_context:
         sections.extend(["# 当前环境感知", environment_context])
@@ -368,13 +389,13 @@ def build_agent_system_prompt(
             "# 智能体原则",
             "\n".join(
                 [
-                    "你是同一个持续运行的智能体；用户聊天、系统自醒、定时任务只是不同事件来源，不是不同人格。",
+                    "同一助手跨事件保持连续；带姓名标签的历史发言属于其他助手，不要当作自己的经历；回复正文直接开始，不要用自己的姓名署名。",
                     "你需要根据本轮任务来源判断该直接回复、使用工具、安排后续任务，还是保持安静观察。",
                     "不要伪造工具结果。需要实时信息、文件内容、图片判断或后续定时动作时，应使用对应工具。",
                     (
-                        "本轮是系统自醒时，每次都要向用户发送一次简短通知；普通状态走 QQ，重要事件走邮件。"
+                        "本轮是系统自醒时，只在到期提醒、明确风险、用户期待的回访或值得关注的新进展出现时通知用户；其他情况保持安静。"
                         if source == "self_awake"
-                        else "除非本轮任务、用户设定的提醒或明确风险需要，否则不要主动通知用户。"
+                        else "保持自然且克制的主动性：有未完成的承诺、用户期待的回访或值得关注的新变化时，可以安排后续自醒或主动通知；没有新价值、只是重复状态或可能造成打扰时保持安静。"
                     ),
                 ]
             ),
@@ -412,14 +433,14 @@ def build_self_awake_task_prompt(context: dict[str, Any] | None = None) -> str:
             "触发事件以当前观察上下文中的 event 为准：type=startup 表示服务重启自醒，scheduled 表示定时到点，manual 表示人工触发，retry 表示失败后的重试；不要把它们混写成同一种事件。",
             "把这次醒来当作短暂后台自检：先读薄唤醒上下文，再按需要调用工具观察提醒、自醒状态和最近自醒历史。",
             "当前观察上下文中的 user_activity 是桌面端上报的原始事实快照，不是行为判断：先看 captured_at 判断新鲜度；null、available=false 和 collection_errors 只表示相应事实不可用，不要把它们推断成用户离开、空闲或正在进行某类工作。",
-            "每次自醒都必须且只能调用一次 notify_user。没有异常时也发送一条简短的普通状态通知，使用 channel=auto、priority=normal，由 QQ 优先送达；只有严重故障、安全或数据风险、重要截止事项才使用 priority=high，由邮件优先送达。",
+            "只有出现到期提醒、明确风险、用户期待的回访或值得关注的新进展时才调用 notify_user；没有新信息时保持安静并记录日记。每轮最多通知一次。普通事项使用 channel=auto、priority=normal；只有严重故障、安全或数据风险、重要截止事项才使用 priority=high。",
             (
                 "MonOs 已完成到期查询并在 context.memo/context.due_memos 中提供了精确任务；不要再调用 list_due_memos 重复查询。"
                 if due_memos_checked
                 else "最终 JSON 前必须至少调用一次 list_due_memos 检查到期提醒；如果返回有到期项，需要按优先级决定是否 notify_user。"
             ),
             (
-                "本轮是 memo_due 精准唤醒：必须把 context.memo 和 context.due_memos 视为唤醒原因，通知文字必须明确说出到期任务标题与内容，不得改成泛化的系统自检通知。调用 notify_user 时使用 source_type=memo，source_id 使用主提醒 id。通知成功后的 mark-triggered 和一次性提醒完成由运行时统一处理；不要调用 mark_memo_triggered、complete_memo、archive_memo 或 snooze_memo。"
+                "本轮是 memo_due 精准唤醒：必须通知用户，并明确说出到期任务标题与内容，不得改成泛化的系统自检通知。调用 notify_user 时使用 source_type=memo，source_id 使用主提醒 id。通知成功后的状态回写由运行时统一处理；不要调用 mark_memo_triggered、complete_memo、archive_memo 或 snooze_memo。"
                 if memo_due
                 else "本轮不是 memo_due 精准唤醒，按普通自醒规则处理。"
             ),
@@ -427,10 +448,10 @@ def build_self_awake_task_prompt(context: dict[str, Any] | None = None) -> str:
             "需要延续之前工作线索时，先看 list_self_awake_diaries 的标题、摘要、标签和 continuity_key，再选择是否 read_self_awake_diary。",
             "当前观察上下文包含本地时区、城市、日期和当天节日摘要；只有节日细节或未来节日会影响判断时才调用 get_calendar_context，只有天气会影响提醒、出行或判断时才调用 get_weather。",
             "只有出现明确调试目标、事故日志或待核验文件时，才使用文件工具补充观察；把建议的下次醒来时间写入最终 JSON 的 next_wake，由 MonOs 统一调度。",
-            "发现到期提醒或明确风险时，先用 notify_user 通知用户；普通提醒、日常信息和轻量进展使用 priority=normal，由 auto 优先发 QQ；严重故障、安全或数据风险、重要截止事项使用 priority=high，由 auto 优先发邮件。不要把普通事项提升为 high。通知成功后再 mark_memo_triggered。普通一次性提醒会由工具自动完成并离开进行中列表；待办和重复提醒保持进行中。当前没有桌面通知。",
+            "需要通知时，普通提醒和轻量进展使用 priority=normal；严重故障、安全或数据风险、重要截止事项使用 priority=high。不要把普通事项提升为 high。提醒状态如何收尾以本轮事件协议为准；当前没有桌面通知。",
             "observations 写 2 到 5 条事实；diary 写角色自己的工作日记，可以分段、有角色语气和细微情绪，但必须基于 observations 和工具结果。",
             "工作日记、动作说明和面向用户的文字不要使用角色设定之外的昵称或自称。",
-            "后台自醒不等待用户；通知发送失败时，在最终 JSON 的 action.payload 中记录失败原因，不要重复调用 notify_user。",
+            "后台自醒不等待用户；通知发送失败时，在最终 JSON 的 action.payload 中记录失败原因，不要重复调用。",
             "should_interrupt_user 表示本轮是否属于需要打断用户注意力的重要事件；普通 QQ 自醒状态通知仍可保持 false，重要邮件通知应设为 true。",
             "最终回复只包含一个 JSON 对象，不要 Markdown 或额外解释。",
             "动作只能使用：observe_only、write_diary、remind_user、create_task、ask_user、run_safe_check、sync_context。",

@@ -14,7 +14,12 @@ def error_message(status: int, reason: str, text: str) -> str:
     try:
         data = json.loads(text)
         if isinstance(data, dict):
-            return str(data.get("error") or data.get("detail") or data.get("message") or f"{status} {reason}")
+            return str(
+                data.get("error")
+                or data.get("detail")
+                or data.get("message")
+                or data
+            )
     except Exception:
         pass
     return f"{status} {reason}"

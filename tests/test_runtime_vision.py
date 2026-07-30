@@ -6,6 +6,7 @@ from unittest.mock import Mock
 from mon_agent_server.core import CoreClient
 from mon_agent_server.runtime.config import RuntimeModelConfig
 from mon_agent_server.runtime.manager import MonAgentRuntime
+from mon_agent_server.runtime.messages import images_from_parts
 
 
 class FakeVisionCoreClient:
@@ -171,6 +172,20 @@ class AutomaticVisionRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(context, "")
         self.assertEqual(core_client.calls, [])
+
+    async def test_local_file_attachment_becomes_multimodal_content(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "本地图片.jpg"
+            image_path.write_bytes(b"local-jpeg-content")
+            images = images_from_parts([
+                {"type": "file", "filename": image_path.name, "mime": "image/jpeg", "url": image_path.as_uri()}
+            ])
+
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0]["mimeType"], "image/jpeg")
+        self.assertEqual(base64.b64decode(images[0]["data"]), b"local-jpeg-content")
 
     async def test_non_multimodal_model_requires_character_vision_binding(self):
         runtime = self.create_runtime(FakeVisionCoreClient())

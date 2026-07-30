@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from mon_agent_core.harness.compaction import estimate_context_tokens
@@ -8,6 +9,20 @@ from ..core import CoreAuthenticationExpiredError
 from ..ids import create_id, now_ms
 from .messages import text_from_tool_result
 from .state import RunState
+
+
+def strip_current_speaker_prefix(text: str, speaker: dict[str, Any] | None) -> str:
+    names = {
+        str((speaker or {}).get(key) or "").strip()
+        for key in ("assistantName", "characterName")
+        if str((speaker or {}).get(key) or "").strip()
+    }
+    for name in sorted(names, key=len, reverse=True):
+        pattern = rf"^\s*(?:\[{re.escape(name)}\]|【{re.escape(name)}】|{re.escape(name)}\s*[：:])\s*"
+        cleaned = re.sub(pattern, "", text, count=1)
+        if cleaned != text:
+            return cleaned
+    return text
 
 
 def runtime_error_summary(error: Any) -> str:
@@ -174,6 +189,13 @@ class RuntimeEmitterMixin:
                 self.emit_tool_part(session_id, run_state.assistant_message_id, call_id, tool_name, state)
 
     def upsert_assistant(self, session_id: str, message: dict[str, Any], run_state: RunState, done: bool) -> None:
+        for block in message.get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "text":
+                block["text"] = strip_current_speaker_prefix(
+                    str(block.get("text") or ""),
+                    run_state.speaker,
+                )
+                break
         message_id = run_state.assistant_message_id or create_id("msg")
         created = run_state.assistant_created_at or message.get("timestamp") or now_ms()
         run_state.assistant_message_id = message_id

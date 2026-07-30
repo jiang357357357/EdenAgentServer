@@ -4,6 +4,31 @@ from mon_agent_server.store import SessionStore
 
 
 class StoreTest(unittest.TestCase):
+    def test_message_pages_walk_backwards_without_duplicates(self):
+        store = SessionStore()
+        session = store.create_session("")
+        store.hydrate_messages(
+            session["id"],
+            [
+                {
+                    "info": {"id": f"msg_{index}", "role": "user", "time": {"created": index + 1, "completed": index + 1}},
+                    "parts": [],
+                }
+                for index in range(7)
+            ],
+        )
+
+        first = store.list_message_page(session["id"], limit=3)
+        second = store.list_message_page(session["id"], limit=3, before=first["nextCursor"])
+        third = store.list_message_page(session["id"], limit=3, before=second["nextCursor"])
+
+        self.assertEqual([item["info"]["id"] for item in first["items"]], ["msg_4", "msg_5", "msg_6"])
+        self.assertEqual([item["info"]["id"] for item in second["items"]], ["msg_1", "msg_2", "msg_3"])
+        self.assertEqual([item["info"]["id"] for item in third["items"]], ["msg_0"])
+        self.assertTrue(first["hasMore"])
+        self.assertTrue(second["hasMore"])
+        self.assertFalse(third["hasMore"])
+
     def test_core_refresh_does_not_regress_terminal_subagent_state(self):
         store = SessionStore()
         session = store.create_session("")

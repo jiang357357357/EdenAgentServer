@@ -11,6 +11,14 @@ from typing import Any, Callable
 _AGENT_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh"}
 _SANDBOX_MODES = {"inherit", "read-only", "workspace-write"}
+STICKER_TOOL_NAMES = frozenset(
+    {
+        "list_character_stickers",
+        "remember_character_sticker",
+        "send_character_sticker",
+        "delete_character_sticker",
+    }
+)
 
 # Read-only is a mechanical allow-list, not merely a prompt instruction.  New
 # mutation-capable tools therefore remain unavailable until explicitly audited.
@@ -40,6 +48,7 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "list_memos",
         "list_due_memos",
         "get_next_memo_wake",
+        "search_memories",
         "external_email_status",
         "qq_bot_list",
         "qq_bot_targets",
@@ -148,7 +157,7 @@ class SubagentToolPolicy:
                 effective_allow = effective_allow.intersection(configured_allow)
         else:
             effective_allow = configured_allow
-        return cls(mode, effective_allow, frozenset(denied_tools))
+        return cls(mode, effective_allow, frozenset(denied_tools).union(STICKER_TOOL_NAMES))
 
     def allows(self, tool_name: str) -> bool:
         name = str(tool_name or "")
@@ -181,7 +190,9 @@ class SubagentToolPolicy:
         raw_allowed = payload.get("allowedTools")
         allowed = frozenset(str(item) for item in raw_allowed) if isinstance(raw_allowed, list) else None
         raw_denied = payload.get("deniedTools")
-        denied = frozenset(str(item) for item in raw_denied) if isinstance(raw_denied, list) else frozenset()
+        denied = (
+            frozenset(str(item) for item in raw_denied) if isinstance(raw_denied, list) else frozenset()
+        ).union(STICKER_TOOL_NAMES)
         mode = str(payload.get("sandboxMode") or "inherit")
         if mode not in _SANDBOX_MODES:
             mode = "inherit"
@@ -357,11 +368,13 @@ def build_subagent_system_prompt(
     skill_prompt: str,
     tool_policy: SubagentToolPolicy | None = None,
     budget: SubagentBudget | None = None,
+    environment: dict[str, Any] | None = None,
 ) -> str:
+    from ..prompts.builder import build_environment_awareness_section
+
     effective_policy = tool_policy or definition.tool_policy
     effective_budget = budget or definition.budget
-    return "\n\n".join(
-        [
+    sections = [
             "# 身份",
             (
                 f"你是 MonAgent 的后台任务智能体，路径为 {agent_path}，任务角色为 {definition.name}。\n"
@@ -390,7 +403,10 @@ def build_subagent_system_prompt(
             "# 技能与工具",
             skill_prompt or "按需使用当前提供的基础只读工具。",
         ]
-    )
+    environment_prompt = build_environment_awareness_section(environment)
+    if environment_prompt:
+        sections.extend(["# 当前环境感知", environment_prompt])
+    return "\n\n".join(sections)
 
 
 def resolve_subagent_role(name: Any) -> SubagentDefinition:

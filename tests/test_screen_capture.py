@@ -2,6 +2,7 @@ import base64
 import threading
 import time
 import unittest
+import tempfile
 from pathlib import Path
 
 from mon_agent_server.brokers import ScreenCaptureBroker
@@ -79,13 +80,31 @@ class ScreenCaptureBrokerTest(unittest.TestCase):
 
 
 class AnalyzeScreenToolTest(unittest.IsolatedAsyncioTestCase):
-    async def test_multimodal_model_does_not_expose_analyze_image(self):
+    async def test_multimodal_model_exposes_analyze_image_for_local_paths(self):
         tools = create_vision_tools(
             Path.cwd(),
             MonToolContext(current_model_supports_images=True),
         )
 
-        self.assertEqual([tool.name for tool in tools], ["analyze_screen"])
+        self.assertEqual([tool.name for tool in tools], ["analyze_image", "analyze_screen"])
+
+    async def test_multimodal_model_reads_file_url_outside_workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "贴图.gif"
+            image_path.write_bytes(b"GIF89a-test")
+            tools = create_vision_tools(
+                Path.cwd(),
+                MonToolContext(current_model_supports_images=True),
+            )
+
+            result = await tool_by_name(tools, "analyze_image").run(
+                "tool-local-image",
+                {"path": image_path.as_uri(), "question": "分析这个表情包"},
+            )
+
+            self.assertEqual(result["content"][1]["type"], "image")
+            self.assertEqual(result["content"][1]["mimeType"], "image/gif")
+            self.assertEqual(result["details"]["source"], str(image_path))
 
     async def test_text_model_exposes_analyze_image_fallback(self):
         tools = create_vision_tools(

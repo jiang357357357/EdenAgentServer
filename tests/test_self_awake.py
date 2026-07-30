@@ -436,11 +436,12 @@ class SelfAwakePromptTest(unittest.TestCase):
 
         self.assertEqual(prompt, "你好")
 
-    def test_self_awake_prompt_requires_exactly_one_notification(self):
+    def test_self_awake_prompt_uses_value_based_notification(self):
         prompt = build_self_awake_task_prompt({"trigger": "test"})
 
-        self.assertIn("每次自醒都必须且只能调用一次 notify_user", prompt)
-        self.assertIn("没有异常时也发送一条简短的普通状态通知", prompt)
+        self.assertIn("只有出现到期提醒、明确风险、用户期待的回访或值得关注的新进展时才调用 notify_user", prompt)
+        self.assertIn("没有新信息时保持安静并记录日记", prompt)
+        self.assertIn("每轮最多通知一次", prompt)
         self.assertIn("priority=normal", prompt)
         self.assertIn("priority=high", prompt)
         self.assertIn("user_activity 是桌面端上报的原始事实快照，不是行为判断", prompt)
@@ -804,7 +805,7 @@ class SelfAwakeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["notification"]["succeeded"])
         self.assertEqual(result["notification"]["error"], "")
 
-    async def test_runtime_enforces_normal_qq_notification_when_agent_omits_it(self):
+    async def test_runtime_keeps_quiet_when_agent_decides_to_only_write_diary(self):
         decision = {
             "mood": "平静",
             "current_desire": "继续观察",
@@ -819,10 +820,10 @@ class SelfAwakeTest(unittest.IsolatedAsyncioTestCase):
         with patch("mon_agent_server.self_awake.runner.create_mon_agent_tools", return_value=[notify_tool]):
             notification = await ensure_self_awake_notification(FakeApp(), "token-1", {}, decision)
 
-        self.assertTrue(notification["succeeded"])
-        self.assertEqual(notification["source"], "runtime_enforced")
-        self.assertEqual(notification["delivered_channels"], ["qq"])
-        self.assertEqual(notify_tool.calls[0][1]["priority"], "normal")
+        self.assertFalse(notification["attempted"])
+        self.assertFalse(notification["succeeded"])
+        self.assertEqual(notification["source"], "quiet_decision")
+        self.assertEqual(notify_tool.calls, [])
 
     async def test_runtime_enforces_important_email_notification(self):
         decision = {

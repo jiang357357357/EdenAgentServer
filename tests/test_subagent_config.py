@@ -182,6 +182,7 @@ class SubagentToolPolicyTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("read", names)
         self.assertIn("external_find", names)
+        self.assertIn("search_memories", names)
         self.assertIn("spawn_agent", names)
         self.assertNotIn("write", names)
         self.assertNotIn("edit", names)
@@ -189,6 +190,9 @@ class SubagentToolPolicyTest(unittest.IsolatedAsyncioTestCase):
 
         runtime.load(["memo-management"])
         self.assertNotIn("create_memo", {tool.name for tool in runtime.active_tools()})
+        self.assertNotIn("remember_memory", names)
+        self.assertNotIn("update_memory", names)
+        self.assertNotIn("forget_memory", names)
 
         host = object.__new__(MonAgentRuntime)
         hook = host._before_tool_call(
@@ -213,6 +217,26 @@ class SubagentToolPolicyTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(effective.allows("read"))
         self.assertFalse(effective.allows("write"))
         self.assertFalse(effective.allows("bash"))
+
+    def test_all_subagent_modes_deny_every_sticker_tool(self) -> None:
+        sticker_tools = {
+            "list_character_stickers",
+            "remember_character_sticker",
+            "send_character_sticker",
+            "delete_character_sticker",
+        }
+        for mode in ("inherit", "read-only", "workspace-write"):
+            policy = SubagentToolPolicy.create(mode, allowed_tools=tuple(sticker_tools))
+            self.assertTrue(sticker_tools.isdisjoint(
+                {name for name in sticker_tools if policy.allows(name)}
+            ))
+
+        restored = SubagentToolPolicy.from_payload({
+            "sandboxMode": "inherit",
+            "allowedTools": None,
+            "deniedTools": [],
+        })
+        self.assertTrue(all(not restored.allows(name) for name in sticker_tools))
 
     def test_spawn_schema_uses_runtime_catalog_names(self) -> None:
         tools = create_subagent_tools(

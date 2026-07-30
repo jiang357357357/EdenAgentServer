@@ -32,10 +32,12 @@ from mon_agent_core.harness.session.session import build_session_context
 
 from ..brokers import PermissionBroker, QuestionBroker, ScreenCaptureBroker
 from ..core import CoreAuthenticationExpiredError, CoreClient
+from ..core.serializers import session_from_map
 from ..events import EventBus
 from ..ids import create_id, now_ms
 from ..logging import get_logger
 from ..model_stream import core_model, env_model, stream_openai_compatible
+from ..memory import extract_turn_memories
 from ..prompts import attachment_context, build_agent_system_prompt
 from ..skills import create_skill_runtime, owner_storage_key
 from ..store import SessionStore, SubagentThreadRepository
@@ -1356,6 +1358,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     skill_prompt=skill_runtime.prompt_section(),
                     tool_policy=tool_policy,
                     budget=budget,
+                    environment=environment,
                 )
 
             permission_hook = self._before_tool_call(
@@ -1405,9 +1408,18 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     get_api_key=lambda _provider: runtime_config.api_key,
                     before_tool_call=budgeted_before_tool_call,
                     should_stop_after_turn=should_stop_after_turn,
-                    prepare_next_turn_with_context=lambda turn, _signal: skill_runtime.prepare_next_turn(
-                        turn, system_prompt_for
-                    ),
+                    prepare_next_turn_with_context=lambda turn, _signal: {
+                        **(skill_runtime.prepare_next_turn(turn, system_prompt_for) or {}),
+                        "context": {
+                            **turn["context"],
+                            "systemPrompt": system_prompt_for(skill_runtime.active_skill_ids),
+                            "tools": [
+                                tool
+                                for tool in skill_runtime.active_tools()
+                                if tool.name not in blocked_tools
+                            ],
+                        },
+                    },
                 )
             )
             holder["agent"] = agent
@@ -1616,6 +1628,116 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             if character_id is not None
             else []
         )
+        continuation = {
+            "config": runtime_config,
+            "relevantMemories": [],
+            "handoffFrom": None,
+        }
+        synced_core_message_ids: set[str] = set()
+
+        def append_assistant_part(payload: dict[str, Any]) -> dict[str, Any]:
+            message_id = run_state.assistant_message_id
+            if not message_id:
+                raise RuntimeError("当前助手消息尚未建立，无法追加消息内容。")
+            part = {
+                "id": create_id(str(payload.get("type") or "part")),
+                "messageID": message_id,
+                "sessionID": session_id,
+                **payload,
+            }
+            self.emit_part(session_id, part)
+            return part
+
+        async def switch_session_assistant(assistant_id: int | str) -> dict[str, Any]:
+            if not auth_token:
+                raise RuntimeError("切换会话助手需要有效的 Core 登录态。")
+            next_config = await self._resolve_runtime_config(auth_token, assistant_id)
+            assistant = (next_config.core or {}).get("assistant") if next_config.core else {}
+            if assistant.get("id") is None:
+                raise ValueError(f"助手 {assistant_id} 不存在或当前用户无权访问。")
+            participant = self._participant_from_core(
+                {
+                    "assistant": assistant,
+                    "character": assistant.get("character") if isinstance(assistant.get("character"), dict) else {},
+                }
+            )
+            visible_messages = self.store.list_messages(
+                session_id,
+                limit=10_000,
+                include_compactions=True,
+            )
+            messages_by_id = {
+                item["info"]["id"]: item
+                for item in visible_messages
+                if item.get("info", {}).get("id")
+            }
+            for message_id in run_state.assistant_message_ids:
+                if message_id in synced_core_message_ids:
+                    continue
+                current_message = messages_by_id.get(message_id)
+                if current_message:
+                    await self.sync_core_message(
+                        session_id,
+                        current_message,
+                        auth_token,
+                        continuation["config"].core,
+                    )
+                    synced_core_message_ids.add(message_id)
+            session_info = self.store.update_participants(session_id, [participant])
+            mapped = await asyncio.to_thread(
+                self.core_client.update_agent_session_participants,
+                auth_token,
+                session_info,
+                [assistant["id"]],
+            )
+            info = self.store.upsert_session_info(session_from_map(mapped))
+            self.events.emit(
+                {
+                    "type": "session.updated",
+                    "properties": {"sessionID": session_id, "info": info},
+                }
+            )
+            next_character = (next_config.core or {}).get("character") if next_config.core else None
+            next_character_id = next_character.get("id") if isinstance(next_character, dict) else None
+            next_action = self.store.get_character_action(session_id, next_character_id)
+            if not next_action:
+                next_action = _default_character_action_state(session_id, next_character)
+                if next_action:
+                    self.store.set_character_action(session_id, next_action, record_history=False)
+            next_memories: list[dict[str, Any]] = []
+            if actor_user_text.strip():
+                try:
+                    next_memories = await asyncio.to_thread(
+                        self.core_client.list_memories,
+                        auth_token,
+                        {
+                            "q": actor_user_text[:1000],
+                            "assistant": assistant["id"],
+                            "status": "active",
+                            "limit": 5,
+                        },
+                    )
+                except Exception:
+                    logger.exception(
+                        "助手切换后的长期记忆召回失败: session={} assistant={}",
+                        session_id,
+                        assistant["id"],
+                    )
+            continuation["config"] = next_config
+            continuation["relevantMemories"] = next_memories
+            continuation["handoffFrom"] = dict(run_state.speaker)
+            tool_context.current_model_supports_images = next_config.supports_images
+            tool_context.vision_config = (next_config.core or {}).get("visionConfig") if next_config.core else None
+            tool_context.character = next_character
+            tool_context.current_character_action = next_action
+            run_state.speaker = participant
+            return {
+                "assistant": assistant,
+                "session": info,
+                "historyPreserved": True,
+                "effectiveFrom": "next_model_continuation",
+            }
+
         tool_context = MonToolContext(
             session_id=session_id,
             core_client=self.core_client,
@@ -1632,6 +1754,8 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             set_character_action=lambda state: self.store.set_character_action(session_id, state),
             get_message_id=lambda: run_state.assistant_message_id,
             get_current_files=lambda: files,
+            append_assistant_part=append_assistant_part,
+            switch_session_assistant=switch_session_assistant,
             agent_path="/root",
             permission_mode=(
                 self.permissions.mode_for_session(session_id)
@@ -1691,6 +1815,38 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     f"用户请求了未知技能：{', '.join(explicit_skill['unknown'])}。"
                     f"当前可用技能：{', '.join(explicit_skill['available'])}。"
                 )
+        relevant_memories: list[dict[str, Any]] = []
+        if auth_token and actor_user_text.strip():
+            try:
+                relevant_memories = await asyncio.to_thread(
+                    self.core_client.list_memories,
+                    auth_token,
+                    {
+                        "q": actor_user_text[:1000],
+                        "assistant": beat.assistant_id,
+                        "status": "active",
+                        "limit": 5,
+                    },
+                )
+                bounded_memories: list[dict[str, Any]] = []
+                memory_chars = 0
+                for memory in relevant_memories:
+                    content = str(memory.get("content") or "") if isinstance(memory, dict) else ""
+                    if not content or memory_chars + len(content) > 4_000:
+                        continue
+                    bounded_memories.append(memory)
+                    memory_chars += len(content)
+                relevant_memories = bounded_memories
+                continuation["relevantMemories"] = relevant_memories
+                memory_ids = [
+                    int(item["id"])
+                    for item in relevant_memories
+                    if isinstance(item, dict) and str(item.get("id") or "").isdigit()
+                ]
+                if memory_ids:
+                    await asyncio.to_thread(self.core_client.mark_memories_used, auth_token, memory_ids)
+            except Exception:
+                logger.exception("长期记忆召回失败，当前回合将不注入记忆: session={}", session_id)
         tools = skill_runtime.active_tools()
         attachment_details = attachment_context(files, runtime_config.supports_images)
         if not runtime_config.supports_images:
@@ -1716,22 +1872,25 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         )
 
         def system_prompt_for(active_skill_ids: tuple[str, ...]) -> str:
+            active_config = continuation["config"]
+            active_core = active_config.core
+            active_character = (active_core or {}).get("character") if active_core else None
+            active_character_id = active_character.get("id") if isinstance(active_character, dict) else None
             return build_agent_system_prompt(
-                runtime_config.core,
+                active_core,
                 source="user_chat",
-                current_character_action=(
-                    self.store.get_character_action(session_id, character_id) or current_character_action
-                ),
+                current_character_action=self.store.get_character_action(session_id, active_character_id),
                 recent_character_actions=(
-                    self.store.get_character_action_history(session_id, character_id)
-                    if character_id is not None
-                    else recent_character_actions
+                    self.store.get_character_action_history(session_id, active_character_id)
+                    if active_character_id is not None
+                    else []
                 ),
-                supports_images=runtime_config.supports_images,
+                supports_images=active_config.supports_images,
                 environment=environment,
                 active_skill_ids=active_skill_ids,
                 skill_resource_prompt=skill_runtime.prompt_section(),
-                delegation_mode=runtime_config.delegation_policy.mode,
+                delegation_mode=active_config.delegation_policy.mode,
+                relevant_memories=continuation["relevantMemories"],
             )
 
         agent_messages = await self.compact_agent_messages_if_needed(
@@ -1752,16 +1911,77 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             )
             if not isinstance(current_context, dict):
                 return skill_update
+            # 时间是易变的运行时事实。每次工具循环继续请求模型前都重建提示词，
+            # 同时覆盖技能加载或上下文压缩后携带的旧时间。
+            current_context = {
+                **current_context,
+                "systemPrompt": system_prompt_for(skill_runtime.active_skill_ids),
+                "tools": skill_runtime.active_tools(),
+                "activeSpeaker": run_state.speaker,
+            }
+            active_config = continuation["config"]
+            skill_update = {
+                **(skill_update or {}),
+                "context": current_context,
+                "model": active_config.model,
+                "thinkingLevel": active_config.thinking_level,
+            }
             tool_results = turn.get("toolResults")
             if not isinstance(tool_results, list) or not tool_results:
                 return skill_update
+            switched_assistant = any(
+                isinstance(result, dict)
+                and result.get("toolName") == "switch_session_assistant"
+                for result in tool_results
+            )
+            if switched_assistant and isinstance(continuation.get("handoffFrom"), dict):
+                previous_speaker = dict(continuation["handoffFrom"])
+                current_context["handoffFrom"] = previous_speaker
+                turn_message = turn.get("message")
+                if isinstance(turn_message, dict):
+                    turn_message["contextSpeaker"] = previous_speaker
+                current_messages = current_context.get("messages")
+                if isinstance(current_messages, list):
+                    tool_call_ids = {
+                        str(result.get("toolCallId"))
+                        for result in tool_results
+                        if isinstance(result, dict) and result.get("toolCallId")
+                    }
+                    for message in reversed(current_messages):
+                        message_tool_call_ids = {
+                            str(block.get("id"))
+                            for block in (message.get("content") or [])
+                            if isinstance(block, dict)
+                            and block.get("type") == "toolCall"
+                            and block.get("id")
+                        }
+                        if message is turn_message or tool_call_ids.intersection(message_tool_call_ids):
+                            message["contextSpeaker"] = previous_speaker
+                            break
+            if any(
+                isinstance(result, dict) and result.get("toolName") == "load_skill"
+                for result in tool_results
+            ):
+                # Rebuild from the authoritative skill runtime even when a host
+                # wrapper consumed the revision marker before this callback.
+                # This guarantees newly loaded capabilities are available to
+                # the very next model request in the same agent run.
+                current_context = {
+                    **current_context,
+                    "systemPrompt": system_prompt_for(skill_runtime.active_skill_ids),
+                    "tools": skill_runtime.active_tools(),
+                }
+                skill_update = {
+                    **(skill_update or {}),
+                    "context": current_context,
+                }
             current_messages = current_context.get("messages")
             if not isinstance(current_messages, list):
                 return skill_update
             compacted_messages = await self.compact_agent_messages_if_needed(
                 session_id,
                 run_state,
-                runtime_config,
+                continuation["config"],
                 current_messages,
                 user_message["info"]["time"]["created"],
                 auth_token,
@@ -1785,8 +2005,9 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     "systemPrompt": system_prompt_for(skill_runtime.active_skill_ids),
                     "tools": tools,
                     "messages": agent_messages,
+                    "activeSpeaker": run_state.speaker,
                 },
-                get_api_key=lambda _provider: runtime_config.api_key,
+                get_api_key=lambda _provider: continuation["config"].api_key,
                 before_tool_call=self._before_tool_call(
                     session_id,
                     run_state,
@@ -1847,12 +2068,19 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         if auth_token:
             visible_messages = self.store.list_messages(session_id, limit=10_000, include_compactions=True)
             for assistant_message_id in run_state.assistant_message_ids:
+                if assistant_message_id in synced_core_message_ids:
+                    continue
                 persisted = next(
                     (item for item in visible_messages if item["info"]["id"] == assistant_message_id),
                     None,
                 )
                 if persisted:
-                    await self.sync_core_message(session_id, persisted, auth_token, runtime_config.core)
+                    await self.sync_core_message(
+                        session_id,
+                        persisted,
+                        auth_token,
+                        continuation["config"].core,
+                    )
         text = "\n".join(
             str(part.get("text") or "") for part in (message or {}).get("parts", []) if part.get("type") == "text"
         ).strip()
@@ -2200,6 +2428,24 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     user_message["info"]["id"],
                 )
             await self.sync_core_session(session_id, auth_token, director_config.core)
+            if auth_token and active_config and previous_replies:
+                extraction_reply = "\n\n".join(
+                    str(item.get("reply") or "") for item in previous_replies if str(item.get("reply") or "").strip()
+                )
+                if extraction_reply:
+                    asyncio.create_task(
+                        extract_turn_memories(
+                            core_client=self.core_client,
+                            core_token=auth_token,
+                            runtime_config=active_config,
+                            session_id=session_id,
+                            user_message_id=user_message["info"]["id"],
+                            user_text=content_text(parts),
+                            assistant_text=extraction_reply,
+                            assistant_id=(active_config.core or {}).get("assistant", {}).get("id") if active_config.core else None,
+                        ),
+                        name=f"memory-extract:{session_id}:{user_message['info']['id']}",
+                    )
             self.events.emit({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "idle"}}})
             self.emit_session(session_id)
             logger.info(f"session {session_id} companion turn completed in {now_ms() - started}ms")
@@ -2447,10 +2693,16 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     ),
                 }
             pattern = self.permission_pattern(tool_name, args)
+            if self.is_safe_tool(tool_name):
+                return None
+            if self.permissions is None:
+                return {
+                    "block": True,
+                    "reason": f"工具 {tool_name} 需要权限服务，但当前权限服务不可用。",
+                }
             permission_mode = self.permissions.mode_for_session(session_id)
             if (
-                self.is_safe_tool(tool_name)
-                or self.permissions.is_always_allowed(tool_name, pattern, session_id)
+                self.permissions.is_always_allowed(tool_name, pattern, session_id)
                 or (permission_mode == "full_access" and tool_name != "bash")
             ):
                 return None

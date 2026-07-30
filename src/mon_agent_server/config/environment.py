@@ -55,6 +55,32 @@ def local_timezone(timezone_name: str | None) -> ZoneInfo | None:
         return None
 
 
+def current_time_context(
+    environment: dict[str, Any] | None,
+    now: datetime | None = None,
+) -> dict[str, str]:
+    """生成易变的时钟事实；每个模型轮次都应重新调用。"""
+    value = environment if isinstance(environment, dict) else {}
+    timezone_name = str(value.get("timezone") or "").strip()
+    timezone_value = local_timezone(timezone_name) or datetime.now().astimezone().tzinfo
+    current = now or datetime.now(timezone_value)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone_value)
+    else:
+        current = current.astimezone(timezone_value)
+    offset = current.utcoffset()
+    offset_seconds = int(offset.total_seconds()) if offset is not None else 0
+    sign = "+" if offset_seconds >= 0 else "-"
+    absolute = abs(offset_seconds)
+    weekdays = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
+    return {
+        "local_datetime": current.strftime("%Y-%m-%d %H:%M:%S"),
+        "weekday": weekdays[current.weekday()],
+        "utc_offset": f"UTC{sign}{absolute // 3600:02d}:{(absolute % 3600) // 60:02d}",
+        "iso_datetime": current.isoformat(timespec="seconds"),
+    }
+
+
 def localize_iso_datetime(value: str, timezone_name: str | None) -> str:
     text = value.strip()
     if "T" not in text and " " not in text:
