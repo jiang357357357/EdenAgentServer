@@ -242,17 +242,27 @@ class QuestionBroker:
 
 
 @dataclass(slots=True)
-class _ScreenCaptureWaiter:
+class _CaptureWaiter:
     request: dict[str, Any]
     event: threading.Event
     result: dict[str, Any] | None = None
     error: str | None = None
 
 
-class ScreenCaptureBroker:
-    def __init__(self, events: EventBus) -> None:
+class CaptureBroker:
+    def __init__(
+        self,
+        events: EventBus,
+        *,
+        event_prefix: str,
+        timeout_message: str,
+        missing_result_message: str,
+    ) -> None:
         self._events = events
-        self._waiters: dict[str, _ScreenCaptureWaiter] = {}
+        self._event_prefix = event_prefix
+        self._timeout_message = timeout_message
+        self._missing_result_message = missing_result_message
+        self._waiters: dict[str, _CaptureWaiter] = {}
         self._lock = threading.Lock()
 
     def list(self) -> list[dict[str, Any]]:
@@ -262,29 +272,29 @@ class ScreenCaptureBroker:
     def capture(self, request: dict[str, Any], timeout: float = 30.0) -> dict[str, Any]:
         request_id = create_id("cap")
         full_request = {**request, "id": request_id}
-        waiter = _ScreenCaptureWaiter(full_request, threading.Event())
+        waiter = _CaptureWaiter(full_request, threading.Event())
         with self._lock:
             self._waiters[request_id] = waiter
-        self._events.emit({"type": "screen_capture.requested", "properties": full_request})
+        self._events.emit({"type": f"{self._event_prefix}.requested", "properties": full_request})
         if not waiter.event.wait(timeout):
             with self._lock:
                 self._waiters.pop(request_id, None)
             self._events.emit(
                 {
-                    "type": "screen_capture.replied",
+                    "type": f"{self._event_prefix}.replied",
                     "properties": {
                         "sessionID": full_request.get("sessionID"),
                         "requestID": request_id,
                         "success": False,
-                        "error": "桌面客户端截图响应超时",
+                        "error": self._timeout_message,
                     },
                 }
             )
-            raise RuntimeError("桌面客户端未在 30 秒内返回屏幕截图。")
+            raise RuntimeError(self._timeout_message)
         if waiter.error:
             raise RuntimeError(waiter.error)
         if not waiter.result:
-            raise RuntimeError("桌面客户端没有返回屏幕截图。")
+            raise RuntimeError(self._missing_result_message)
         return waiter.result
 
     def reply(self, request_id: str, result: dict[str, Any] | None = None, error: str | None = None) -> bool:
@@ -297,7 +307,7 @@ class ScreenCaptureBroker:
         waiter.event.set()
         self._events.emit(
             {
-                "type": "screen_capture.replied",
+                "type": f"{self._event_prefix}.replied",
                 "properties": {
                     "sessionID": waiter.request.get("sessionID"),
                     "requestID": request_id,
@@ -307,3 +317,48 @@ class ScreenCaptureBroker:
             }
         )
         return True
+
+    def reject_all(self, session_id: str | None = None, reason: str = "capture_cancelled") -> int:
+        with self._lock:
+            selected = [
+                (request_id, waiter)
+                for request_id, waiter in self._waiters.items()
+                if session_id is None or waiter.request.get("sessionID") == session_id
+            ]
+            for request_id, waiter in selected:
+                self._waiters.pop(request_id, None)
+                waiter.error = reason
+        for request_id, waiter in selected:
+            waiter.event.set()
+            self._events.emit(
+                {
+                    "type": f"{self._event_prefix}.replied",
+                    "properties": {
+                        "sessionID": waiter.request.get("sessionID"),
+                        "requestID": request_id,
+                        "success": False,
+                        "error": reason,
+                    },
+                }
+            )
+        return len(selected)
+
+
+class ScreenCaptureBroker(CaptureBroker):
+    def __init__(self, events: EventBus) -> None:
+        super().__init__(
+            events,
+            event_prefix="screen_capture",
+            timeout_message="桌面客户端未在 30 秒内返回屏幕截图。",
+            missing_result_message="桌面客户端没有返回屏幕截图。",
+        )
+
+
+class CameraCaptureBroker(CaptureBroker):
+    def __init__(self, events: EventBus) -> None:
+        super().__init__(
+            events,
+            event_prefix="camera_capture",
+            timeout_message="客户端未在 30 秒内返回摄像头画面。",
+            missing_result_message="客户端没有返回摄像头画面。",
+        )

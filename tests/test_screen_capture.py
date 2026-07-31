@@ -86,7 +86,7 @@ class AnalyzeScreenToolTest(unittest.IsolatedAsyncioTestCase):
             MonToolContext(current_model_supports_images=True),
         )
 
-        self.assertEqual([tool.name for tool in tools], ["analyze_image", "analyze_screen"])
+        self.assertEqual([tool.name for tool in tools], ["analyze_image", "analyze_screen", "capture_camera"])
 
     async def test_multimodal_model_reads_file_url_outside_workspace(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -112,7 +112,7 @@ class AnalyzeScreenToolTest(unittest.IsolatedAsyncioTestCase):
             MonToolContext(current_model_supports_images=False),
         )
 
-        self.assertEqual([tool.name for tool in tools], ["analyze_image", "analyze_screen"])
+        self.assertEqual([tool.name for tool in tools], ["analyze_image", "analyze_screen", "capture_camera"])
 
     async def test_multimodal_model_receives_electron_screen_image(self):
         permissions = AllowPermissionBroker()

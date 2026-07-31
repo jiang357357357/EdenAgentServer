@@ -133,6 +133,19 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertIn("修改代码、构建、测试", prompt)
         self.assertNotIn("绕过 file_locator", prompt)
 
+    def test_visual_observation_exposes_camera_only_after_skill_load(self) -> None:
+        runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
+
+        self.assertNotIn("capture_camera", _tool_names(runtime.active_tools()))
+        result = runtime.load(["visual-observation"])
+
+        self.assertTrue(result["success"])
+        names = _tool_names(runtime.active_tools())
+        self.assertIn("analyze_image", names)
+        self.assertIn("analyze_screen", names)
+        self.assertIn("capture_camera", names)
+        self.assertIn("只拍摄完成当前请求所需的一帧", runtime.prompt_section())
+
     def test_assistant_switching_skill_exposes_bounded_tools(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
 

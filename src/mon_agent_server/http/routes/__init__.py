@@ -1,3 +1,4 @@
+from .camera_capture import handle_camera_capture
 from .memos import handle_memos
 from .model import handle_model
 from .permissions import handle_permissions
@@ -14,6 +15,7 @@ API_ROUTE_HANDLERS = (
     handle_speech,
     handle_permissions,
     handle_questions,
+    handle_camera_capture,
     handle_screen_capture,
     handle_tools,
     handle_skills,

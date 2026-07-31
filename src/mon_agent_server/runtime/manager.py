@@ -30,7 +30,7 @@ from mon_agent_core.harness.compaction import (
 from mon_agent_core.harness.messages import convert_to_llm
 from mon_agent_core.harness.session.session import build_session_context
 
-from ..brokers import PermissionBroker, QuestionBroker, ScreenCaptureBroker
+from ..brokers import CameraCaptureBroker, PermissionBroker, QuestionBroker, ScreenCaptureBroker
 from ..core import CoreAuthenticationExpiredError, CoreClient
 from ..core.serializers import session_from_map
 from ..events import EventBus
@@ -208,6 +208,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         core_client: CoreClient,
         screen_captures: ScreenCaptureBroker | None = None,
         environment: dict[str, Any] | None = None,
+        camera_captures: CameraCaptureBroker | None = None,
     ) -> None:
         self.workspace_root = workspace_root.resolve()
         self.store = store
@@ -216,6 +217,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         self.questions = questions
         self.core_client = core_client
         self.screen_captures = screen_captures
+        self.camera_captures = camera_captures
         self.environment = environment
         self.subagent_catalog = load_subagent_catalog(self.workspace_root)
         self.subagent_repository = SubagentThreadRepository.for_workspace(self.workspace_root)
@@ -304,6 +306,10 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 future = self._host.submit(self._interrupt_all_subagents(control))
                 future.add_done_callback(self._log_abort_cleanup_error)
         self.permissions.reject_all(session_id, reason="session_aborted")
+        if self.screen_captures is not None:
+            self.screen_captures.reject_all(session_id, reason="session_aborted")
+        if self.camera_captures is not None:
+            self.camera_captures.reject_all(session_id, reason="session_aborted")
         if running or active_subagents:
             self.events.emit(
                 {"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "stopping"}}}
@@ -1316,6 +1322,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 permissions=self.permissions,
                 questions=self.questions,
                 screen_captures=self.screen_captures,
+                camera_captures=self.camera_captures,
                 current_model_supports_images=runtime_config.supports_images,
                 vision_config=(runtime_config.core or {}).get("visionConfig") if runtime_config.core else None,
                 environment=environment,
@@ -1745,6 +1752,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             permissions=self.permissions,
             questions=self.questions,
             screen_captures=self.screen_captures,
+            camera_captures=self.camera_captures,
             current_model_supports_images=runtime_config.supports_images,
             vision_config=(runtime_config.core or {}).get("visionConfig") if runtime_config.core else None,
             environment=environment,

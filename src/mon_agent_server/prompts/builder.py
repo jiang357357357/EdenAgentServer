@@ -230,7 +230,7 @@ def _build_skill_aware_tool_section(
         ]
     else:
         vision_instruction = (
-            "当前对话模型支持图片输入：用户图片已经直接进入上下文；不要重复调用 analyze_image。需要查看桌面时先加载 visual-observation，再调用 analyze_screen。"
+            "当前对话模型支持图片输入：用户图片已经直接进入上下文；不要重复调用 analyze_image。需要查看桌面或用户明确要求拍摄摄像头单帧时，先加载 visual-observation，再调用 analyze_screen 或 capture_camera。"
             if supports_images is True
             else "当前对话模型不支持图片输入：附件会由角色绑定的 Vision 服务自动分析；需要额外分析图片或屏幕时先加载 visual-observation。"
         )
@@ -275,10 +275,10 @@ def build_agent_tool_section(
         )
     vision_instruction = (
         "当前对话模型支持图片输入：用户图片会直接进入你的上下文；不要调用 analyze_image。"
-        "需要查看当前桌面时才调用 analyze_screen，并直接观察它返回的截图，不要对截图再做一次图片分析。"
+        "需要查看当前桌面时才调用 analyze_screen；只有用户明确要求查看摄像头画面时才调用 capture_camera。直接观察工具返回的图片，不要再做一次图片分析。"
         if supports_images is True
         else "当前对话模型不支持图片输入：图片由角色绑定的 Vision 服务分析；"
-        "需要分析附件或本地图片时使用 analyze_image，需要查看当前桌面时使用 analyze_screen。"
+        "需要分析附件或本地图片时使用 analyze_image，需要查看当前桌面时使用 analyze_screen；用户明确要求查看摄像头画面时使用 capture_camera。"
     )
     return "\n".join(
         [

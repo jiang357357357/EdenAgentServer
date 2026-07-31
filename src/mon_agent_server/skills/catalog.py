@@ -131,12 +131,13 @@ SKILL_DEFINITIONS: tuple[SkillDefinition, ...] = (
     ),
     SkillDefinition(
         id="visual-observation",
-        name="图片与屏幕观察",
-        description="分析附件、本地图片或观察当前桌面屏幕。",
-        tool_names=("analyze_image", "analyze_screen"),
+        name="图片、屏幕与摄像头观察",
+        description="分析附件、本地图片，观察当前桌面屏幕，或经用户授权拍摄摄像头单帧。",
+        tool_names=("analyze_image", "analyze_screen", "capture_camera"),
         instructions=(
-            "分析附件或本地图片路径时使用 analyze_image；需要观察当前桌面时使用 analyze_screen。",
+            "分析附件或本地图片路径时使用 analyze_image；需要观察当前桌面时使用 analyze_screen；用户明确要求查看摄像头画面时使用 capture_camera。",
             "多模态模型已经直接收到的附件图片无需重复分析；file:// 或绝对路径图片仍使用 analyze_image。",
+            "capture_camera 涉及隐私，只拍摄完成当前请求所需的一帧；不要主动连续采集，也不要在用户没有相关意图时调用。",
         ),
     ),
     SkillDefinition(

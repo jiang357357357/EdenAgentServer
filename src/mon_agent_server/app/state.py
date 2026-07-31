@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import hashlib
 from typing import Any
 
-from ..brokers import PermissionBroker, QuestionBroker, ScreenCaptureBroker
+from ..brokers import CameraCaptureBroker, PermissionBroker, QuestionBroker, ScreenCaptureBroker
 from ..config import ServerConfig, environment_context, merge_environment_context
 from ..core import CoreClient
 from ..events import EventBus
@@ -25,6 +25,7 @@ class AppState:
         self.permissions = PermissionBroker(self.events)
         self.questions = QuestionBroker(self.events)
         self.screen_captures = ScreenCaptureBroker(self.events)
+        self.camera_captures = CameraCaptureBroker(self.events)
         self.core_client = CoreClient(self.config.core_base_url)
         self.speech_cache = SpeechCache(self.config.workspace_root / ".artifacts" / "speech-cache")
         self.skill_installer = SkillInstallationService(self.config.workspace_root, self.core_client)
@@ -37,11 +38,13 @@ class AppState:
             self.core_client,
             self.screen_captures,
             environment_context(self.config.environment),
+            camera_captures=self.camera_captures,
         )
 
     permissions: PermissionBroker = field(init=False)
     questions: QuestionBroker = field(init=False)
     screen_captures: ScreenCaptureBroker = field(init=False)
+    camera_captures: CameraCaptureBroker = field(init=False)
     core_client: CoreClient = field(init=False)
     speech_cache: SpeechCache = field(init=False)
     skill_installer: SkillInstallationService = field(init=False)
@@ -102,6 +105,8 @@ def is_agent_api_route(pathname: str) -> bool:
         or pathname.startswith("/question/")
         or pathname == "/screen-capture"
         or pathname.startswith("/screen-capture/")
+        or pathname == "/camera-capture"
+        or pathname.startswith("/camera-capture/")
         or pathname == "/self-awake/runs"
         or pathname == "/memos"
         or pathname.startswith("/memos/")

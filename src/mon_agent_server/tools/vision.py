@@ -15,6 +15,8 @@ from .core_access import core_call, require_core_access
 from .result import text_result
 from .workspace import maybe_ask_outside_workspace
 
+MAX_CAPTURE_BYTES = 10 * 1024 * 1024
+
 
 def _local_file_path(value: str) -> Path | None:
     raw = str(value or "").strip()
@@ -25,6 +27,24 @@ def _local_file_path(value: str) -> Path | None:
         return Path(unquote(parsed.path)).expanduser().resolve()
     path = Path(raw).expanduser()
     return path.resolve() if path.is_absolute() else None
+
+
+def _decode_capture_image(capture: dict[str, Any], capture_name: str) -> tuple[str, str]:
+    data_url = str(capture.get("dataUrl") or capture.get("data_url") or "")
+    match = re.match(r"^data:([^;,]+);base64,(.*)$", data_url)
+    if not match:
+        raise RuntimeError(f"{capture_name}格式无效。")
+    mime_type = match.group(1) or "image/jpeg"
+    if not mime_type.startswith("image/"):
+        raise RuntimeError(f"{capture_name}格式无效。")
+    data = match.group(2)
+    try:
+        decoded = base64.b64decode(data, validate=True)
+    except Exception as error:
+        raise RuntimeError(f"{capture_name}数据损坏。") from error
+    if not decoded or len(decoded) > MAX_CAPTURE_BYTES:
+        raise RuntimeError(f"{capture_name}大小无效。")
+    return mime_type, data
 
 
 def create_vision_tools(root: Path, context: MonToolContext) -> list[AgentTool]:
@@ -140,16 +160,7 @@ def create_vision_tools(root: Path, context: MonToolContext) -> list[AgentTool]:
                 "display": "cursor",
             },
         )
-        data_url = str(capture.get("dataUrl") or capture.get("data_url") or "")
-        match = re.match(r"^data:([^;,]+);base64,(.*)$", data_url)
-        if not match:
-            raise RuntimeError("桌面客户端返回的截图格式无效。")
-        mime_type = match.group(1) or "image/png"
-        data = match.group(2)
-        try:
-            base64.b64decode(data, validate=True)
-        except Exception as error:
-            raise RuntimeError("桌面客户端返回的截图数据损坏。") from error
+        mime_type, data = _decode_capture_image(capture, "桌面客户端返回的截图")
 
         question = str(params.get("question") or "请分析当前屏幕。").strip()
         width = capture.get("width")
@@ -179,6 +190,56 @@ def create_vision_tools(root: Path, context: MonToolContext) -> list[AgentTool]:
             },
         )
 
+    async def capture_camera_execute(
+        tool_call_id: str,
+        params: dict[str, Any],
+        _signal: Any = None,
+        _on_update: Any = None,
+    ) -> dict[str, Any]:
+        if not context.session_id:
+            raise RuntimeError("当前会话无法读取摄像头。")
+        if not context.camera_captures:
+            raise RuntimeError("当前没有可用的摄像头采集客户端。")
+        facing_mode = str(params.get("facing_mode") or "user").strip().lower()
+        if facing_mode not in {"user", "environment"}:
+            raise RuntimeError("摄像头方向无效，只支持 user 或 environment。")
+
+        capture = await asyncio.to_thread(
+            context.camera_captures.capture,
+            {
+                "sessionID": context.session_id,
+                "toolCallID": tool_call_id,
+                "facingMode": facing_mode,
+            },
+        )
+        mime_type, data = _decode_capture_image(capture, "客户端返回的摄像头图片")
+        question = str(params.get("question") or "请观察当前摄像头画面。").strip()
+        width = capture.get("width")
+        height = capture.get("height")
+        device_label = str(capture.get("deviceLabel") or "").strip()
+        actual_facing_mode = str(capture.get("facingMode") or facing_mode).strip().lower()
+        capture_details = []
+        if width and height:
+            capture_details.append(f"{width}×{height}")
+        if device_label:
+            capture_details.append(device_label)
+        status_suffix = f"（{'，'.join(capture_details)}）" if capture_details else ""
+        return await vision_result(
+            tool_call_id=tool_call_id,
+            question=question,
+            mime_type=mime_type,
+            data=data,
+            source="当前摄像头画面",
+            capture_status_text=f"摄像头单帧已捕获并提供给当前模型{status_suffix}。",
+            metadata={
+                "deviceLabel": device_label or None,
+                "facingMode": actual_facing_mode,
+                "requestedFacingMode": facing_mode,
+                "width": width,
+                "height": height,
+            },
+        )
+
     tools = [
         AgentTool(
             "analyze_screen",
@@ -197,6 +258,25 @@ def create_vision_tools(root: Path, context: MonToolContext) -> list[AgentTool]:
                 },
             },
             analyze_screen_execute,
+        ),
+        AgentTool(
+            "capture_camera",
+            "摄像头观察",
+            "经用户授权后从当前设备摄像头拍摄一张单帧图片，随即停止摄像头；多模态模型直接观察，文本模型交给角色绑定的 Vision 分析。",
+            {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "facing_mode": {
+                        "type": "string",
+                        "enum": ["user", "environment"],
+                        "default": "user",
+                        "description": "优先使用前置（user）或后置（environment）摄像头。",
+                    },
+                },
+            },
+            capture_camera_execute,
+            execution_mode="sequential",
         ),
     ]
     tools.insert(
