@@ -1720,6 +1720,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                         {
                             "q": actor_user_text[:1000],
                             "assistant": assistant["id"],
+                            "agent_character": next_character_id,
                             "status": "active",
                             "limit": 5,
                         },
@@ -1832,6 +1833,11 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                     {
                         "q": actor_user_text[:1000],
                         "assistant": beat.assistant_id,
+                        "agent_character": (
+                            ((runtime_config.core or {}).get("character") or {}).get("id")
+                            if runtime_config.core
+                            else None
+                        ),
                         "status": "active",
                         "limit": 5,
                     },
@@ -1884,7 +1890,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
             active_core = active_config.core
             active_character = (active_core or {}).get("character") if active_core else None
             active_character_id = active_character.get("id") if isinstance(active_character, dict) else None
-            return build_agent_system_prompt(
+            prompt = build_agent_system_prompt(
                 active_core,
                 source="user_chat",
                 current_character_action=self.store.get_character_action(session_id, active_character_id),
@@ -1900,6 +1906,14 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                 delegation_mode=active_config.delegation_policy.mode,
                 relevant_memories=continuation["relevantMemories"],
             )
+            previous_speaker = continuation.get("handoffFrom")
+            if isinstance(previous_speaker, dict):
+                prompt += (
+                    "\n\n## 会话接管\n\n"
+                    "会话已切换给你。请以自己的身份直接完成用户当前请求，"
+                    "不要替原助手告别或转交。"
+                )
+            return prompt
 
         agent_messages = await self.compact_agent_messages_if_needed(
             session_id,
@@ -2451,6 +2465,7 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
                             user_text=content_text(parts),
                             assistant_text=extraction_reply,
                             assistant_id=(active_config.core or {}).get("assistant", {}).get("id") if active_config.core else None,
+                            agent_character_id=(active_config.core or {}).get("character", {}).get("id") if active_config.core else None,
                         ),
                         name=f"memory-extract:{session_id}:{user_message['info']['id']}",
                     )

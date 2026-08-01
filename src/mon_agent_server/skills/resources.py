@@ -11,11 +11,11 @@ from .installer import load_installed_skill_definitions
 
 @dataclass(frozen=True, slots=True)
 class SkillCapabilityBinding:
-    """Host policy that maps a trusted skill to already registered tools.
+    """Host policy that maps a trusted skill to its referenced tools.
 
-    This is deliberately separate from SkillResource: reading instructions does
-    not grant permission, and every bound tool remains subject to the normal
-    MonAgent permission broker.
+    Bindings define the stable capabilities exposed by a profile. Loading skill
+    instructions does not grant tools or permission; every referenced tool is
+    still filtered by host policy and the normal permission broker.
     """
 
     skill_name: str

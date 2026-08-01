@@ -49,50 +49,19 @@ class SkillCatalogTest(unittest.TestCase):
             },
         )
 
-    def test_user_chat_starts_with_core_and_coordination_tools(self) -> None:
+    def test_user_chat_exposes_stable_profile_tools(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
         names = _tool_names(runtime.active_tools())
 
-        self.assertEqual(
-            names,
-            {
-                "load_skill",
-                "ask_user",
-                "list_character_actions",
-                "switch_character_action",
-                "read",
-                "ls",
-                "grep",
-                "find",
-                "external_ls",
-                "external_read",
-                "external_find",
-                "external_grep",
-                "spawn_agent",
-                "send_message",
-                "followup_task",
-                "list_agents",
-                "interrupt_agent",
-                "remember_memory",
-                "search_memories",
-                "update_memory",
-                "forget_memory",
-                "list_character_stickers",
-                "remember_character_sticker",
-                "send_character_sticker",
-                "delete_character_sticker",
-            },
-        )
         self.assertNotIn("loaded_tools", names)
-        self.assertNotIn("create_memo", names)
-        self.assertNotIn("web_search", names)
-        self.assertIn("remember_memory", names)
-        self.assertIn("search_memories", names)
-        self.assertIn("update_memory", names)
-        self.assertIn("forget_memory", names)
-        self.assertNotIn("write", names)
+        for name in {
+            "load_skill", "read", "write", "edit", "apply_patch", "bash", "write_stdin",
+            "web_search", "create_memo", "analyze_screen", "send_qq_message",
+            "switch_session_assistant", "remember_memory", "spawn_agent",
+        }:
+            self.assertIn(name, names)
 
-    def test_activation_updates_tools_and_prompt_for_next_model_call(self) -> None:
+    def test_loading_updates_prompt_but_not_tools_for_next_model_call(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
         initial_tools = runtime.active_tools()
 
@@ -117,8 +86,9 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertIn("create_memo", names)
         self.assertIn("create_reminder", names)
         self.assertIn("list_memos", names)
-        self.assertNotIn("web_search", names)
-        self.assertNotIn("write", names)
+        self.assertIn("web_search", names)
+        self.assertIn("write", names)
+        self.assertEqual(names, _tool_names(initial_tools))
         self.assertEqual(context["systemPrompt"], "active=memo-management")
         self.assertIsNone(runtime.prepare_next_turn({"context": context}, lambda _ids: "unused"))
 
@@ -133,10 +103,11 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertIn("修改代码、构建、测试", prompt)
         self.assertNotIn("绕过 file_locator", prompt)
 
-    def test_visual_observation_exposes_camera_only_after_skill_load(self) -> None:
+    def test_visual_observation_loads_instructions_without_changing_tools(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
 
-        self.assertNotIn("capture_camera", _tool_names(runtime.active_tools()))
+        before = _tool_names(runtime.active_tools())
+        self.assertIn("capture_camera", before)
         result = runtime.load(["visual-observation"])
 
         self.assertTrue(result["success"])
@@ -144,19 +115,23 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertIn("analyze_image", names)
         self.assertIn("analyze_screen", names)
         self.assertIn("capture_camera", names)
+        self.assertEqual(names, before)
         self.assertIn("只拍摄完成当前请求所需的一帧", runtime.prompt_section())
 
-    def test_assistant_switching_skill_exposes_bounded_tools(self) -> None:
+    def test_assistant_switching_loads_instructions_without_changing_tools(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
 
-        self.assertNotIn("switch_session_assistant", _tool_names(runtime.active_tools()))
+        before = _tool_names(runtime.active_tools())
+        self.assertIn("switch_session_assistant", before)
         result = runtime.load(["assistant-switching"])
 
         self.assertTrue(result["success"])
         names = _tool_names(runtime.active_tools())
         self.assertIn("list_assistants", names)
         self.assertIn("switch_session_assistant", names)
-        self.assertIn("保留当前会话全部历史", runtime.prompt_section())
+        self.assertEqual(names, before)
+        self.assertIn("会话历史会保留", runtime.prompt_section())
+        self.assertIn("无需由原助手告别或转交", runtime.prompt_section())
 
     def test_multi_agent_skill_adds_policy_without_gating_control_tools(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
@@ -184,7 +159,7 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertNotIn("write", names)
         self.assertNotIn("send_qq_message", names)
         self.assertNotIn("send_external_email", names)
-        self.assertNotIn("web_search", names)
+        self.assertIn("web_search", names)
 
         result = runtime.load(["web-research"])
         self.assertTrue(result["success"])
@@ -228,7 +203,24 @@ class SkillCatalogTest(unittest.TestCase):
 
 
 class SkillActivationLoopTest(unittest.IsolatedAsyncioTestCase):
-    async def test_activated_tools_are_available_in_the_same_agent_run(self) -> None:
+    async def test_tools_remain_available_when_skill_runtime_is_recreated_next_turn(self) -> None:
+        first_turn = create_skill_runtime(Path.cwd(), profile="user_chat")
+        loader = next(tool for tool in first_turn.active_tools() if tool.name == "load_skill")
+
+        result = await loader.execute(
+            "load-workspace",
+            {"skills": ["workspace-development"]},
+        )
+        second_turn = create_skill_runtime(Path.cwd(), profile="user_chat")
+
+        self.assertIn("已加载技能：workspace-development", result["content"][0]["text"])
+        self.assertNotIn("已启用这些技能对应的工具", result["content"][0]["text"])
+        self.assertEqual(second_turn.loaded_skill_ids, ())
+        self.assertIn("write", _tool_names(second_turn.active_tools()))
+        self.assertIn("bash", _tool_names(second_turn.active_tools()))
+        self.assertIn("write_stdin", _tool_names(second_turn.active_tools()))
+
+    async def test_loading_skill_changes_instructions_not_available_tools(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
         observed_tools: list[set[str]] = []
 
@@ -282,9 +274,10 @@ class SkillActivationLoopTest(unittest.IsolatedAsyncioTestCase):
         await agent.prompt("提醒我明天开会")
 
         self.assertEqual(len(observed_tools), 2)
-        self.assertNotIn("create_reminder", observed_tools[0])
+        self.assertIn("create_reminder", observed_tools[0])
         self.assertIn("create_reminder", observed_tools[1])
         self.assertIn("create_memo", observed_tools[1])
+        self.assertEqual(observed_tools[0], observed_tools[1])
         self.assertEqual(
             [message["role"] for message in agent.state.messages],
             ["user", "assistant", "toolResult", "assistant"],

@@ -56,8 +56,8 @@ def create_assistant_tools(context: MonToolContext) -> list[AgentTool]:
         character = assistant.get("character") if isinstance(assistant.get("character"), dict) else {}
         name = assistant.get("name") or character.get("name") or assistant_id
         return text_result(
-            f"当前会话已切换为助手「{name}」。下一次模型续跑会立即使用新助手，"
-            "并在保留本会话全部历史的前提下完成当前对话。",
+            f"切换完成。你现在是助手「{name}」，请直接以新身份完成用户当前请求。"
+            "会话历史已保留，不要替原助手告别或转交。",
             result,
         )
 
@@ -72,7 +72,7 @@ def create_assistant_tools(context: MonToolContext) -> list[AgentTool]:
         AgentTool(
             "switch_session_assistant",
             "切换会话助手",
-            "把当前会话的唯一参与助手切换为指定助手。保留当前会话全部历史，并由新助手在本次工具调用后的模型续跑中立即接手；不修改用户的全局默认助手。",
+            "将当前会话切换给指定助手。新助手立即接手并保留会话历史；不修改用户的全局默认助手。",
             {
                 "type": "object",
                 "properties": {

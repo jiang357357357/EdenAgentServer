@@ -64,7 +64,12 @@ class MonAgentSkillRuntime:
 
     def active_tools(self) -> list[AgentTool]:
         active_names = set(BASE_TOOL_NAMES_BY_PROFILE.get(self.profile, ()))
-        active_names.update(self.resources.tools_for(self._loaded_skill_ids))
+        # Skills progressively disclose workflow instructions. They do not
+        # register or unregister capabilities: the profile and tool policy own
+        # the stable tool set for the whole agent run.
+        active_names.update(
+            self.resources.tools_for(tuple(skill.name for skill in self.resources.snapshot.skills))
+        )
         tools = [self._loader_tool]
         tools.extend(
             tool
@@ -102,7 +107,6 @@ class MonAgentSkillRuntime:
             "activated": loaded,
             "active": list(self._loaded_skill_ids),
             "instructions": "\n\n".join(invocations),
-            "capabilitiesEnabled": sorted(self.resources.tools_for(loaded)),
         }
 
     def activate(self, requested_skill_ids: list[str]) -> dict[str, Any]:
@@ -170,12 +174,6 @@ class MonAgentSkillRuntime:
                 return text_result("请求的技能已经加载，无需重复读取。", result)
             instructions = str(result.get("instructions") or "").strip()
             body = [f"已加载技能：{', '.join(loaded)}。请遵循下面的技能说明。"]
-            capabilities = result.get("capabilitiesEnabled") or []
-            if capabilities:
-                body.append(
-                    "已启用这些技能对应的工具："
-                    + "、".join(str(item) for item in capabilities)
-                )
             if instructions:
                 body.extend(["", instructions])
             return text_result("\n".join(body), result)
@@ -184,7 +182,7 @@ class MonAgentSkillRuntime:
             name="load_skill",
             label="加载技能",
             description=(
-                "按当前任务读取一个或多个技能的完整说明，并启用对应工具。"
+                "按当前任务读取一个或多个技能的完整工作流说明。工具能力由当前运行环境和权限策略独立提供。"
                 f"\n\n{self.resources.snapshot.format_catalog('load_skill')}"
             ),
             parameters={

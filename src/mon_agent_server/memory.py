@@ -46,14 +46,18 @@ async def extract_turn_memories(
     user_text: str,
     assistant_text: str,
     assistant_id: int | str | None,
+    agent_character_id: int | str | None,
 ) -> list[dict[str, Any]]:
     if not runtime_config.api_key or not user_text.strip() or not assistant_text.strip():
+        return []
+    if not agent_character_id:
         return []
     system_prompt = """你是长期记忆提取器。只提取用户明确陈述或双方已经确认、未来跨会话仍有用的稳定信息。
 允许类型：preference（用户偏好）、fact（稳定事实）、decision（已确认长期决策）、procedure（可复用流程）。
 不要提取临时任务进度、问题本身、模型推测、工具原始输出、寒暄、密码、密钥、令牌或其他认证信息。
 如果没有值得长期保存的信息，返回 {\"memories\":[]}。
-只输出严格 JSON：{\"memories\":[{\"kind\":\"preference|fact|decision|procedure\",\"content\":\"独立、清楚、第三人称陈述\",\"scope_type\":\"user|assistant\",\"confidence\":0.0}]}。
+只输出严格 JSON：{\"memories\":[{\"kind\":\"preference|fact|decision|procedure\",\"content\":\"独立、清楚、第三人称陈述\",\"confidence\":0.0}]}。
+所有长期记忆都属于当前智能体角色，不存在跨角色共享的用户记忆。
 仅输出置信度不低于 0.85 的候选；宁可遗漏，不要猜测。"""
     context = {
         "systemPrompt": system_prompt,
@@ -87,7 +91,6 @@ async def extract_turn_memories(
             continue
         content = re.sub(r"\s+", " ", str(item.get("content") or "").strip())
         kind = str(item.get("kind") or "fact")
-        scope_type = str(item.get("scope_type") or "user")
         try:
             confidence = float(item.get("confidence") or 0)
         except (TypeError, ValueError):
@@ -97,20 +100,23 @@ async def extract_turn_memories(
             or len(content) > 4000
             or confidence < 0.85
             or kind not in {"preference", "fact", "decision", "procedure"}
-            or scope_type not in {"user", "assistant"}
             or _SECRET_PATTERN.search(content)
         ):
             continue
         payload = {
-            "assistant": assistant_id if scope_type == "assistant" else None,
-            "scope_type": scope_type,
-            "scope_key": str(assistant_id or "") if scope_type == "assistant" else "",
+            "assistant": None,
+            "agent_character": agent_character_id,
+            "scope_type": "agent_character",
+            "scope_key": str(agent_character_id),
             "kind": kind,
             "content": content,
             "source_session_id": session_id,
             "source_message_ids": [user_message_id],
             "confidence": confidence,
-            "metadata": {"source": "automatic_extraction"},
+            "metadata": {
+                "source": "automatic_extraction",
+                "source_assistant_id": assistant_id,
+            },
         }
         try:
             saved.append(core_client.remember_memory(core_token, payload))

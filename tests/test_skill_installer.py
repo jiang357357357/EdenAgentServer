@@ -152,7 +152,7 @@ class SkillInstallationServiceTest(unittest.TestCase):
 
         self.assertTrue(loaded["success"])
         self.assertIn("Read the relevant files", loaded["instructions"])
-        self.assertEqual(loaded["capabilitiesEnabled"], [])
+        self.assertNotIn("capabilitiesEnabled", loaded)
         self.assertEqual(before, after)
 
     def test_symbolic_links_are_rejected(self) -> None:

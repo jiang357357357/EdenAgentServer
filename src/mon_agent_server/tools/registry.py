@@ -59,6 +59,9 @@ def create_mon_agent_tools(
     coding_tools = create_all_tools(
         str(root),
         {
+            "bash": {
+                "owner_key": f"{context.session_id or 'unbound'}:{context.agent_path}",
+            },
             "write": {"allow_outside_cwd": outside_write_allowed},
             "edit": {"allow_outside_cwd": outside_write_allowed},
             "apply_patch": {"allow_outside_cwd": outside_write_allowed},

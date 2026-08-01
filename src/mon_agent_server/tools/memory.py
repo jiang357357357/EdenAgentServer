@@ -35,10 +35,22 @@ def _memory_line(memory: dict[str, Any]) -> str:
     return f"#{memory.get('id')} [{memory.get('kind') or 'fact'}] {memory.get('content') or ''}"
 
 
+def _agent_character_id(context: MonToolContext, params: dict[str, Any]) -> int | str | None:
+    explicit = params.get("agent_character_id")
+    if explicit not in (None, ""):
+        return explicit
+    character = context.character if isinstance(context.character, dict) else {}
+    return character.get("id")
+
+
 def create_memory_tools(context: MonToolContext) -> list[AgentTool]:
     async def remember_execute(_call_id: str, params: dict[str, Any], _signal: Any = None, _update: Any = None):
         _require_root_writer(context)
         core, token = require_core_access(context)
+        scope_type = params.get("scope_type") or "agent_character"
+        agent_character_id = _agent_character_id(context, params)
+        if scope_type == "agent_character" and not agent_character_id:
+            raise ValueError("智能体角色记忆必须提供 agent_character_id，或在当前会话绑定角色。")
         memory = await asyncio.to_thread(
             core_call,
             core.remember_memory,
@@ -46,9 +58,10 @@ def create_memory_tools(context: MonToolContext) -> list[AgentTool]:
             {
                 "content": _safe_content(params["content"]),
                 "kind": params.get("kind") or "fact",
-                "scope_type": params.get("scope_type") or "user",
-                "scope_key": params.get("scope_key") or "",
+                "scope_type": scope_type,
+                "scope_key": str(agent_character_id or "") if scope_type == "agent_character" else params.get("scope_key") or "",
                 "assistant": params.get("assistant_id"),
+                "agent_character": agent_character_id if scope_type == "agent_character" else None,
                 "source_session_id": context.session_id or "",
                 "source_message_ids": [context.get_message_id()] if context.get_message_id and context.get_message_id() else [],
                 "metadata": {"source": "explicit_tool", "agent_path": context.agent_path},
@@ -68,6 +81,7 @@ def create_memory_tools(context: MonToolContext) -> list[AgentTool]:
                 "scope_key": params.get("scope_key"),
                 "kind": params.get("kind"),
                 "assistant": params.get("assistant_id"),
+                "agent_character": _agent_character_id(context, params),
                 "limit": params.get("limit") or 10,
             },
         )
@@ -95,14 +109,15 @@ def create_memory_tools(context: MonToolContext) -> list[AgentTool]:
         return text_result(f"已遗忘长期记忆 #{memory.get('id')}。", {"memory": memory})
 
     scope_properties = {
-        "scope_type": {"type": "string", "enum": ["user", "assistant", "project", "workspace"]},
+        "scope_type": {"type": "string", "enum": ["agent_character", "project", "workspace"]},
         "scope_key": {"type": "string"},
         "assistant_id": {"type": "number"},
+        "agent_character_id": {"type": "number"},
     }
     return [
         AgentTool(
             "remember_memory", "记住长期信息",
-            "当用户明确要求记住，或确认了未来会持续有用的稳定偏好、事实、决策或流程时写入长期记忆。不要保存密码、密钥、临时进度或猜测。",
+            "当用户明确要求记住，或确认了未来会持续有用的稳定偏好、事实、决策或流程时写入当前智能体角色的长期记忆。角色之间不共享记忆。不要保存密码、密钥、临时进度或猜测。",
             {"type": "object", "properties": {"content": {"type": "string"}, "kind": {"type": "string", "enum": ["preference", "fact", "decision", "procedure"]}, **scope_properties}, "required": ["content"]},
             remember_execute, execution_mode="sequential",
         ),

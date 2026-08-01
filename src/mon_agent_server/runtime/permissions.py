@@ -27,6 +27,7 @@ class RuntimePermissionMixin:
             "qq_bot_list",
             "qq_bot_targets",
             "loaded_tools",
+            "write_stdin",
             "list_assistants",
             "ask_user",
             "analyze_image",

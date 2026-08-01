@@ -156,6 +156,10 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["apiKey"] for item in observed], ["key-a", "key-b"])
         self.assertIn("角色 A", observed[0]["prompt"])
         self.assertIn("角色 B", observed[1]["prompt"])
+        self.assertNotIn("## 会话接管", observed[0]["prompt"])
+        self.assertIn("会话已切换给你", observed[1]["prompt"])
+        self.assertIn("以自己的身份直接完成用户当前请求", observed[1]["prompt"])
+        self.assertIn("不要替原助手告别或转交", observed[1]["prompt"])
         switch_message = next(
             item
             for item in observed[1]["messages"]
@@ -244,7 +248,10 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("load_skill", captured["tools"])
         self.assertIn("read", captured["tools"])
         self.assertIn("switch_character_action", captured["tools"])
-        self.assertNotIn("web_search", captured["tools"])
+        self.assertIn("web_search", captured["tools"])
+        self.assertIn("write", captured["tools"])
+        self.assertIn("bash", captured["tools"])
+        self.assertIn("write_stdin", captured["tools"])
         self.assertIn("spawn_agent", captured["tools"])
         self.assertIn("冷静、克制", captured["systemPrompt"])
         self.assertIn("web-research", captured["systemPrompt"])
@@ -329,9 +336,10 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(reply, "已经可以开始网页研究。")
-        self.assertNotIn("web_search", observed_tools[0])
+        self.assertIn("web_search", observed_tools[0])
         self.assertIn("web_search", observed_tools[1])
         self.assertIn("web_fetch", observed_tools[1])
+        self.assertEqual(observed_tools[0], observed_tools[1])
         self.assertNotIn("当前已加载技能", observed_prompts[0])
         self.assertIn("当前已加载技能", observed_prompts[1])
         self.assertIn('<skill name="web-research"', observed_prompts[1])
@@ -429,6 +437,7 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("write", captured["tools"])
         self.assertNotIn("edit", captured["tools"])
         self.assertNotIn("bash", captured["tools"])
+        self.assertNotIn("write_stdin", captured["tools"])
         self.assertIn("read", captured["tools"])
         self.assertIn("switch_character_action", captured["tools"])
         runtime.close()

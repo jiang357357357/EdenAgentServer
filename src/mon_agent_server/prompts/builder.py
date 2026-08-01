@@ -235,7 +235,7 @@ def _build_skill_aware_tool_section(
             else "当前对话模型不支持图片输入：附件会由角色绑定的 Vision 服务自动分析；需要额外分析图片或屏幕时先加载 visual-observation。"
         )
         lines = [
-            "基础工具可直接使用；任务匹配技能时，用 load_skill 读取其工作流。",
+            "工具能力由当前环境稳定提供；任务匹配技能时，用 load_skill 按需读取其工作流说明。",
             "read、ls、grep、find 用于当前工作区，工作区外使用对应的 external 工具。写入、编辑或执行开发命令前加载 workspace-development。",
             vision_instruction,
             "角色动作是可选表达；需要变化时从已提供的动作名称中选择并调用 switch_character_action，否则保持当前。",
@@ -299,7 +299,7 @@ def build_agent_tool_section(
             "除非用户明确要求连续表演或动作测试，同一轮不要重复提交相同角色状态。",
             "你可以使用 ask_user 向用户确认关键信息；如果本轮任务声明为后台或非交互任务，不要调用 ask_user 等待用户。",
             "你可以使用 create_memo/create_reminder/list_memos/complete_memo/archive_memo/snooze_memo 管理用户备忘录、提醒和待办；当用户说“提醒我”“记一下”“待办”时优先使用这些工具。",
-            "长期记忆与备忘录不同：用户明确要求跨会话记住稳定偏好、事实、决策或流程时使用 remember_memory；需要查找更多历史细节时使用 search_memories；用户要求修正或遗忘时使用 update_memory 或 forget_memory。不要保存密码、密钥、临时进度或未经确认的猜测。",
+            "长期记忆与备忘录不同：用户明确要求当前角色跨会话记住稳定偏好、事实、决策或流程时使用 remember_memory；所有长期记忆都属于当前智能体角色，角色之间不共享；需要查找更多历史细节时使用 search_memories；用户要求修正或遗忘时使用 update_memory 或 forget_memory。不要保存密码、密钥、临时进度或未经确认的猜测。",
             "你可以使用 notify_user 主动通知当前用户，通道只有 QQ 和外部邮件；channel=auto 时，priority=high 的重要事件优先发邮件，其他普通事件优先使用默认 QQBot/超级管理员。首选通道失败时会自动回退。",
             "你可以使用 list_due_memos 查询已到期提醒，使用 get_next_memo_wake 取得下一次提醒唤醒时间；dispatch_due_memos 仅在需要批量取出到期项时使用。",
             "到期提醒必须先确认已经 notify_user 成功或已经对用户产生真实提醒，再使用 mark_memo_triggered 或 dispatch_due_memos 的 mark_dispatched 标记，避免后台重复提醒。普通一次性 reminder 使用 mark_memo_triggered 后会自动完成；todo 或重复提醒不会自动完成，除非用户明确表示完成。",

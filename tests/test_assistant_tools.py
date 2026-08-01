@@ -55,7 +55,8 @@ class AssistantToolsTest(unittest.IsolatedAsyncioTestCase):
 
         switch.assert_awaited_once_with(2)
         self.assertTrue(result["details"]["historyPreserved"])
-        self.assertIn("下一次模型续跑", result["content"][0]["text"])
+        self.assertIn("你现在是助手「助手 B」", result["content"][0]["text"])
+        self.assertIn("不要替原助手告别或转交", result["content"][0]["text"])
 
     async def test_subagent_cannot_switch_session_assistant(self):
         tools = create_assistant_tools(
