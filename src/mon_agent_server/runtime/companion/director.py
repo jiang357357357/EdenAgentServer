@@ -6,10 +6,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from ..ids import create_id
-from ..llm.sync import call_openai_compatible
-from ..logging import get_logger
-from .config import RuntimeModelConfig
+from ...ids import create_id
+from ...llm.sync import call_openai_compatible
+from ...logging import get_logger
+from ..config import RuntimeModelConfig
 
 logger = get_logger("MonAgent", "CompanionDirector")
 

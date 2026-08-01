@@ -370,7 +370,7 @@ def build_subagent_system_prompt(
     budget: SubagentBudget | None = None,
     environment: dict[str, Any] | None = None,
 ) -> str:
-    from ..prompts.builder import build_environment_awareness_section
+    from mon_agent_server.prompts.builder import build_environment_awareness_section
 
     effective_policy = tool_policy or definition.tool_policy
     effective_budget = budget or definition.budget

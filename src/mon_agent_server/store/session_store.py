@@ -250,6 +250,20 @@ class SessionStore:
                 "nextCursor": str(items[0].get("info", {}).get("id")) if start > 0 and items else None,
             }
 
+    def message_page(
+        self,
+        session_id: str,
+        limit: int = 100,
+        before: str | None = None,
+        include_compactions: bool = False,
+    ) -> dict[str, Any]:
+        return self.list_message_page(
+            session_id,
+            limit=limit,
+            before=before,
+            include_compactions=include_compactions,
+        )
+
     def hydrate_messages(
         self,
         session_id: str,

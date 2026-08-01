@@ -28,7 +28,8 @@ class RuntimeModelConfig:
         self.source = source
         self.core = core
         self.supports_images = "image" in (model.get("input") or [])
-        self.thinking_level = "medium" if model.get("reasoning") else "off"
+        configured_level = str(model.get("thinkingLevel") or "medium").strip().lower()
+        self.thinking_level = configured_level if model.get("reasoning") else "off"
         self.delegation_policy = DelegationPolicy.from_environment()
 
 

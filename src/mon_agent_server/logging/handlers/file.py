@@ -144,6 +144,14 @@ class FileHandler(BaseHandler):
                 print(f"[MonAgentLogs] 无法写入日志文件: {self.path}: {error}", file=sys.stderr)
                 if isinstance(error, PermissionError):
                     print(f"[MonAgentLogs] 请检查目录权限或文件是否被占用: {os.fspath(self.path.parent)}", file=sys.stderr)
+            finally:
+                # Windows does not allow a TemporaryDirectory (or an upgraded
+                # log file) to be removed while a cached handler still owns an
+                # open file descriptor. Keep handler objects cached, but open
+                # the underlying file only for the duration of each write.
+                if self.stream and not self.stream.closed:
+                    self.stream.close()
+                self.stream = None
 
     def close(self) -> None:
         with self._lock:

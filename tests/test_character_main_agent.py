@@ -133,8 +133,8 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(runtime, "_resolve_runtime_config", return_value=config_b),
-            patch("mon_agent_server.runtime.manager.session_from_map", side_effect=lambda value: value),
-            patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=fake_stream),
+            patch("mon_agent_server.runtime.execution.character.session_from_map", side_effect=lambda value: value),
+            patch("mon_agent_server.runtime.execution.character.stream_openai_compatible", new=fake_stream),
         ):
             _, reply = await runtime._run_character_main_agent(
                 session_id=session["id"],
@@ -192,7 +192,7 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.Event().wait()
 
         with (
-            patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=hanging_stream),
+            patch("mon_agent_server.runtime.execution.character.stream_openai_compatible", new=hanging_stream),
             self.assertRaisesRegex(RuntimeError, "模型请求超时.*fake/hanging"),
         ):
             await runtime._run_character_main_agent(
@@ -227,7 +227,7 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
             captured["tools"] = [tool.name for tool in context["tools"]]
             return stream_message("您好。")
 
-        with patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=fake_stream):
+        with patch("mon_agent_server.runtime.execution.character.stream_openai_compatible", new=fake_stream):
             message, reply = await runtime._run_character_main_agent(
                 session_id=session["id"],
                 parts=[{"type": "text", "text": "你好"}],
@@ -265,6 +265,57 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(event["type"].startswith("subagent.") for event in events.events))
         runtime.close()
 
+    async def test_memory_recall_failure_does_not_abort_character_reply(self) -> None:
+        class FailingMemoryCore:
+            @staticmethod
+            def list_memories(_token, _params):
+                raise RuntimeError("Core memory endpoint unavailable")
+
+            @staticmethod
+            def sync_agent_message(_token, _session, message, _core):
+                return message
+
+        store = SessionStore()
+        session = store.create_session("memory fallback")
+        user_message = store.append_user_message(session["id"], "你好", [])
+        runtime = MonAgentRuntime(Path.cwd(), store, EventRecorder(), None, None, FailingMemoryCore())
+        config = RuntimeModelConfig(
+            {"id": "fake", "name": "Fake", "api": "fake", "provider": "fake", "input": ["text"]},
+            None,
+            "Fake",
+            "test",
+            {
+                "assistant": {"id": 1, "name": "助手"},
+                "character": {"id": 2, "name": "角色"},
+                "aiEntity": {},
+            },
+        )
+
+        async def fake_stream(_model, _context, _options):
+            return stream_message("仍然可以回复。")
+
+        try:
+            with patch("mon_agent_server.runtime.execution.character.stream_openai_compatible", new=fake_stream):
+                message, reply = await runtime._run_character_main_agent(
+                    session_id=session["id"],
+                    parts=[{"type": "text", "text": "你好"}],
+                    user_message=user_message,
+                    auth_token="token",
+                    runtime_config=config,
+                    run_state=RunState(speaker={"assistantID": 1, "assistantName": "助手"}),
+                    beat=DirectorBeat(1, "回应"),
+                    scene=None,
+                    execution=None,
+                    previous_replies=[],
+                    environment=None,
+                    skill_owner_key=None,
+                )
+        finally:
+            runtime.close()
+
+        self.assertIsNotNone(message)
+        self.assertEqual(reply, "仍然可以回复。")
+
     async def test_explicit_delegation_mode_is_reflected_in_system_prompt(self) -> None:
         store = SessionStore()
         session = store.create_session("显式委派")
@@ -281,7 +332,7 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
             captured["prompt"] = context["systemPrompt"]
             return stream_message("完成")
 
-        with patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=fake_stream):
+        with patch("mon_agent_server.runtime.execution.character.stream_openai_compatible", new=fake_stream):
             await runtime._run_character_main_agent(
                 session_id=session["id"], parts=[{"type": "text", "text": "你好"}],
                 user_message=user_message, auth_token=None, runtime_config=config,
@@ -319,7 +370,7 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 return tool_call_message("load_skill", {"skills": ["web-research"]})
             return stream_message("已经可以开始网页研究。")
 
-        with patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=fake_stream):
+        with patch("mon_agent_server.runtime.execution.character.stream_openai_compatible", new=fake_stream):
             _, reply = await runtime._run_character_main_agent(
                 session_id=session["id"],
                 parts=[{"type": "text", "text": "查询最新资料"}],
@@ -375,7 +426,7 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
             ]
 
         with (
-            patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=fake_stream),
+            patch("mon_agent_server.runtime.execution.character.stream_openai_compatible", new=fake_stream),
             patch.object(runtime, "compact_agent_messages_if_needed", new=fake_compact),
         ):
             _, reply = await runtime._run_character_main_agent(
@@ -414,7 +465,7 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
             captured["tools"] = {tool.name for tool in context["tools"]}
             return stream_message("我会把实际操作交给本轮负责人。")
 
-        with patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=fake_stream):
+        with patch("mon_agent_server.runtime.execution.character.stream_openai_compatible", new=fake_stream):
             await runtime._run_character_main_agent(
                 session_id=session["id"],
                 parts=[{"type": "text", "text": text}],

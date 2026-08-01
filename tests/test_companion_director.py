@@ -53,7 +53,7 @@ class CompanionDirectorTests(unittest.IsolatedAsyncioTestCase):
         execution: dict[str, object] | None = None,
     ):
         with patch(
-            "mon_agent_server.runtime.companion.call_openai_compatible",
+            "mon_agent_server.runtime.companion.director.call_openai_compatible",
             return_value=director_response(beats, scene, execution),
         ):
             return await create_director_plan(
@@ -93,7 +93,7 @@ class CompanionDirectorTests(unittest.IsolatedAsyncioTestCase):
     async def test_director_receives_recent_conversation_and_attachment_context(self) -> None:
         response = director_response([{"assistantID": 1, "intent": "继续处理"}])
         with patch(
-            "mon_agent_server.runtime.companion.call_openai_compatible",
+            "mon_agent_server.runtime.companion.director.call_openai_compatible",
             return_value=response,
         ) as call:
             await create_director_plan(
@@ -190,7 +190,7 @@ class CompanionDirectorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_model_failure_falls_back_to_data_derived_mentioned_assistant(self) -> None:
         with patch(
-            "mon_agent_server.runtime.companion.call_openai_compatible",
+            "mon_agent_server.runtime.companion.director.call_openai_compatible",
             side_effect=RuntimeError("director unavailable"),
         ):
             plan = await create_director_plan(
@@ -212,7 +212,7 @@ class CompanionDirectorTests(unittest.IsolatedAsyncioTestCase):
             ]
         }
         with patch(
-            "mon_agent_server.runtime.companion.call_openai_compatible",
+            "mon_agent_server.runtime.companion.director.call_openai_compatible",
             return_value=response,
         ) as call:
             plan = await create_director_plan(
@@ -230,7 +230,7 @@ class CompanionDirectorTests(unittest.IsolatedAsyncioTestCase):
         response = director_response([{"assistantID": 2, "intent": "回应用户"}])
         response["choices"][0]["message"]["reasoning_content"] = "hidden reasoning"
         with patch(
-            "mon_agent_server.runtime.companion.call_openai_compatible",
+            "mon_agent_server.runtime.companion.director.call_openai_compatible",
             return_value=response,
         ):
             plan = await create_director_plan(
@@ -242,7 +242,7 @@ class CompanionDirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan.diagnostic, "director_reasoning_not_disabled")
 
     async def test_single_participant_bypasses_director_model(self) -> None:
-        with patch("mon_agent_server.runtime.companion.call_openai_compatible") as call:
+        with patch("mon_agent_server.runtime.companion.director.call_openai_compatible") as call:
             plan = await create_director_plan(
                 user_text="修复这个项目的代码",
                 participants=PARTICIPANTS[:1],

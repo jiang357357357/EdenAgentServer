@@ -38,7 +38,7 @@ def runtime_config_from_model(
         source=source,
         core=core,
         supports_images="image" in (model.get("input") or []),
-        thinking_level="medium" if model.get("reasoning") else "off",
+        thinking_level=str(model.get("thinkingLevel") or "medium") if model.get("reasoning") else "off",
     )
 
 

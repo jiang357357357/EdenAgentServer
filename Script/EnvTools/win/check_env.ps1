@@ -7,35 +7,35 @@ $VenvPython = Join-Path $ServerRoot.Path ".venv\Scripts\python.exe"
 $Ok = $true
 
 Write-Host "========================================================"
-Write-Host "          MonAgent Server 环境检查工具 (Windows)"
+Write-Host "          MonAgent Server environment checker (Windows)"
 Write-Host "========================================================"
-Write-Host "Server 目录: $($ServerRoot.Path)"
+Write-Host "Server directory: $($ServerRoot.Path)"
 Write-Host ""
 
 if (Test-Path (Join-Path $ServerRoot.Path "pyproject.toml")) {
-  Write-Host "✓ pyproject.toml 存在"
+  Write-Host "[OK] pyproject.toml exists"
 } else {
-  Write-Host "✗ 未找到 pyproject.toml" -ForegroundColor Red
+  Write-Host "[x] pyproject.toml not found" -ForegroundColor Red
   $Ok = $false
 }
 
 if (Get-Command "uv" -ErrorAction SilentlyContinue) {
-  Write-Host "✓ $(& uv --version)"
+  Write-Host "[OK] $(& uv --version)"
 } else {
-  Write-Host "✗ UV 未安装" -ForegroundColor Red
+  Write-Host "[x] uv is not installed" -ForegroundColor Red
   $Ok = $false
 }
 
 if (Test-Path $VenvPython) {
-  Write-Host "✓ Python: $(& $VenvPython --version)"
+  Write-Host "[OK] Python: $(& $VenvPython --version)"
   try {
-    & $VenvPython -c "import mon_agent_server, mon_agent_core, yaml, zmq; print('✓ dependencies ok')"
+    & $VenvPython -c "import mon_agent_server, mon_agent_core, yaml, zmq; print('[OK] dependencies available')"
   } catch {
-    Write-Host "✗ 关键依赖检查失败" -ForegroundColor Red
+    Write-Host "[x] Critical dependency check failed" -ForegroundColor Red
     $Ok = $false
   }
 } else {
-  Write-Host "✗ 虚拟环境不存在: $VenvPython" -ForegroundColor Red
+  Write-Host "[x] Virtual environment not found: $VenvPython" -ForegroundColor Red
   $Ok = $false
 }
 

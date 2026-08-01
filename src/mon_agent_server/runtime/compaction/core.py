@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from mon_agent_core.harness.compaction import DEFAULT_COMPACTION_SETTINGS
 
-from ..ids import now_ms
-from ..model_stream import stream_openai_compatible
+from ...ids import now_ms
+from ...model_stream import stream_openai_compatible
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -36,11 +36,18 @@ def runtime_compaction_settings() -> dict[str, Any]:
 
 
 def timestamp_iso(timestamp: Any) -> str:
+    if isinstance(timestamp, str):
+        try:
+            return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone().isoformat()
+        except ValueError:
+            pass
     try:
         value = float(timestamp) / 1000
-    except (TypeError, ValueError):
+        moment = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=value)
+    except (TypeError, ValueError, OverflowError):
         value = now_ms() / 1000
-    return datetime.fromtimestamp(value).astimezone().isoformat()
+        moment = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=value)
+    return moment.astimezone().isoformat()
 
 
 def messages_to_compaction_entries(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -63,6 +63,27 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(len(message["parts"]), 2)
         self.assertEqual(store.list_messages(session["id"], 10)[0]["info"]["id"], message["info"]["id"])
 
+    def test_message_page_uses_the_first_item_as_the_older_page_cursor(self):
+        store = SessionStore()
+        session = store.create_session("")
+        messages = [store.append_user_message(session["id"], f"message {index}", []) for index in range(5)]
+
+        newest = store.message_page(session["id"], limit=2)
+        self.assertEqual([item["info"]["id"] for item in newest["items"]], [
+            messages[3]["info"]["id"],
+            messages[4]["info"]["id"],
+        ])
+        self.assertTrue(newest["hasMore"])
+        self.assertEqual(newest["nextCursor"], messages[3]["info"]["id"])
+
+        older = store.message_page(session["id"], limit=2, before=newest["nextCursor"])
+        self.assertEqual([item["info"]["id"] for item in older["items"]], [
+            messages[1]["info"]["id"],
+            messages[2]["info"]["id"],
+        ])
+        self.assertTrue(older["hasMore"])
+        self.assertEqual(older["nextCursor"], messages[1]["info"]["id"])
+
     def test_ui_hydration_does_not_create_model_context(self):
         store = SessionStore()
         session = store.create_session("")

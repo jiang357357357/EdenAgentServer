@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import random
 import string
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..ids import now_ms
@@ -11,7 +11,10 @@ from ..ids import now_ms
 
 def to_storage_iso(value: int | float | None = None) -> str:
     millis = now_ms() if value is None else value
-    return datetime.fromtimestamp(millis / 1000).astimezone().isoformat()
+    # Windows rejects some valid pre-epoch/near-epoch timestamps in
+    # ``fromtimestamp``. UTC arithmetic is portable across supported hosts.
+    moment = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=millis)
+    return moment.astimezone().isoformat()
 
 
 def unwrap_results(value: Any) -> list[Any]:

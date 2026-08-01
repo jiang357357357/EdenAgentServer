@@ -13,6 +13,7 @@ dependencies = [
     "pyzmq>=26",
     "rich>=13",
     "PyYAML>=6.0",
+    "tzdata>=2025.2; platform_system == 'Windows'",
 ]
 
 [tool.uv]

@@ -78,6 +78,19 @@ class ColoredLogger:
     def error(self, message: str, *args: Any, **kwargs: Any) -> None:
         self._log("ERROR", message.format(*args) if args else message, exc_info=kwargs.get("exc_info"))
 
+    def exception(self, message: str, *args: Any, **kwargs: Any) -> None:
+        """Log an ERROR message with the active exception traceback.
+
+        Match ``logging.Logger.exception`` by enabling ``exc_info`` by default,
+        while still allowing callers to provide an explicit exception or
+        ``exc_info`` tuple.
+        """
+        self._log(
+            "ERROR",
+            message.format(*args) if args else message,
+            exc_info=kwargs.get("exc_info", True),
+        )
+
     def critical(self, message: str, *args: Any, **kwargs: Any) -> None:
         self._log("CRITICAL", message.format(*args) if args else message, exc_info=kwargs.get("exc_info"))
 
