@@ -49,7 +49,10 @@ class ExternalFileToolsTest(unittest.IsolatedAsyncioTestCase):
             (root / "Steam" / "game").mkdir(parents=True)
             (root / "Steam" / "game" / "save-slot.dat").write_text("ok", encoding="utf-8")
             (Path(secret) / "secret-save.dat").write_text("secret", encoding="utf-8")
-            (root / "escaped").symlink_to(secret, target_is_directory=True)
+            try:
+                (root / "escaped").symlink_to(secret, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"当前平台无法创建目录符号链接: {error}")
             tools = create_external_file_tools(
                 Path(workspace), MonToolContext(session_id="ses_test", permissions=AllowBroker())
             )
@@ -67,7 +70,10 @@ class ExternalFileToolsTest(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as workspace, TemporaryDirectory() as external, TemporaryDirectory() as secret:
             root = Path(external)
             (Path(secret) / "token.txt").write_text("hidden", encoding="utf-8")
-            (root / "link.txt").symlink_to(Path(secret) / "token.txt")
+            try:
+                (root / "link.txt").symlink_to(Path(secret) / "token.txt")
+            except OSError as error:
+                self.skipTest(f"当前平台无法创建文件符号链接: {error}")
             tools = create_external_file_tools(
                 Path(workspace), MonToolContext(session_id="ses_test", permissions=AllowBroker())
             )

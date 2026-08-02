@@ -79,6 +79,22 @@ class LoggingTest(unittest.TestCase):
             self.assertIn("[MonAgent][test][WARNING]", text)
             self.assertIn("bridged warning", text)
 
+    def test_exception_logs_active_traceback_without_masking_original_error(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            _, plain_log_file = self.configure_temp_logs(Path(temp_dir) / "Text")
+            logger = get_logger("MonAgent", "Exception")
+
+            try:
+                raise RuntimeError("core unavailable")
+            except RuntimeError:
+                logger.exception("memory recall failed: session={}", "session-1")
+
+            text = plain_log_file.read_text(encoding="utf-8")
+            self.assertIn("[MonAgent][Exception][ERROR]", text)
+            self.assertIn("memory recall failed: session=session-1", text)
+            self.assertIn("Traceback (most recent call last)", text)
+            self.assertIn("RuntimeError: core unavailable", text)
+
 
 if __name__ == "__main__":
     unittest.main()

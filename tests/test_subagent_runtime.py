@@ -119,7 +119,7 @@ class SubagentRuntimeIntegrationTest(unittest.IsolatedAsyncioTestCase):
             messages_provider=lambda: [],
         )
 
-        with patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=fake_stream):
+        with patch("mon_agent_server.runtime.coordination.runtime.stream_openai_compatible", new=fake_stream):
             spawned = await dispatcher(
                 "spawn",
                 {
@@ -194,7 +194,7 @@ class SubagentRuntimeIntegrationTest(unittest.IsolatedAsyncioTestCase):
             skill_owner_key=None,
             messages_provider=lambda: [],
         )
-        with patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=tool_loop_stream):
+        with patch("mon_agent_server.runtime.coordination.runtime.stream_openai_compatible", new=tool_loop_stream):
             spawned = await dispatcher(
                 "spawn", {"message": "循环", "task_name": "limited", "role": "limited", "required_for_final": False}
             )
@@ -245,7 +245,7 @@ class SubagentRuntimeIntegrationTest(unittest.IsolatedAsyncioTestCase):
             parent_run_id="run_parent_required",
         )
         with (
-            patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=fake_stream),
+            patch("mon_agent_server.runtime.coordination.runtime.stream_openai_compatible", new=fake_stream),
             patch.object(runtime, "_schedule_ready_aggregation", return_value=True) as schedule,
         ):
             spawned = await dispatcher(
@@ -307,7 +307,7 @@ class SubagentRuntimeIntegrationTest(unittest.IsolatedAsyncioTestCase):
             auth_token=None, environment=None, skill_owner_key=None, messages_provider=lambda: [],
         )
         with (
-            patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=immediate_stream),
+            patch("mon_agent_server.runtime.coordination.runtime.stream_openai_compatible", new=immediate_stream),
             patch.object(runtime, "_schedule_ready_aggregation", return_value=True),
         ):
             spawned = await dispatcher(
@@ -437,7 +437,7 @@ class SubagentRuntimeIntegrationTest(unittest.IsolatedAsyncioTestCase):
             session_id=session["id"], parent_path="/root", runtime_config=config,
             auth_token=None, environment=None, skill_owner_key=None, messages_provider=lambda: [],
         )
-        with patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=tool_loop_stream):
+        with patch("mon_agent_server.runtime.coordination.runtime.stream_openai_compatible", new=tool_loop_stream):
             spawned = await dispatcher(
                 "spawn", {"message": "循环", "task_name": "tool_limited", "role": "limited", "required_for_final": False}
             )
@@ -492,7 +492,7 @@ class SubagentRuntimeIntegrationTest(unittest.IsolatedAsyncioTestCase):
             messages_provider=lambda: [],
         )
 
-        with patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=fake_stream):
+        with patch("mon_agent_server.runtime.coordination.runtime.stream_openai_compatible", new=fake_stream):
             spawned = await first_dispatcher(
                 "spawn",
                 {"message": "第一次任务", "task_name": "saved_worker", "role": "reviewer", "required_for_final": False},
@@ -575,7 +575,7 @@ class SubagentRuntimeIntegrationTest(unittest.IsolatedAsyncioTestCase):
             messages_provider=lambda: [],
         )
 
-        with patch("mon_agent_server.runtime.manager.stream_openai_compatible", new=fake_stream):
+        with patch("mon_agent_server.runtime.coordination.runtime.stream_openai_compatible", new=fake_stream):
             spawned = await first_dispatcher(
                 "spawn",
                 {"message": "执行", "task_name": "durable_result", "role": "reviewer", "required_for_final": False},

@@ -13,7 +13,8 @@ from typing import Any, Callable
 from mon_agent_core import AssistantMessageEventStream
 from mon_agent_core.types import now_ms
 from .messages import message_content, to_openai_messages
-from .models import core_model, endpoint_to_chat_url, env_model, http_user_agent, normalize_vendor, trim_endpoint_to_base
+from .models import core_model, endpoint_to_chat_url, env_model, http_user_agent, normalize_vendor, trim_endpoint_to_base, uses_responses_api
+from .responses import stream_responses_sync
 from .sync import call_openai_compatible
 from .tools import parse_tool_arguments, tool_payload
 from .usage import (
@@ -33,6 +34,9 @@ def _openai_stream_payload(model: dict[str, Any], context: dict[str, Any], optio
     }
     if options.get("maxTokens"):
         payload["max_tokens"] = options.get("maxTokens")
+    reasoning = str(options.get("reasoning") or "off").strip().lower()
+    if reasoning != "off":
+        payload["reasoning_effort"] = reasoning
     tools = tool_payload(context.get("tools", []))
     if tools:
         payload["tools"] = tools
@@ -58,6 +62,10 @@ def _stream_openai_compatible_sync(
     options: dict[str, Any],
     push: Callable[[dict[str, Any]], None],
 ) -> None:
+    if uses_responses_api(model):
+        stream_responses_sync(model, context, options, push)
+        return
+
     api_key = options.get("apiKey")
     if not api_key:
         raise RuntimeError(f"模型 {model.get('provider')}/{model.get('id')} 缺少 API Key")

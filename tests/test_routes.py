@@ -8,6 +8,7 @@ from mon_agent_server.http.routes.sessions import handle_sessions
 from mon_agent_server.core import CoreAuthenticationExpiredError
 from mon_agent_server.http_server import AgentRequestHandler
 from mon_agent_server.llm.models import core_model
+from mon_agent_server.runtime.config.models import RuntimeModelConfig
 
 
 class RouteTest(unittest.TestCase):
@@ -278,6 +279,22 @@ class RouteTest(unittest.TestCase):
         )
 
         self.assertEqual(model["contextWindow"], 128000)
+
+    def test_core_model_maps_reasoning_settings_into_runtime(self):
+        model, api_key, label, source = core_model(
+            {
+                "aiEntity": {
+                    "vendor": "opencode_go",
+                    "ai_model": "gpt-5.6-luna",
+                    "default_params": {"thinking_enabled": True, "reasoning_effort": "high"},
+                }
+            }
+        )
+
+        runtime = RuntimeModelConfig(model, api_key, label, source, None)
+        self.assertTrue(model["reasoning"])
+        self.assertEqual(model["thinkingLevel"], "high")
+        self.assertEqual(runtime.thinking_level, "high")
 
     def test_compact_route_starts_manual_compaction(self):
         calls = []

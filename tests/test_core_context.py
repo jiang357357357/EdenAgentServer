@@ -1,6 +1,10 @@
+from pathlib import Path
 import unittest
 
 from mon_agent_server.core import CoreClient
+from mon_agent_server.runtime import MonAgentRuntime
+from mon_agent_server.skills import owner_storage_key
+from mon_agent_server.store import SessionStore
 
 
 class CoreContextTest(unittest.TestCase):
@@ -155,6 +159,32 @@ class CoreContextTest(unittest.TestCase):
 
         restored = client.get_agent_session("token", "ses_actions")
         self.assertEqual(restored["info"]["characterPerformances"], performances)
+
+
+class RuntimeUserContextTest(unittest.IsolatedAsyncioTestCase):
+    async def test_user_environment_overrides_local_defaults(self) -> None:
+        class ProfileCoreClient:
+            @staticmethod
+            def get_user_profile(_token):
+                return {"id": 7, "environment": {"city": "杭州"}}
+
+        runtime = MonAgentRuntime(
+            Path.cwd(),
+            SessionStore(),
+            None,
+            None,
+            None,
+            ProfileCoreClient(),
+            environment={"timezone": "Asia/Shanghai", "city": "上海"},
+        )
+        try:
+            environment, owner_key = await runtime._resolve_user_context("token")
+        finally:
+            runtime.close()
+
+        self.assertEqual(environment["timezone"], "Asia/Shanghai")
+        self.assertEqual(environment["city"], "杭州")
+        self.assertEqual(owner_key, owner_storage_key(7))
 
 
 if __name__ == "__main__":

@@ -5,10 +5,10 @@ from typing import Any
 
 from mon_agent_core.harness.compaction import estimate_context_tokens
 
-from ..core import CoreAuthenticationExpiredError
-from ..ids import create_id, now_ms
-from .messages import text_from_tool_result
-from .state import RunState
+from ...core import CoreAuthenticationExpiredError
+from ...ids import create_id, now_ms
+from ..messages import text_from_tool_result
+from ..state import RunState
 
 
 def strip_current_speaker_prefix(text: str, speaker: dict[str, Any] | None) -> str:

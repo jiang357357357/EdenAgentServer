@@ -156,7 +156,10 @@ class SkillInstallationServiceTest(unittest.TestCase):
         self.assertEqual(before, after)
 
     def test_symbolic_links_are_rejected(self) -> None:
-        (self.source / "outside-link").symlink_to(self.workspace / "outside")
+        try:
+            (self.source / "outside-link").symlink_to(self.workspace / "outside")
+        except OSError as error:
+            self.skipTest(f"当前平台无法创建符号链接: {error}")
         with self.assertRaisesRegex(ValueError, "符号链接"):
             self.service.inspect(
                 self.owner_id,

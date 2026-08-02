@@ -20,6 +20,18 @@ def tool_payload(tools: list[Any]) -> list[dict[str, Any]]:
     return output
 
 
+def responses_tool_payload(tools: list[Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": dict(tool.parameters or {"type": "object", "properties": {}}),
+        }
+        for tool in tools
+    ]
+
+
 def parse_tool_arguments(raw: str | None) -> dict[str, Any]:
     if not raw:
         return {}

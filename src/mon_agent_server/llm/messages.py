@@ -139,3 +139,88 @@ def to_openai_messages(context: dict[str, Any]) -> list[dict[str, Any]]:
                     content.extend(image_content)
                 messages.append({"role": "user", "content": content})
     return messages
+
+
+def _responses_user_content(blocks: Any) -> str | list[dict[str, Any]]:
+    if isinstance(blocks, str):
+        return blocks
+    content: list[dict[str, Any]] = []
+    for block in blocks if isinstance(blocks, list) else []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            content.append({"type": "input_text", "text": str(block.get("text") or "")})
+        elif block.get("type") == "image" and block.get("data"):
+            mime = block.get("mimeType") or "image/png"
+            content.append({"type": "input_image", "image_url": f"data:{mime};base64,{block.get('data')}"})
+    if not content:
+        return ""
+    if len(content) == 1 and content[0]["type"] == "input_text":
+        return content[0]["text"]
+    return content
+
+
+def to_responses_input(context: dict[str, Any]) -> list[dict[str, Any]]:
+    """Convert durable AgentCore context to stateless Responses API input items."""
+    items: list[dict[str, Any]] = []
+    for message in context.get("messages", []):
+        role = message.get("role")
+        if role == "user":
+            items.append({"role": "user", "content": _responses_user_content(message.get("content"))})
+        elif role == "compactionSummary":
+            summary = str(message.get("summary") or "")
+            items.append(
+                {
+                    "role": "user",
+                    "content": "The conversation history before this point was compacted into the following summary:\n\n"
+                    f"<summary>\n{summary}\n</summary>",
+                }
+            )
+        elif role == "assistant":
+            if message.get("errorMessage") or message.get("stopReason") in {"error", "aborted"}:
+                continue
+            blocks = [block for block in message.get("content", []) if isinstance(block, dict)]
+            text = "".join(
+                str(block.get("text") or "")
+                for block in blocks
+                if block.get("type") == "text" and str(block.get("text") or "").strip()
+            )
+            if text:
+                items.append({"role": "assistant", "content": text})
+            for block in blocks:
+                if block.get("type") != "toolCall":
+                    continue
+                call_id = str(block.get("id") or "")
+                item: dict[str, Any] = {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": block.get("name") or "unknown_tool",
+                    "arguments": json.dumps(block.get("arguments") or {}, ensure_ascii=False),
+                }
+                provider_item_id = block.get("providerItemId")
+                if provider_item_id:
+                    item["id"] = provider_item_id
+                items.append(item)
+        elif role == "toolResult":
+            blocks = [block for block in message.get("content", []) if isinstance(block, dict)]
+            text = "\n".join(str(block.get("text") or "") for block in blocks if block.get("type") == "text")
+            images = [block for block in blocks if block.get("type") == "image" and block.get("data")]
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": message.get("toolCallId"),
+                    "output": text or ("The tool returned an image." if images else ""),
+                }
+            )
+            if images:
+                image_content = _responses_user_content(images)
+                content: list[dict[str, Any]] = [
+                    {
+                        "type": "input_text",
+                        "text": f"The following image was returned by {message.get('toolName') or 'an image tool'}. Analyze it directly.",
+                    }
+                ]
+                if isinstance(image_content, list):
+                    content.extend(image_content)
+                items.append({"role": "user", "content": content})
+    return items

@@ -65,7 +65,7 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
                 }
             )
 
-        with patch("mon_agent_server.runtime.manager.compact_context", side_effect=fake_compact):
+        with patch("mon_agent_server.runtime.execution.compaction.compact_context", side_effect=fake_compact):
             compacted = await runtime.compact_agent_messages_if_needed(
                 session_id,
                 RunState(),
@@ -133,7 +133,7 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
                 }
             )
 
-        with patch("mon_agent_server.runtime.manager.compact_context", side_effect=fake_compact):
+        with patch("mon_agent_server.runtime.execution.compaction.compact_context", side_effect=fake_compact):
             await runtime.compact_agent_messages_if_needed(
                 session_id,
                 RunState(),

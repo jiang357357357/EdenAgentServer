@@ -6,6 +6,7 @@ import urllib.error
 from unittest.mock import patch
 
 from mon_agent_server.model_stream import _usage_from_openai, call_openai_compatible, stream_openai_compatible, to_openai_messages
+from mon_agent_server.llm.messages import to_responses_input
 
 
 class FakeResponse:
@@ -430,6 +431,94 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
         thinking = events[-1]["message"]["content"][0]
         self.assertEqual(thinking["thinking"], "inspect")
         self.assertEqual(thinking["thinkingSignature"], "reasoning_content")
+
+    async def test_luna_uses_responses_api_and_streams_reasoning_text_and_usage(self):
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["url"] = request.full_url
+            captured["body"] = json.loads(request.data.decode())
+            return FakeStreamResponse(
+                [
+                    b'data: {"type":"response.reasoning_summary_text.delta","delta":"inspect"}\n\n',
+                    b'data: {"type":"response.output_text.delta","delta":"done"}\n\n',
+                    b'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":7,"output_tokens":5,"input_tokens_details":{"cached_tokens":2}}}}\n\n',
+                    b"data: [DONE]\n\n",
+                ]
+            )
+
+        model = {
+            "id": "gpt-5.6-luna",
+            "api": "openai-completions",
+            "provider": "opencode-go",
+            "baseUrl": "https://opencode.ai/zen/go/v1",
+            "reasoning": True,
+        }
+        context = {"systemPrompt": "be concise", "messages": [{"role": "user", "content": "solve"}], "tools": []}
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test", "reasoning": "medium"})
+            events = [event async for event in stream]
+
+        self.assertEqual(captured["url"], "https://opencode.ai/zen/go/v1/responses")
+        self.assertEqual(captured["body"]["reasoning"], {"effort": "medium", "summary": "detailed"})
+        self.assertEqual(captured["body"]["instructions"], "be concise")
+        self.assertEqual(events[-1]["message"]["content"][0]["thinking"], "inspect")
+        self.assertEqual(events[-1]["message"]["content"][1]["text"], "done")
+        self.assertEqual(events[-1]["message"]["usage"]["totalTokens"], 12)
+
+    async def test_luna_responses_streams_tool_call_and_replays_tool_output(self):
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["body"] = json.loads(request.data.decode())
+            return FakeStreamResponse(
+                [
+                    b'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read","arguments":""}}\n\n',
+                    b'data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\"path\\":\\"a.txt\\"}"}\n\n',
+                    b'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read","arguments":"{\\"path\\":\\"a.txt\\"}"}}\n\n',
+                    b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+                    b"data: [DONE]\n\n",
+                ]
+            )
+
+        class Tool:
+            name = "read"
+            description = "Read a file"
+            parameters = {"type": "object", "properties": {"path": {"type": "string"}}}
+
+        model = {
+            "id": "gpt-5.6-luna",
+            "provider": "opencode-go",
+            "baseUrl": "https://opencode.ai/zen/go/v1",
+        }
+        context = {"messages": [{"role": "user", "content": "read"}], "tools": [Tool()]}
+        with patch("urllib.request.urlopen", fake_urlopen):
+            stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test", "reasoning": "medium"})
+            events = [event async for event in stream]
+
+        self.assertEqual(captured["body"]["tools"][0]["name"], "read")
+        tool_call = events[-1]["message"]["content"][0]
+        self.assertEqual(tool_call["id"], "call_1")
+        self.assertEqual(tool_call["providerItemId"], "fc_1")
+        self.assertEqual(tool_call["arguments"], {"path": "a.txt"})
+        self.assertEqual(events[-1]["message"]["stopReason"], "tool_calls")
+
+        replay = to_responses_input(
+            {
+                "messages": [
+                    {"role": "assistant", "content": [tool_call]},
+                    {
+                        "role": "toolResult",
+                        "toolCallId": "call_1",
+                        "content": [{"type": "text", "text": "contents"}],
+                    },
+                ]
+            }
+        )
+        self.assertEqual(replay[0]["id"], "fc_1")
+        self.assertEqual(replay[0]["call_id"], "call_1")
+        self.assertEqual(replay[1], {"type": "function_call_output", "call_id": "call_1", "output": "contents"})
 
 
 if __name__ == "__main__":

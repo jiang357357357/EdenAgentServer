@@ -56,7 +56,7 @@ class RuntimePersistenceTest(unittest.IsolatedAsyncioTestCase):
         core = TransientCoreClient([RuntimeError("database is locked"), RuntimeError("temporary 500"), {"sync_status": "synced"}])
         runtime, session, message = self.runtime_with(core)
 
-        with patch("mon_agent_server.runtime.manager.asyncio.sleep", new=AsyncMock()) as sleep:
+        with patch("mon_agent_server.runtime.persistence.core_sync.asyncio.sleep", new=AsyncMock()) as sleep:
             await runtime.sync_core_message(session["id"], message, "token", None)
 
         self.assertEqual(core.message_attempts, 3)
@@ -66,7 +66,7 @@ class RuntimePersistenceTest(unittest.IsolatedAsyncioTestCase):
         core = TransientCoreClient([{"sync_status": "failed"}, {"sync_status": "synced"}])
         runtime, session, message = self.runtime_with(core)
 
-        with patch("mon_agent_server.runtime.manager.asyncio.sleep", new=AsyncMock()) as sleep:
+        with patch("mon_agent_server.runtime.persistence.core_sync.asyncio.sleep", new=AsyncMock()) as sleep:
             await runtime.sync_core_message(session["id"], message, "token", None)
 
         self.assertEqual(core.message_attempts, 2)
