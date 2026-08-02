@@ -6,6 +6,7 @@ import os
 import secrets
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 
@@ -24,6 +25,27 @@ class ServiceAuthenticationError(PermissionError):
 
 _seen_nonces: dict[str, int] = {}
 _nonce_lock = threading.Lock()
+
+
+def _load_workspace_service_environment() -> None:
+    for parent in Path(__file__).resolve().parents:
+        if not (parent / ".monconfig").is_file():
+            continue
+        env_file = parent / "Config" / "ENV" / "service-auth.env"
+        if not env_file.is_file():
+            continue
+        for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() == SERVICE_SECRET_ENV:
+                os.environ.setdefault(SERVICE_SECRET_ENV, value.strip().strip('"').strip("'"))
+                return
+        return
+
+
+_load_workspace_service_environment()
 
 
 def canonical_service_message(
