@@ -55,6 +55,10 @@ def handle_sessions(handler: Any, path: str, query: dict[str, list[str]], method
                 [participant["assistantID"] for participant in participants],
             )
         handler.app.events.emit({"type": "session.created", "properties": {"sessionID": session["id"], "info": session}})
+        initial_parts = body.get("parts")
+        if isinstance(initial_parts, list) and initial_parts:
+            handler.app.hydrate_permission_mode(token, session["id"])
+            handler.app.runtime.prompt_async(session["id"], initial_parts, token)
         handler.json_response(session)
         return True
 
@@ -62,6 +66,12 @@ def handle_sessions(handler: Any, path: str, query: dict[str, list[str]], method
     if participants_match and method == "PUT":
         session_id = urllib.parse.unquote(participants_match.group(1))
         token = require_core_token(handler.headers)
+        if handler.app.runtime.is_running(session_id):
+            handler.json_response(
+                {"error": "智能体正在处理当前任务，请等待本轮结束后再调整会话助手。"},
+                status=409,
+            )
+            return True
         body = handler.read_json_body()
         assistant_ids = body.get("assistantIDs")
         if not isinstance(assistant_ids, list) or not assistant_ids:
@@ -78,6 +88,28 @@ def handle_sessions(handler: Any, path: str, query: dict[str, list[str]], method
         info = handler.app.store.upsert_session_info(session_from_map(mapped))
         handler.app.events.emit({"type": "session.updated", "properties": {"sessionID": session_id, "info": info}})
         handler.json_response(info)
+        return True
+
+    session_match = re.match(r"^/session/([^/]+)$", path)
+    if session_match and method == "DELETE":
+        session_id = urllib.parse.unquote(session_match.group(1))
+        token = require_core_token(handler.headers)
+        if handler.app.runtime.is_running(session_id):
+            handler.json_response(
+                {"error": "智能体正在处理当前任务，请先停止任务再删除会话。"},
+                status=409,
+            )
+            return True
+        handler.app.core_client.delete_agent_session(token, session_id)
+        handler.app.runtime.forget_session(session_id)
+        handler.app.store.delete_session(session_id)
+        handler.app.forget_hydrated(session_id)
+        handler.app.permissions.reject_all(session_id, "session_deleted")
+        handler.app.questions.reject_all(session_id, "session_deleted")
+        handler.app.events.emit(
+            {"type": "session.deleted", "properties": {"sessionID": session_id}}
+        )
+        handler.json_response({"deleted": True, "sessionID": session_id})
         return True
 
     message_match = re.match(r"^/session/([^/]+)/message$", path)

@@ -271,6 +271,18 @@ class CoreClient:
             "modelEvents": model_events if isinstance(model_events, list) else [],
         }
 
+    def delete_agent_session(self, token: str, external_session_id: str) -> bool:
+        path = f"/api/agent/sessions/?external_session_id={urllib.parse.quote(external_session_id)}&limit=1"
+        session_map = (unwrap_results(self._request(path, token)) or [None])[0]
+        if not isinstance(session_map, dict) or session_map.get("id") is None:
+            return False
+        self._request(
+            f"/api/agent/sessions/{urllib.parse.quote(str(session_map['id']))}/",
+            token,
+            method="DELETE",
+        )
+        return True
+
     def sync_agent_message(
         self,
         token: str | None,

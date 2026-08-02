@@ -207,6 +207,10 @@ class SessionStore:
                 raise KeyError(f"Session not found: {session_id}")
             return session
 
+    def delete_session(self, session_id: str) -> bool:
+        with self._lock:
+            return self._sessions.pop(session_id, None) is not None
+
     def list_messages(self, session_id: str, limit: int = 100, include_compactions: bool = False) -> list[dict[str, Any]]:
         session = self.require_session(session_id)
         with self._lock:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import threading
 import uuid
 from copy import deepcopy
@@ -54,6 +55,14 @@ class SubagentThreadRepository:
             self._write_json_atomic(directory / "thread.json", saved)
             self._write_session_manifest(session_id)
             return deepcopy(saved)
+
+    def delete_session(self, session_id: str) -> bool:
+        with self._lock:
+            directory = self._session_dir(session_id, create=False)
+            if not directory.exists():
+                return False
+            shutil.rmtree(directory)
+            return True
 
     def append_event(self, session_id: str, agent_id: str, event: dict[str, Any]) -> dict[str, Any]:
         saved = {"sequenceID": f"evt_{uuid.uuid4().hex}", "time": now_ms(), **deepcopy(event)}

@@ -4,6 +4,16 @@ from mon_agent_server.store import SessionStore
 
 
 class StoreTest(unittest.TestCase):
+    def test_delete_session_removes_all_in_memory_data(self):
+        store = SessionStore()
+        session = store.create_session("")
+        store.append_user_message(session["id"], "hello", [])
+
+        self.assertTrue(store.delete_session(session["id"]))
+        self.assertFalse(store.delete_session(session["id"]))
+        with self.assertRaises(KeyError):
+            store.require_session(session["id"])
+
     def test_message_pages_walk_backwards_without_duplicates(self):
         store = SessionStore()
         session = store.create_session("")

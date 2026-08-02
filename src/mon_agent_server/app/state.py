@@ -89,6 +89,9 @@ class AppState:
     def mark_hydrated(self, session_id: str) -> None:
         self.hydrated_session_ids.add(session_id)
 
+    def forget_hydrated(self, session_id: str) -> None:
+        self.hydrated_session_ids.discard(session_id)
+
     def close(self) -> None:
         self.runtime.close()
 

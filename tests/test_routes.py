@@ -11,6 +11,189 @@ from mon_agent_server.llm.models import core_model
 
 
 class RouteTest(unittest.TestCase):
+    def test_delete_session_removes_core_and_local_state(self):
+        calls = []
+
+        class Runtime:
+            @staticmethod
+            def is_running(_session_id):
+                return False
+
+            @staticmethod
+            def forget_session(session_id):
+                calls.append(("runtime", session_id))
+
+        class CoreClient:
+            @staticmethod
+            def delete_agent_session(token, session_id):
+                calls.append(("core", token, session_id))
+                return True
+
+        class Store:
+            @staticmethod
+            def delete_session(session_id):
+                calls.append(("store", session_id))
+                return True
+
+        class Broker:
+            def __init__(self, name):
+                self.name = name
+
+            def reject_all(self, session_id, reason):
+                calls.append((self.name, session_id, reason))
+                return 0
+
+        class Events:
+            @staticmethod
+            def emit(event):
+                calls.append(("event", event["type"], event["properties"]["sessionID"]))
+
+        class App:
+            runtime = Runtime()
+            core_client = CoreClient()
+            store = Store()
+            permissions = Broker("permissions")
+            questions = Broker("questions")
+            events = Events()
+
+            @staticmethod
+            def forget_hydrated(session_id):
+                calls.append(("hydrated", session_id))
+
+        class Handler:
+            headers = {"Authorization": "Bearer core-token"}
+            app = App()
+
+            def json_response(self, data, status=200):
+                self.response = (data, status)
+
+        handler = Handler()
+        handled = handle_sessions(handler, "/session/session%201", {}, "DELETE")
+
+        self.assertTrue(handled)
+        self.assertEqual(calls[0], ("core", "core-token", "session 1"))
+        self.assertIn(("runtime", "session 1"), calls)
+        self.assertIn(("store", "session 1"), calls)
+        self.assertEqual(handler.response, ({"deleted": True, "sessionID": "session 1"}, 200))
+
+    def test_delete_session_rejects_running_session(self):
+        class Runtime:
+            @staticmethod
+            def is_running(_session_id):
+                return True
+
+        class App:
+            runtime = Runtime()
+
+        class Handler:
+            headers = {"Authorization": "Bearer core-token"}
+            app = App()
+
+            def json_response(self, data, status=200):
+                self.response = (data, status)
+
+        handler = Handler()
+        handled = handle_sessions(handler, "/session/session-1", {}, "DELETE")
+
+        self.assertTrue(handled)
+        self.assertEqual(handler.response[1], HTTPStatus.CONFLICT)
+
+    def test_session_creation_can_start_initial_prompt(self):
+        calls = []
+
+        class Store:
+            @staticmethod
+            def create_session(title, participants):
+                calls.append(("create", title, participants[0]["assistantID"]))
+                return {"id": "session-1", "title": title, "participants": participants}
+
+        class CoreClient:
+            @staticmethod
+            def get_current_assistant(token):
+                return {"id": 7, "name": "伊芙", "character": {"id": 9, "name": "伊芙"}}
+
+            @staticmethod
+            def sync_agent_session(token, session):
+                calls.append(("sync", token, session["id"]))
+
+            @staticmethod
+            def update_agent_session_participants(token, session, assistant_ids):
+                calls.append(("participants", assistant_ids))
+
+        class Runtime:
+            @staticmethod
+            def prompt_async(session_id, parts, token):
+                calls.append(("prompt", session_id, parts, token))
+
+        class Events:
+            @staticmethod
+            def emit(event):
+                calls.append(("event", event["type"]))
+
+        class App:
+            store = Store()
+            core_client = CoreClient()
+            runtime = Runtime()
+            events = Events()
+
+            @staticmethod
+            def mark_hydrated(session_id):
+                calls.append(("hydrated", session_id))
+
+            @staticmethod
+            def hydrate_permission_mode(token, session_id):
+                calls.append(("permissions", token, session_id))
+
+        class Handler:
+            headers = {"Authorization": "Bearer core-token"}
+            app = App()
+
+            @staticmethod
+            def read_json_body():
+                return {"title": "", "parts": [{"type": "text", "text": "你好"}]}
+
+            def json_response(self, data, status=200):
+                self.response = (data, status)
+
+        handler = Handler()
+        handled = handle_sessions(handler, "/session", {}, "POST")
+
+        self.assertTrue(handled)
+        self.assertIn(("permissions", "core-token", "session-1"), calls)
+        self.assertIn(
+            ("prompt", "session-1", [{"type": "text", "text": "你好"}], "core-token"),
+            calls,
+        )
+        self.assertEqual(handler.response[0]["id"], "session-1")
+
+    def test_participant_update_rejects_running_session(self):
+        class Runtime:
+            @staticmethod
+            def is_running(session_id):
+                return session_id == "session 1"
+
+        class App:
+            runtime = Runtime()
+
+        class Handler:
+            headers = {"Authorization": "Bearer core-token"}
+            app = App()
+
+            def json_response(self, data, status=200):
+                self.response = (data, status)
+
+        handler = Handler()
+        handled = handle_sessions(
+            handler,
+            "/session/session%201/participants",
+            {},
+            "PUT",
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(handler.response[1], HTTPStatus.CONFLICT)
+        self.assertIn("本轮结束", handler.response[0]["error"])
+
     def test_api_route_detection(self):
         self.assertTrue(is_agent_api_route("/session"))
         self.assertTrue(is_agent_api_route("/session/abc/prompt"))

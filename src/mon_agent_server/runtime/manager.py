@@ -269,6 +269,20 @@ class MonAgentRuntime(RuntimeEmitterMixin, RuntimePermissionMixin):
         with self._lock:
             return session_id in self._running
 
+    def forget_session(self, session_id: str) -> None:
+        if self.is_running(session_id):
+            raise RuntimeError("智能体正在处理当前任务，不能删除会话。")
+        with self._lock:
+            self._pending_user_prompts.pop(session_id, None)
+            self._agents.pop(session_id, None)
+            self._cancelled_sessions.discard(session_id)
+            self._agent_controls.pop(session_id, None)
+            self._session_runtime_auth.pop(session_id, None)
+            self._open_coordination_batch_ids.pop(session_id, None)
+            self._reconciled_subagent_sessions.discard(session_id)
+            self._restored_subagent_controls.discard(session_id)
+        self.subagent_repository.delete_session(session_id)
+
     def abort(self, session_id: str) -> bool:
         with self._lock:
             running = session_id in self._running
