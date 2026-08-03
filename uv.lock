@@ -7,7 +7,7 @@ name = "cffi"
 version = "2.0.0"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
 dependencies = [
-    { name = "pycparser" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
 ]
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/eb/56/b1ba7935a17738ae8453301356628e8147c79dbb825bcbc73dc7401f9846/cffi-2.0.0.tar.gz", hash = "sha256:44d1b5909021139fe36001ae048dbdde8214afa20200eda0f64c068cac5d5529" }
 wheels = [
@@ -82,7 +82,7 @@ wheels = [
 
 [[package]]
 name = "mon-agent-core"
-version = "0.1.0"
+version = "1.7.5"
 source = { editable = "../AgentCore" }
 dependencies = [
     { name = "pyyaml" },
@@ -93,7 +93,7 @@ requires-dist = [{ name = "pyyaml", specifier = ">=6.0" }]
 
 [[package]]
 name = "mon-agent-server"
-version = "0.1.0"
+version = "1.7.5"
 source = { editable = "." }
 dependencies = [
     { name = "mon-agent-core" },
