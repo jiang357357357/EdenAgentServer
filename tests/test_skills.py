@@ -41,8 +41,7 @@ class SkillCatalogTest(unittest.TestCase):
                 "web-research",
                 "daily-context",
                 "visual-observation",
-                "qq-communication",
-                "email-communication",
+                "external-communication",
                 "workspace-development",
                 "multi-agent",
                 "assistant-switching",
@@ -130,8 +129,24 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertIn("list_assistants", names)
         self.assertIn("switch_session_assistant", names)
         self.assertEqual(names, before)
-        self.assertIn("会话历史会保留", runtime.prompt_section())
-        self.assertIn("无需由原助手告别或转交", runtime.prompt_section())
+        prompt = runtime.prompt_section()
+        self.assertIn("下一步必须调用 switch_session_assistant", prompt)
+        self.assertIn("不要使用角色动作或输出最终回复", prompt)
+        self.assertIn("不要用“去叫、稍等、转交”等文字代替切换", prompt)
+        self.assertIn("简短结束本轮", prompt)
+        self.assertIn("回复完成后系统才会切换参与者", prompt)
+        self.assertIn("目标助手在独立运行中接手", prompt)
+
+    def test_character_action_prompt_has_one_consistent_call_rule(self) -> None:
+        prompt = build_agent_tool_section(source="user_chat", active_skill_ids=())
+
+        self.assertIn("角色表现是回复的一部分", prompt)
+        self.assertIn("主动在正文前调用 switch_character_action", prompt)
+        self.assertIn("正文不能同时选择“保持当前、无、无”", prompt)
+        self.assertIn("颜文字或动作描述不能代替工具调用", prompt)
+        self.assertNotIn("普通回复不需要切换动作", prompt)
+        self.assertNotIn("不需要调用工具", prompt)
+        self.assertNotIn("闲聊或不影响继续的小问题可以直接回复", prompt)
 
     def test_multi_agent_skill_adds_policy_without_gating_control_tools(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
@@ -147,18 +162,20 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertIn("可独立完成的任务可交给子智能体", runtime.prompt_section())
         self.assertIn("验证、整合和表达", runtime.prompt_section())
 
-    def test_self_awake_has_system_skills_but_not_user_mutation_tools(self) -> None:
+    def test_self_awake_uses_same_external_communication_skill_as_user_chat(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="self_awake")
         names = _tool_names(runtime.active_tools())
 
         self.assertIn("list_due_memos", names)
-        self.assertIn("notify_user", names)
+        self.assertIn("contact_user", names)
         self.assertIn("mark_memo_triggered", names)
         self.assertIn("get_self_awake_state", names)
         self.assertNotIn("ask_user", names)
         self.assertNotIn("write", names)
-        self.assertNotIn("send_qq_message", names)
-        self.assertNotIn("send_external_email", names)
+        self.assertIn("send_qq_message", names)
+        self.assertIn("send_external_email", names)
+        self.assertIn("external-communication", runtime.loaded_skill_ids)
+        self.assertIn("联系当前用户时优先调用 contact_user", runtime.prompt_section())
         self.assertIn("web_search", names)
 
         result = runtime.load(["web-research"])

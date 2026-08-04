@@ -164,6 +164,56 @@ class RuntimePersistenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(messages[0]["info"]["time"].get("completed"), messages[0]["parts"][0]["time"]["end"])
         self.assertEqual(run_state.final_assistant_message_id, messages[1]["info"]["id"])
 
+    def test_internal_agent_user_prompt_is_not_duplicated_in_session_context(self):
+        store = SessionStore()
+        session = store.create_session("内部任务消息")
+        store.append_user_message(session["id"], "用户原始请求", [])
+        emitter = EmitterHarness(store)
+        run_state = RunState()
+        run_state.context_user_message = {
+            "role": "user",
+            "timestamp": 1,
+            "content": [{"type": "text", "text": "用户原始请求"}],
+        }
+
+        emitter.handle_agent_event(
+            session["id"],
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "内部 actor task prompt"}],
+                },
+            },
+            run_state,
+        )
+
+        context = store.context_messages(session["id"])
+        self.assertEqual(len(context), 1)
+        self.assertEqual(context[0]["content"][0]["text"], "用户原始请求")
+
+    def test_runtime_trace_keeps_its_original_speaker_after_assistant_switch(self):
+        store = SessionStore()
+        session = store.create_session("切换助手")
+        emitter = EmitterHarness(store)
+        run_state = RunState(speaker={"assistantID": 1, "assistantName": "莉莉安"})
+
+        emitter.emit_runtime_thinking(session["id"], run_state, "莉莉安正在处理本轮任务。")
+        run_state.speaker = {"assistantID": 3, "assistantName": "伊芙"}
+        emitter.emit_runtime_thinking(session["id"], run_state, "回复生成完成。", done=True)
+
+        final_message = {
+            "role": "assistant",
+            "timestamp": 2,
+            "content": [{"type": "text", "text": "先生，我在这里。"}],
+        }
+        emitter.handle_agent_event(session["id"], {"type": "message_start", "message": final_message}, run_state)
+        emitter.handle_agent_event(session["id"], {"type": "message_end", "message": final_message}, run_state)
+
+        runtime_message, reply_message = store.list_messages(session["id"])
+        self.assertEqual(runtime_message["info"]["speaker"]["assistantName"], "莉莉安")
+        self.assertEqual(reply_message["info"]["speaker"]["assistantName"], "伊芙")
+
     def test_tool_call_message_is_intermediate_and_plain_message_is_final(self):
         store = SessionStore()
         session = store.create_session("终止语义")

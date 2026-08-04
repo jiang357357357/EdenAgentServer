@@ -43,6 +43,7 @@ from mon_agent_server.store import SessionStore, SubagentThreadRepository
 from mon_agent_server.store.serializers import is_hidden_message, message_text
 from mon_agent_server.tools import MonToolContext
 from mon_agent_server.runtime.compaction import RuntimeCompactionModels, messages_to_compaction_entries, runtime_compaction_settings, timestamp_iso
+from mon_agent_server.runtime.character_memory import recall_character_memories
 from mon_agent_server.runtime.companion import DirectorBeat, DirectorExecution, DirectorScene, actor_task_prompt, create_director_plan
 from mon_agent_server.runtime.config import RuntimeModelConfig, runtime_context_window
 from mon_agent_server.runtime.emitters import RuntimeEmitterMixin, runtime_error_summary
@@ -90,7 +91,8 @@ class RuntimeCharacterMixin:
         previous_replies: list[dict[str, Any]],
         environment: dict[str, Any] | None,
         skill_owner_key: str | None,
-    ) -> tuple[dict[str, Any] | None, str]:
+        handoff_from: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any] | None, str, dict[str, Any] | None]:
         files = prompt_files(parts)
         character = (runtime_config.core or {}).get("character") if runtime_config.core else None
         self.emit_runtime_thinking(
@@ -112,10 +114,9 @@ class RuntimeCharacterMixin:
         continuation = {
             "config": runtime_config,
             "relevantMemories": [],
-            "handoffFrom": None,
+            "handoffFrom": dict(handoff_from) if handoff_from else None,
+            "handoff": None,
         }
-        synced_core_message_ids: set[str] = set()
-
         def append_assistant_part(payload: dict[str, Any]) -> dict[str, Any]:
             message_id = run_state.assistant_message_id
             if not message_id:
@@ -142,82 +143,16 @@ class RuntimeCharacterMixin:
                     "character": assistant.get("character") if isinstance(assistant.get("character"), dict) else {},
                 }
             )
-            visible_messages = self.store.list_messages(
-                session_id,
-                limit=10_000,
-                include_compactions=True,
-            )
-            messages_by_id = {
-                item["info"]["id"]: item
-                for item in visible_messages
-                if item.get("info", {}).get("id")
+            continuation["handoff"] = {
+                "config": next_config,
+                "participant": participant,
+                "from": dict(run_state.speaker),
+                "assistant": assistant,
             }
-            for message_id in run_state.assistant_message_ids:
-                if message_id in synced_core_message_ids:
-                    continue
-                current_message = messages_by_id.get(message_id)
-                if current_message:
-                    await self.sync_core_message(
-                        session_id,
-                        current_message,
-                        auth_token,
-                        continuation["config"].core,
-                    )
-                    synced_core_message_ids.add(message_id)
-            session_info = self.store.update_participants(session_id, [participant])
-            mapped = await asyncio.to_thread(
-                self.core_client.update_agent_session_participants,
-                auth_token,
-                session_info,
-                [assistant["id"]],
-            )
-            info = self.store.upsert_session_info(session_from_map(mapped))
-            self.events.emit(
-                {
-                    "type": "session.updated",
-                    "properties": {"sessionID": session_id, "info": info},
-                }
-            )
-            next_character = (next_config.core or {}).get("character") if next_config.core else None
-            next_character_id = next_character.get("id") if isinstance(next_character, dict) else None
-            next_action = self.store.get_character_action(session_id, next_character_id)
-            if not next_action:
-                next_action = _default_character_action_state(session_id, next_character)
-                if next_action:
-                    self.store.set_character_action(session_id, next_action, record_history=False)
-            next_memories: list[dict[str, Any]] = []
-            if actor_user_text.strip():
-                try:
-                    next_memories = await asyncio.to_thread(
-                        self.core_client.list_memories,
-                        auth_token,
-                        {
-                            "q": actor_user_text[:1000],
-                            "assistant": assistant["id"],
-                            "agent_character": next_character_id,
-                            "status": "active",
-                            "limit": 5,
-                        },
-                    )
-                except Exception:
-                    logger.exception(
-                        "助手切换后的长期记忆召回失败: session={} assistant={}",
-                        session_id,
-                        assistant["id"],
-                    )
-            continuation["config"] = next_config
-            continuation["relevantMemories"] = next_memories
-            continuation["handoffFrom"] = dict(run_state.speaker)
-            tool_context.current_model_supports_images = next_config.supports_images
-            tool_context.vision_config = (next_config.core or {}).get("visionConfig") if next_config.core else None
-            tool_context.character = next_character
-            tool_context.current_character_action = next_action
-            run_state.speaker = participant
             return {
                 "assistant": assistant,
-                "session": info,
                 "historyPreserved": True,
-                "effectiveFrom": "next_model_continuation",
+                "effectiveFrom": "next_root_run",
             }
 
         tool_context = MonToolContext(
@@ -229,7 +164,7 @@ class RuntimeCharacterMixin:
             screen_captures=self.screen_captures,
             camera_captures=self.camera_captures,
             current_model_supports_images=runtime_config.supports_images,
-            vision_config=(runtime_config.core or {}).get("visionConfig") if runtime_config.core else None,
+            vision_ai_entity=(runtime_config.core or {}).get("visionAIEntity") if runtime_config.core else None,
             environment=environment,
             character=character,
             current_character_action=current_character_action,
@@ -302,37 +237,13 @@ class RuntimeCharacterMixin:
         if auth_token and actor_user_text.strip():
             try:
                 relevant_memories = await asyncio.to_thread(
-                    self.core_client.list_memories,
+                    recall_character_memories,
+                    self.core_client,
                     auth_token,
-                    {
-                        "q": actor_user_text[:1000],
-                        "assistant": beat.assistant_id,
-                        "agent_character": (
-                            ((runtime_config.core or {}).get("character") or {}).get("id")
-                            if runtime_config.core
-                            else None
-                        ),
-                        "status": "active",
-                        "limit": 5,
-                    },
+                    runtime_config.core,
+                    actor_user_text,
                 )
-                bounded_memories: list[dict[str, Any]] = []
-                memory_chars = 0
-                for memory in relevant_memories:
-                    content = str(memory.get("content") or "") if isinstance(memory, dict) else ""
-                    if not content or memory_chars + len(content) > 4_000:
-                        continue
-                    bounded_memories.append(memory)
-                    memory_chars += len(content)
-                relevant_memories = bounded_memories
                 continuation["relevantMemories"] = relevant_memories
-                memory_ids = [
-                    int(item["id"])
-                    for item in relevant_memories
-                    if isinstance(item, dict) and str(item.get("id") or "").isdigit()
-                ]
-                if memory_ids:
-                    await asyncio.to_thread(self.core_client.mark_memories_used, auth_token, memory_ids)
             except Exception:
                 logger.exception("长期记忆召回失败，当前回合将不注入记忆: session={}", session_id)
         tools = skill_runtime.active_tools()
@@ -358,6 +269,13 @@ class RuntimeCharacterMixin:
             scene=scene,
             execution=execution,
         )
+        if handoff_from:
+            task_prompt = (
+                "<assistant_handoff>\n"
+                "这是系统内部交接指令，不是用户的新消息。你已接管当前会话；"
+                "请基于历史中最近一条用户消息直接回应，不要声称用户重复了请求。\n"
+                "</assistant_handoff>"
+            )
 
         def system_prompt_for(active_skill_ids: tuple[str, ...]) -> str:
             active_config = continuation["config"]
@@ -389,12 +307,29 @@ class RuntimeCharacterMixin:
                 )
             return prompt
 
+        existing_context_messages = self.store.context_messages(session_id)
+        user_created_at = user_message["info"]["time"]["created"]
+        user_already_persisted = any(
+            message.get("role") == "user" and message.get("timestamp") == user_created_at
+            for message in existing_context_messages
+        )
+        if not user_already_persisted:
+            canonical_user_content: list[dict[str, Any]] = []
+            if runtime_config.supports_images:
+                canonical_user_content.extend(images_from_parts(parts))
+            canonical_user_content.append({"type": "text", "text": content_text(parts)})
+            run_state.context_user_message = {
+                "role": "user",
+                "timestamp": user_created_at,
+                "content": canonical_user_content,
+            }
+
         agent_messages = await self.compact_agent_messages_if_needed(
             session_id,
             run_state,
             runtime_config,
-            self.store.context_messages(session_id),
-            user_message["info"]["time"]["created"],
+            existing_context_messages,
+            user_created_at,
             auth_token,
         )
 
@@ -425,35 +360,6 @@ class RuntimeCharacterMixin:
             tool_results = turn.get("toolResults")
             if not isinstance(tool_results, list) or not tool_results:
                 return skill_update
-            switched_assistant = any(
-                isinstance(result, dict)
-                and result.get("toolName") == "switch_session_assistant"
-                for result in tool_results
-            )
-            if switched_assistant and isinstance(continuation.get("handoffFrom"), dict):
-                previous_speaker = dict(continuation["handoffFrom"])
-                current_context["handoffFrom"] = previous_speaker
-                turn_message = turn.get("message")
-                if isinstance(turn_message, dict):
-                    turn_message["contextSpeaker"] = previous_speaker
-                current_messages = current_context.get("messages")
-                if isinstance(current_messages, list):
-                    tool_call_ids = {
-                        str(result.get("toolCallId"))
-                        for result in tool_results
-                        if isinstance(result, dict) and result.get("toolCallId")
-                    }
-                    for message in reversed(current_messages):
-                        message_tool_call_ids = {
-                            str(block.get("id"))
-                            for block in (message.get("content") or [])
-                            if isinstance(block, dict)
-                            and block.get("type") == "toolCall"
-                            and block.get("id")
-                        }
-                        if message is turn_message or tool_call_ids.intersection(message_tool_call_ids):
-                            message["contextSpeaker"] = previous_speaker
-                            break
             if any(
                 isinstance(result, dict) and result.get("toolName") == "load_skill"
                 for result in tool_results
@@ -547,11 +453,24 @@ class RuntimeCharacterMixin:
         self._raise_if_cancelled(session_id)
         if run_state.error_message:
             raise RuntimeError(run_state.error_message)
-        self.emit_runtime_thinking(session_id, run_state, "回复生成完成。", done=True)
+        handoff = continuation.get("handoff")
+        self.emit_runtime_thinking(
+            session_id,
+            run_state,
+            "助手交接完成。" if handoff else "回复生成完成。",
+            done=True,
+        )
         self.store.append_session_event(
             session_id,
             "turn_completed",
-            {"finalMessageID": run_state.final_assistant_message_id},
+            {
+                "finalMessageID": run_state.final_assistant_message_id,
+                "handoffAssistantID": (
+                    handoff["participant"].get("assistantID")
+                    if isinstance(handoff, dict) and isinstance(handoff.get("participant"), dict)
+                    else None
+                ),
+            },
             turn_id=run_state.run_id,
         )
         message = next(
@@ -564,8 +483,6 @@ class RuntimeCharacterMixin:
         if auth_token:
             visible_messages = self.store.list_messages(session_id, limit=10_000, include_compactions=True)
             for assistant_message_id in run_state.assistant_message_ids:
-                if assistant_message_id in synced_core_message_ids:
-                    continue
                 persisted = next(
                     (item for item in visible_messages if item["info"]["id"] == assistant_message_id),
                     None,
@@ -575,12 +492,30 @@ class RuntimeCharacterMixin:
                         session_id,
                         persisted,
                         auth_token,
-                        continuation["config"].core,
+                        runtime_config.core,
                     )
+            if isinstance(handoff, dict):
+                participant = handoff["participant"]
+                assistant = handoff["assistant"]
+                session_info = self.store.update_participants(session_id, [participant])
+                mapped = await asyncio.to_thread(
+                    self.core_client.update_agent_session_participants,
+                    auth_token,
+                    session_info,
+                    [assistant["id"]],
+                )
+                info = self.store.upsert_session_info(session_from_map(mapped))
+                handoff["session"] = info
+                self.events.emit(
+                    {
+                        "type": "session.updated",
+                        "properties": {"sessionID": session_id, "info": info},
+                    }
+                )
         text = "\n".join(
             str(part.get("text") or "") for part in (message or {}).get("parts", []) if part.get("type") == "text"
         ).strip()
-        return message, text
+        return message, text, handoff if isinstance(handoff, dict) else None
 
     def _start_character_main_run(
         self,

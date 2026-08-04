@@ -52,7 +52,7 @@ def tool_call_message(name: str, arguments: dict[str, Any]) -> AssistantMessageE
 
 
 class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
-    async def test_assistant_switch_continues_same_tool_loop_with_new_model_and_identity(self) -> None:
+    async def test_assistant_switch_starts_a_new_root_run_with_new_model_and_identity(self) -> None:
         store = SessionStore()
         session = store.create_session(
             "即时接管",
@@ -129,6 +129,8 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
             )
             if len(observed) == 1:
                 return tool_call_message("switch_session_assistant", {"assistant_id": 2})
+            if len(observed) == 2:
+                return stream_message("交接已经完成，接下来由助手 B 接手。")
             return stream_message("[助手 B]\n\n我是助手 B，已经接手这段对话。")
 
         with (
@@ -136,13 +138,14 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
             patch("mon_agent_server.runtime.execution.character.session_from_map", side_effect=lambda value: value),
             patch("mon_agent_server.runtime.execution.character.stream_openai_compatible", new=fake_stream),
         ):
-            _, reply = await runtime._run_character_main_agent(
+            first_run = RunState(speaker={"assistantID": 1, "assistantName": "助手 A"})
+            _, first_reply, handoff = await runtime._run_character_main_agent(
                 session_id=session["id"],
                 parts=[{"type": "text", "text": text}],
                 user_message=user_message,
                 auth_token="token",
                 runtime_config=config_a,
-                run_state=RunState(speaker={"assistantID": 1, "assistantName": "助手 A"}),
+                run_state=first_run,
                 beat=DirectorBeat(1, "切换助手"),
                 scene=None,
                 execution=None,
@@ -150,25 +153,60 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 environment=None,
                 skill_owner_key=None,
             )
+            assert handoff is not None
+            second_run = RunState(speaker=handoff["participant"])
+            _, reply, second_handoff = await runtime._run_character_main_agent(
+                session_id=session["id"],
+                parts=[{"type": "text", "text": text}],
+                user_message=user_message,
+                auth_token="token",
+                runtime_config=handoff["config"],
+                run_state=second_run,
+                beat=DirectorBeat(2, "切换助手"),
+                scene=None,
+                execution=None,
+                previous_replies=[],
+                environment=None,
+                skill_owner_key=None,
+                handoff_from=handoff["from"],
+            )
 
+        self.assertEqual(first_reply, "交接已经完成，接下来由助手 B 接手。")
         self.assertEqual(reply, "我是助手 B，已经接手这段对话。")
-        self.assertEqual([item["model"] for item in observed], ["model-a", "model-b"])
-        self.assertEqual([item["apiKey"] for item in observed], ["key-a", "key-b"])
+        self.assertIsNone(second_handoff)
+        self.assertNotEqual(first_run.run_id, second_run.run_id)
+        self.assertEqual([item["model"] for item in observed], ["model-a", "model-a", "model-b"])
+        self.assertEqual([item["apiKey"] for item in observed], ["key-a", "key-a", "key-b"])
         self.assertIn("角色 A", observed[0]["prompt"])
-        self.assertIn("角色 B", observed[1]["prompt"])
+        self.assertIn("角色 A", observed[1]["prompt"])
+        self.assertIn("角色 B", observed[2]["prompt"])
         self.assertNotIn("## 会话接管", observed[0]["prompt"])
-        self.assertIn("会话已切换给你", observed[1]["prompt"])
-        self.assertIn("以自己的身份直接完成用户当前请求", observed[1]["prompt"])
-        self.assertIn("不要替原助手告别或转交", observed[1]["prompt"])
+        self.assertNotIn("## 会话接管", observed[1]["prompt"])
+        self.assertIn("会话已切换给你", observed[2]["prompt"])
+        self.assertIn("以自己的身份直接完成用户当前请求", observed[2]["prompt"])
+        self.assertIn("不要替原助手告别或转交", observed[2]["prompt"])
+        new_run_user_messages = [
+            item["content"] for item in observed[2]["messages"] if item.get("role") == "user"
+        ]
+        self.assertEqual(new_run_user_messages.count(text), 1)
+        self.assertIn("这是系统内部交接指令，不是用户的新消息", new_run_user_messages[-1])
+        self.assertIn("不要声称用户重复了请求", new_run_user_messages[-1])
         switch_message = next(
             item
             for item in observed[1]["messages"]
             if item.get("role") == "assistant" and item.get("tool_calls")
         )
-        self.assertEqual(switch_message["content"], "[助手 A]")
+        self.assertIsNone(switch_message["content"])
+        handed_off_switch_message = next(
+            item
+            for item in observed[2]["messages"]
+            if item.get("role") == "assistant" and item.get("tool_calls")
+        )
+        self.assertEqual(handed_off_switch_message["content"], "[助手 A]")
         self.assertEqual(
             core.operations,
             [
+                ("message", 1, 1),
                 ("message", 1, 1),
                 ("participants", 2, None),
                 ("message", 2, 2),
@@ -228,7 +266,7 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
             return stream_message("您好。")
 
         with patch("mon_agent_server.runtime.execution.character.stream_openai_compatible", new=fake_stream):
-            message, reply = await runtime._run_character_main_agent(
+            message, reply, handoff = await runtime._run_character_main_agent(
                 session_id=session["id"],
                 parts=[{"type": "text", "text": "你好"}],
                 user_message=user_message,
@@ -242,6 +280,7 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 environment=None,
                 skill_owner_key=None,
             )
+        self.assertIsNone(handoff)
 
         self.assertEqual(reply, "您好。")
         self.assertIsNotNone(message)
@@ -296,7 +335,7 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         try:
             with patch("mon_agent_server.runtime.execution.character.stream_openai_compatible", new=fake_stream):
-                message, reply = await runtime._run_character_main_agent(
+                message, reply, handoff = await runtime._run_character_main_agent(
                     session_id=session["id"],
                     parts=[{"type": "text", "text": "你好"}],
                     user_message=user_message,
@@ -310,6 +349,7 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     environment=None,
                     skill_owner_key=None,
                 )
+            self.assertIsNone(handoff)
         finally:
             runtime.close()
 
@@ -371,7 +411,7 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
             return stream_message("已经可以开始网页研究。")
 
         with patch("mon_agent_server.runtime.execution.character.stream_openai_compatible", new=fake_stream):
-            _, reply = await runtime._run_character_main_agent(
+            _, reply, handoff = await runtime._run_character_main_agent(
                 session_id=session["id"],
                 parts=[{"type": "text", "text": "查询最新资料"}],
                 user_message=user_message,
@@ -385,6 +425,7 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 environment={"timezone": "Asia/Shanghai", "locale": "zh-CN"},
                 skill_owner_key=None,
             )
+        self.assertIsNone(handoff)
 
         self.assertEqual(reply, "已经可以开始网页研究。")
         self.assertIn("web_search", observed_tools[0])
@@ -429,12 +470,13 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
             patch("mon_agent_server.runtime.execution.character.stream_openai_compatible", new=fake_stream),
             patch.object(runtime, "compact_agent_messages_if_needed", new=fake_compact),
         ):
-            _, reply = await runtime._run_character_main_agent(
+            _, reply, handoff = await runtime._run_character_main_agent(
                 session_id=session["id"], parts=[{"type": "text", "text": "先调用工具再继续"}],
                 user_message=user_message, auth_token=None, runtime_config=config,
                 run_state=RunState(speaker={}), beat=DirectorBeat(1, "执行"), scene=None,
                 execution=None, previous_replies=[], environment=None, skill_owner_key=None,
             )
+        self.assertIsNone(handoff)
 
         self.assertEqual(reply, "压缩后继续完成。")
         self.assertEqual(len(compact_calls), 2)

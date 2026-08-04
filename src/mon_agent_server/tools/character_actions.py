@@ -289,7 +289,7 @@ def create_character_action_tools(context: MonToolContext) -> list[AgentTool]:
         AgentTool(
             "switch_character_action",
             "选择角色表现",
-            "为本轮回复明确选择立绘动作、表情符号和静态立绘动效。三个中文字段全部必填；不需要变化时也必须明确选择“保持当前”或“无”。",
+            "在回复正文前提交与本轮语气匹配的角色表现。情绪化或角色化表达应主动调用；三个中文字段必须完整提供。",
             {
                 "type": "object",
                 "properties": {

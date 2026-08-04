@@ -48,7 +48,13 @@ def create_self_awake_tools(root: Path, context: MonToolContext) -> list[AgentTo
     async def list_self_awake_diaries_execute(_tool_call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
         core, token = require_core_access(context)
         limit = min(max(int(params.get("limit") or 5), 1), 12)
-        raw = await asyncio.to_thread(core_call, core.get_self_awake_diary_context, token, limit)
+        raw = await asyncio.to_thread(
+            core_call,
+            core.get_self_awake_diary_context,
+            token,
+            limit,
+            character_id=(context.character or {}).get("id"),
+        )
         recent = raw.get("recent") if isinstance(raw, dict) and isinstance(raw.get("recent"), list) else []
         diaries = [self_awake_diary_summary(item) for item in recent if isinstance(item, dict)]
         memory = raw.get("memory") if isinstance(raw, dict) and isinstance(raw.get("memory"), dict) else {}

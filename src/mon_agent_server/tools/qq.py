@@ -106,8 +106,9 @@ async def send_qq_message(context: MonToolContext, params: dict[str, Any]) -> di
         "content": content,
         "metadata": params.get("metadata") or {},
     }
-    if params.get("request_id"):
-        payload["request_id"] = str(params["request_id"])
+    request_id = params.get("request_id") or (f"{context.operation_id}-qq" if context.operation_id else None)
+    if request_id:
+        payload["request_id"] = str(request_id)
     raw = await asyncio.to_thread(core_call, core.send_qq_message, token, bot_id, payload)
     data = raw.get("data") if isinstance(raw, dict) else raw
     request_id = data.get("request_id") if isinstance(data, dict) else ""

@@ -17,9 +17,10 @@ class MonToolContext:
     screen_captures: ScreenCaptureBroker | None = None
     camera_captures: CameraCaptureBroker | None = None
     current_model_supports_images: bool = True
-    vision_config: dict[str, Any] | None = None
+    vision_ai_entity: dict[str, Any] | None = None
     environment: dict[str, Any] | None = None
     character: dict[str, Any] | None = None
+    assistant: dict[str, Any] | None = None
     current_character_action: dict[str, Any] | None = None
     emit_event: Callable[[dict[str, Any]], None] | None = None
     set_character_action: Callable[[dict[str, Any]], None] | None = None
@@ -28,6 +29,7 @@ class MonToolContext:
     append_assistant_part: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     switch_session_assistant: Callable[[int | str], Awaitable[dict[str, Any]]] | None = None
     agent_path: str = "/root"
+    operation_id: str | None = None
     permission_mode: str = "restricted"
     subagent_role_names: tuple[str, ...] = ()
     subagent_role_descriptions: dict[str, str] | None = None

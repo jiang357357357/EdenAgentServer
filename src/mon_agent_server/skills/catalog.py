@@ -22,15 +22,13 @@ SKILL_DEFINITIONS: tuple[SkillDefinition, ...] = (
     SkillDefinition(
         id="assistant-switching",
         name="助手查看与会话切换",
-        description="查看当前用户的助手，并让另一位助手在保留聊天历史的情况下接手当前会话。",
+        description="查看可用助手，或将当前会话立即切换给指定助手。",
         tool_names=("list_assistants", "switch_session_assistant"),
         instructions=(
-            "目标助手不明确时先调用 list_assistants，依据明确的助手 ID 切换。",
-            "只有用户明确要求切换或接手当前会话时，才能调用 switch_session_assistant；不要自行更换助手。",
-            "切换只修改当前会话参与助手，不修改用户的全局默认助手。",
-            "切换后新助手立即以自己的身份完成当前请求；会话历史会保留，无需由原助手告别或转交。",
+            "只有用户明确要求切换或接手当前会话时才切换；目标 ID 不明确则先调用 list_assistants。",
+            "确定目标 ID 后，下一步必须调用 switch_session_assistant；调用前不要使用角色动作或输出最终回复，也不要用“去叫、稍等、转交”等文字代替切换。",
+            "工具接受交接后你仍是原助手：简短结束本轮，不得冒充目标助手；你的回复完成后系统才会切换参与者，并由目标助手在独立运行中接手。历史会保留，不修改全局默认助手。",
         ),
-        profiles=("user_chat",),
     ),
     SkillDefinition(
         id="multi-agent",
@@ -79,11 +77,11 @@ SKILL_DEFINITIONS: tuple[SkillDefinition, ...] = (
             "list_due_memos",
             "dispatch_due_memos",
             "get_next_memo_wake",
-            "notify_user",
+            "contact_user",
             "mark_memo_triggered",
         ),
         instructions=(
-            "先确认到期事项，再调用 notify_user 产生真实通知；通知成功后才能标记提醒已触发。",
+            "先确认到期事项，再调用 contact_user 产生真实通知；通知成功后才能标记提醒已触发。",
             "仅观察到期事项时，dispatch_due_memos 必须使用 mark_dispatched=false。",
             "精准 memo_due 唤醒的状态回写由运行时统一完成，必须遵循本轮任务协议。",
         ),
@@ -93,7 +91,7 @@ SKILL_DEFINITIONS: tuple[SkillDefinition, ...] = (
     SkillDefinition(
         id="self-awake",
         name="后台自醒与连续观察",
-        description="读取自醒状态和工作日记，或安排后续后台自醒。",
+        description="让当前角色在没有用户新消息时自主观察、行动、联系用户或安排后续醒来。",
         tool_names=(
             "get_self_awake_state",
             "list_self_awake_diaries",
@@ -101,9 +99,13 @@ SKILL_DEFINITIONS: tuple[SkillDefinition, ...] = (
             "set_self_awake_timer",
         ),
         instructions=(
-            "需要了解调度状态时读取 get_self_awake_state；需要延续工作线索时先列出日记，再按相关性读取正文。",
-            "用户明确要求未来后台检查时可使用 set_self_awake_timer；后台自醒轮次的下一次时间按任务协议写入最终 JSON。",
-            "后台自醒不等待用户，不无目的浏览文件，并以系统事件提供的触发原因为本轮首要任务。",
+            "系统自醒是当前角色在没有用户新消息时醒来的一轮。结合触发原因、长期记忆、自醒日记、环境、偏好和当下心意，自主决定这一轮想做什么。",
+            "环境与活动信息只作为事实参考：仅凭深夜、屏幕状态或数据缺失，不能断言用户已经睡着、离开或正在做某件事；可以把这类判断表达为不确定的考虑。",
+            "需要了解调度状态时读取 get_self_awake_state；需要延续工作线索时先列出日记，再按相关性读取正文，不无目的浏览文件。",
+            "你可以处理提醒、风险和进展，也可以关心、分享、问候、表达感受或做任何当前能力允许的事；想联系用户时自主选择内容、时机和方式，不需要功能性理由。",
+            "需要联系时使用已加载的 external-communication 技能；一次自醒只进行一次对外联系，发送失败后记录原因，不在同一轮重复发送。",
+            "普通聊天中需要安排未来后台检查时使用 set_self_awake_timer；当前后台自醒轮次不调用该工具，只按事件协议在最终 JSON 的 next_wake 提交建议，由 MonOs 调度。",
+            "最终输出、精准到期提醒和状态回写严格遵循本轮系统事件协议；后台自醒不等待用户输入。",
         ),
     ),
     SkillDefinition(
@@ -141,27 +143,23 @@ SKILL_DEFINITIONS: tuple[SkillDefinition, ...] = (
         ),
     ),
     SkillDefinition(
-        id="qq-communication",
-        name="QQ 通信",
-        description="查看可用 QQBot 和已批准目标，并向好友或群聊发送消息。",
-        tool_names=("qq_bot_list", "qq_bot_targets", "send_qq_message"),
-        instructions=(
-            "用户未指定 QQBot 或目标时，send_qq_message 省略对应参数，由工具使用默认 QQBot 和超级管理员。",
-            "目标必须已经批准；需要选择目标时先查询 QQBot 和目标列表。",
-            "用户没有给出具体正文但意图明确时，根据当前任务生成合适内容，不使用固定默认消息。",
+        id="external-communication",
+        name="对外联系",
+        description="自主选择 QQ 私信或邮件联系当前用户，也可向明确指定的已批准目标发送消息。",
+        tool_names=(
+            "contact_user",
+            "qq_bot_list",
+            "qq_bot_targets",
+            "send_qq_message",
+            "external_email_status",
+            "send_external_email",
         ),
-        profiles=("user_chat",),
-    ),
-    SkillDefinition(
-        id="email-communication",
-        name="邮件通信",
-        description="检查外部邮箱状态并向指定或默认收件人发送邮件。",
-        tool_names=("external_email_status", "send_external_email"),
         instructions=(
-            "发送前缺少邮箱可用性信息时先检查 external_email_status。",
-            "收件人为空时使用用户默认收件人；根据用户意图生成明确主题和正文。",
+            "联系当前用户时优先调用 contact_user，由你根据内容和当下意愿选择 channel=qq、email、both 或 auto；QQ 适合即时私信，邮件适合较正式、较长或重要的内容。",
+            "channel=auto 表示由运行时选择首选通道并在失败时回退；如果你明确想用私信或邮件，直接选择 qq 或 email，不要先查询通道列表。",
+            "只有向指定好友、群聊或邮箱发送时才使用精确发送工具；QQ 目标必须已经批准，需要选择特定目标时再查询 QQBot 和目标列表。",
+            "用户没有给出具体正文但意图明确时，根据当前意图和角色语气生成合适内容，不使用固定默认消息。",
         ),
-        profiles=("user_chat",),
     ),
     SkillDefinition(
         id="workspace-development",
@@ -211,7 +209,7 @@ BASE_TOOL_NAMES_BY_PROFILE: dict[str, tuple[str, ...]] = {
 
 INITIAL_SKILLS_BY_PROFILE: dict[str, tuple[str, ...]] = {
     "user_chat": (),
-    "self_awake": ("self-awake", "due-reminder-dispatch"),
+    "self_awake": ("self-awake", "due-reminder-dispatch", "external-communication"),
 }
 
 

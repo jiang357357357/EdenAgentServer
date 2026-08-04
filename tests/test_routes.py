@@ -252,6 +252,35 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(handler.response[1], HTTPStatus.BAD_REQUEST)
         self.assertEqual(handler.response[0]["code"], "invalid_self_awake_contract")
 
+    def test_internal_self_awake_rejects_user_token_without_service_signature(self):
+        class Handler:
+            headers = {"Authorization": "Token legacy-user-token"}
+
+            def read_json_body(self):
+                return {
+                    "schema_version": "self-awake.v1",
+                    "job_id": "job-1",
+                    "event_id": "event-1",
+                    "idempotency_key": "wake-1",
+                    "context": {
+                        "event": {
+                            "event_id": "event-1",
+                            "source": "monos",
+                            "type": "manual",
+                        }
+                    },
+                }
+
+            def json_response(self, data, status=200):
+                self.response = (data, status)
+
+        handler = Handler()
+        handled = handle_self_awake(handler, "/internal/self-awake/run", {}, "POST")
+
+        self.assertTrue(handled)
+        self.assertEqual(handler.response[1], HTTPStatus.UNAUTHORIZED)
+        self.assertEqual(handler.response[0]["code"], "invalid_service_identity")
+
     def test_model_option_exposes_runtime_context_window(self):
         option = _model_option(
             {

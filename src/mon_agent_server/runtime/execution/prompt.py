@@ -210,11 +210,6 @@ class RuntimePromptMixin:
                     if director_enabled
                     else {}
                 )
-                active_run_state = RunState(
-                    speaker=speaker,
-                    orchestration=orchestration,
-                    run_id=continuation_run_id,
-                )
                 if director_enabled:
                     active_director_run = self.store.upsert_director_run(
                         session_id,
@@ -243,50 +238,78 @@ class RuntimePromptMixin:
                             },
                         }
                     )
-                message, reply = await self._run_character_main_agent(
-                    session_id=session_id,
-                    parts=parts,
-                    user_message=user_message,
-                    auth_token=auth_token,
-                    runtime_config=active_config,
-                    run_state=active_run_state,
-                    beat=beat,
-                    scene=plan.scene if director_enabled else None,
-                    execution=plan.execution if director_enabled else None,
-                    previous_replies=previous_replies,
-                    environment=environment,
-                    skill_owner_key=skill_owner_key,
-                )
-                if message:
-                    batch_id = internal_batch_id or self._open_coordination_batch_ids.get(session_id)
-                    batch = (
-                        self.subagent_repository.get_coordination_batch(session_id, batch_id)
-                        if batch_id
-                        else None
+                current_beat = beat
+                handoff_from: dict[str, Any] | None = None
+                first_run = True
+                while True:
+                    active_run_state = RunState(
+                        speaker=speaker,
+                        orchestration=orchestration,
+                        run_id=continuation_run_id if first_run else None,
                     )
-                    required_pending = bool(
-                        batch
-                        and batch.get("requiredTaskIDs")
-                        and not set(batch.get("requiredTaskIDs") or [])
-                        <= set(batch.get("terminalTaskIDs") or [])
+                    first_run = False
+                    message, reply, handoff = await self._run_character_main_agent(
+                        session_id=session_id,
+                        parts=parts,
+                        user_message=user_message,
+                        auth_token=auth_token,
+                        runtime_config=active_config,
+                        run_state=active_run_state,
+                        beat=current_beat,
+                        scene=plan.scene if director_enabled else None,
+                        execution=plan.execution if director_enabled else None,
+                        previous_replies=previous_replies,
+                        environment=environment,
+                        skill_owner_key=skill_owner_key,
+                        handoff_from=handoff_from,
                     )
-                    completion_state = "provisional" if required_pending and not internal_batch_id else "final"
-                    updated_message = self.store.upsert_message(
-                        session_id,
-                        {
-                            **message["info"],
-                            "completionState": completion_state,
-                            "coordinationBatchID": batch_id,
-                        },
+                    if message:
+                        batch_id = internal_batch_id or self._open_coordination_batch_ids.get(session_id)
+                        batch = (
+                            self.subagent_repository.get_coordination_batch(session_id, batch_id)
+                            if batch_id
+                            else None
+                        )
+                        required_pending = bool(
+                            batch
+                            and batch.get("requiredTaskIDs")
+                            and not set(batch.get("requiredTaskIDs") or [])
+                            <= set(batch.get("terminalTaskIDs") or [])
+                        )
+                        completion_state = "provisional" if required_pending and not internal_batch_id else "final"
+                        updated_message = self.store.upsert_message(
+                            session_id,
+                            {
+                                **message["info"],
+                                "completionState": completion_state,
+                                "coordinationBatchID": batch_id,
+                            },
+                        )
+                        self.emit_message(session_id, updated_message["info"])
+                    if not handoff:
+                        break
+                    handoff_from = handoff["from"]
+                    participant = handoff["participant"]
+                    active_config = handoff["config"]
+                    speaker = {
+                        **participant,
+                        "turnIndex": beat_index,
+                        "beatIndex": beat_index,
+                    }
+                    current_beat = DirectorBeat(
+                        participant["assistantID"],
+                        beat.intent,
+                        beat.speech_act,
+                        beat.address_to,
+                        beat.reply_to_beat,
                     )
-                    self.emit_message(session_id, updated_message["info"])
                 previous_replies.append(
                     {
                         "beatIndex": beat_index,
                         "assistantID": participant.get("assistantID"),
                         "assistantName": str(participant.get("assistantName") or "助手"),
                         "reply": reply,
-                        "speechAct": beat.speech_act,
+                        "speechAct": current_beat.speech_act,
                     }
                 )
                 if director_enabled:

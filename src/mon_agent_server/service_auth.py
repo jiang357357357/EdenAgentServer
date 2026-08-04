@@ -56,12 +56,25 @@ def canonical_service_message(
     method: str,
     path: str,
     body: bytes,
+    subject_user_id: str = "",
 ) -> bytes:
     body_hash = hashlib.sha256(body).hexdigest()
-    return "\n".join([service_id, scope, timestamp, nonce, method.upper(), path, body_hash]).encode("utf-8")
+    parts = [service_id, scope, timestamp, nonce]
+    if subject_user_id:
+        parts.append(subject_user_id)
+    parts.extend([method.upper(), path, body_hash])
+    return "\n".join(parts).encode("utf-8")
 
 
-def sign_service_request(service_id: str, scope: str, method: str, path: str, body: bytes) -> dict[str, str]:
+def sign_service_request(
+    service_id: str,
+    scope: str,
+    method: str,
+    path: str,
+    body: bytes,
+    *,
+    subject_user_id: str = "",
+) -> dict[str, str]:
     secret = os.environ.get(SERVICE_SECRET_ENV, "").strip()
     if not secret:
         raise ServiceAuthenticationError("服务身份认证未配置")
@@ -69,16 +82,19 @@ def sign_service_request(service_id: str, scope: str, method: str, path: str, bo
     nonce = secrets.token_hex(16)
     signature = hmac.new(
         secret.encode("utf-8"),
-        canonical_service_message(service_id, scope, timestamp, nonce, method, path, body),
+        canonical_service_message(service_id, scope, timestamp, nonce, method, path, body, subject_user_id),
         hashlib.sha256,
     ).hexdigest()
-    return {
+    headers = {
         SERVICE_ID_HEADER: service_id,
         SCOPE_HEADER: scope,
         TIMESTAMP_HEADER: timestamp,
         NONCE_HEADER: nonce,
         SIGNATURE_HEADER: signature,
     }
+    if subject_user_id:
+        headers["X-Mon-Subject-User-ID"] = subject_user_id
+    return headers
 
 
 def verify_service_request(headers: Any, method: str, path: str, body: bytes, required_scope: str) -> str:

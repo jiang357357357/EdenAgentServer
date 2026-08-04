@@ -8,8 +8,8 @@ from mon_agent_server.mon_tools import MonToolContext, create_mon_agent_tools
 
 
 class FakeCoreClient:
-    def get_self_awake_diary_context(self, token, limit=5):
-        self.context_args = (token, limit)
+    def get_self_awake_diary_context(self, token, limit=5, **scope):
+        self.context_args = (token, limit, scope)
         return {
             "source": "core",
             "last": {
@@ -224,8 +224,8 @@ class FakeHTTPResponse:
 class MonToolsTest(unittest.IsolatedAsyncioTestCase):
     async def test_notify_auto_routes_normal_events_to_qq(self):
         with TemporaryDirectory() as temp_dir:
-            tools = create_mon_agent_tools(Path(temp_dir), MonToolContext(), "self_awake")
-            notify_tool = tool_by_name(tools, "notify_user")
+            tools = create_mon_agent_tools(Path(temp_dir), MonToolContext(operation_id="awake-job-1"), "self_awake")
+            notify_tool = tool_by_name(tools, "contact_user")
             qq_result = {"details": {"queued": True}}
 
             with (
@@ -234,17 +234,18 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
             ):
                 result = await notify_tool.run(
                     "call_notify_normal",
-                    {"message": "普通提醒", "channel": "auto", "priority": "normal"},
+                    {"message": "普通提醒", "channel": "auto"},
                 )
 
             send_qq.assert_awaited_once()
+            self.assertEqual(send_qq.await_args.args[1]["request_id"], "awake-job-1-qq")
             send_email.assert_not_awaited()
             self.assertEqual(result["details"]["delivered_channels"], ["qq"])
 
-    async def test_notify_auto_routes_important_events_to_email(self):
+    async def test_contact_user_respects_explicit_email_choice(self):
         with TemporaryDirectory() as temp_dir:
-            tools = create_mon_agent_tools(Path(temp_dir), MonToolContext(), "self_awake")
-            notify_tool = tool_by_name(tools, "notify_user")
+            tools = create_mon_agent_tools(Path(temp_dir), MonToolContext(operation_id="awake-job-2"), "self_awake")
+            notify_tool = tool_by_name(tools, "contact_user")
             email_result = {"details": {"sent": True}}
 
             with (
@@ -253,10 +254,11 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
             ):
                 result = await notify_tool.run(
                     "call_notify_high",
-                    {"message": "重要事件", "channel": "auto", "priority": "high"},
+                    {"message": "重要事件", "channel": "email"},
                 )
 
             send_email.assert_awaited_once()
+            self.assertEqual(send_email.await_args.args[1]["request_id"], "awake-job-2-email")
             send_qq.assert_not_awaited()
             self.assertEqual(result["details"]["delivered_channels"], ["email"])
 
@@ -541,9 +543,9 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("get_calendar_context", names)
             self.assertIn("get_weather", names)
             self.assertNotIn("set_self_awake_timer", names)
-            self.assertNotIn("send_qq_message", names)
-            self.assertNotIn("send_external_email", names)
-            self.assertIn("notify_user", names)
+            self.assertIn("send_qq_message", names)
+            self.assertIn("send_external_email", names)
+            self.assertIn("contact_user", names)
 
             state = await tool_by_name(tools, "get_self_awake_state").run("call_1", {})
             self.assertIn("MonOs 自醒状态", state["content"][0]["text"])
@@ -551,7 +553,7 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(state["details"]["next_wake_after_minutes"], 60)
 
             diaries = await tool_by_name(tools, "list_self_awake_diaries").run("call_2", {"limit": 1})
-            self.assertEqual(core.context_args, ("token-1", 1))
+            self.assertEqual(core.context_args, ("token-1", 1, {"character_id": None}))
             self.assertEqual(diaries["details"]["diaries"][0]["title"], "服务器启动自检日志")
             self.assertIn("工作记忆", diaries["content"][0]["text"])
             self.assertNotIn("完整工作日记正文", str(diaries))

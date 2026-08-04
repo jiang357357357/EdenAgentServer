@@ -21,6 +21,8 @@ async def send_external_email(context: MonToolContext, params: dict[str, Any]) -
         "content": content,
         "html": str(params.get("html") or ""),
     }
+    if params.get("request_id") or context.operation_id:
+        payload["request_id"] = str(params.get("request_id") or f"{context.operation_id}-email")
     if params.get("to") not in (None, "", []):
         payload["to"] = params.get("to")
     result = await asyncio.to_thread(core_call, core.send_external_email, token, payload)
@@ -77,6 +79,7 @@ def create_email_tools(context: MonToolContext) -> list[AgentTool]:
                         "description": "收件邮箱列表；为空时使用默认收件人。",
                     },
                     "html": {"type": "string", "description": "可选 HTML 正文。"},
+                    "request_id": {"type": "string", "description": "可选幂等请求 ID。"},
                 },
                 "required": ["subject", "content"],
             },

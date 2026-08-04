@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +24,7 @@ from .contract import contract_response_fields
 from .environment import enrich_self_awake_context, enrich_self_awake_request
 from .permissions import memo_due_notification_args, self_awake_before_tool_call
 from .render import render_self_awake_decision, render_self_awake_request
+from ..runtime.character_memory import recall_character_memories
 from .result import final_assistant_text, final_assistant_usage, request_character
 
 if TYPE_CHECKING:
@@ -36,6 +38,18 @@ _SELF_AWAKE_JOB_CACHE_LIMIT = 512
 
 class SelfAwakeModelError(RuntimeError):
     pass
+
+
+def self_awake_run_timeout_seconds() -> float:
+    try:
+        value = float(os.environ.get("MON_AGENT_SELF_AWAKE_TIMEOUT_SECONDS", "180"))
+    except (TypeError, ValueError):
+        value = 180.0
+    return min(max(value, 10.0), 900.0)
+
+
+def self_awake_operation_id(request: dict[str, Any]) -> str:
+    return str(request.get("idempotency_key") or request.get("event_id") or request.get("job_id") or "").strip()
 
 
 def memo_due_items(context: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -79,8 +93,7 @@ def self_awake_notification_payload(decision: dict[str, Any], context: dict[str,
     return {
         "title": str(diary.get("title") or ("重要自醒提醒" if important else "自醒状态")).strip(),
         "message": "\n".join(part for part in message_parts if part),
-        "channel": "auto",
-        "priority": "high" if important else "normal",
+        "channel": "email" if important else "auto",
         "source_type": "self_awake",
     }
 
@@ -91,6 +104,7 @@ async def ensure_self_awake_notification(
     context: dict[str, Any],
     decision: dict[str, Any],
     agent_notification: dict[str, Any] | None = None,
+    operation_id: str | None = None,
 ) -> dict[str, Any]:
     observed = agent_notification if isinstance(agent_notification, dict) else {}
     if observed.get("attempted"):
@@ -121,12 +135,13 @@ async def ensure_self_awake_notification(
                 core_client=app.core_client,
                 core_token=token,
                 environment=context.get("environment") if isinstance(context.get("environment"), dict) else None,
+                operation_id=operation_id,
             ),
             "self_awake",
         )
-        notify_tool = next((tool for tool in tools if tool.name == "notify_user"), None)
+        notify_tool = next((tool for tool in tools if tool.name == "contact_user"), None)
         if notify_tool is None:
-            raise RuntimeError("自醒工具集中没有 notify_user。")
+            raise RuntimeError("自醒工具集中没有 contact_user。")
         result = await notify_tool.run(create_id("selfawakenotify"), self_awake_notification_payload(decision, context))
         details = result.get("details") if isinstance(result, dict) and isinstance(result.get("details"), dict) else {}
         return {
@@ -195,6 +210,9 @@ async def run_self_awake_agent(
 ) -> dict[str, Any]:
     context = request.get("context") if isinstance(request.get("context"), dict) else {}
     session_id = create_id("selfawake")
+    runtime_core = runtime_config.core or {}
+    current_character = request_character(request, runtime_config.core)
+    current_assistant = runtime_core.get("assistant") if isinstance(runtime_core.get("assistant"), dict) else {}
     skill_owner_key = None
     if token:
         try:
@@ -209,9 +227,12 @@ async def run_self_awake_agent(
             core_client=app.core_client,
             core_token=token,
             current_model_supports_images=runtime_config.supports_images,
-            vision_config=(runtime_config.core or {}).get("visionConfig") if runtime_config.core else None,
+            vision_ai_entity=(runtime_config.core or {}).get("visionAIEntity") if runtime_config.core else None,
             environment=context.get("environment") if isinstance(context.get("environment"), dict) else None,
+            character=current_character,
+            assistant=current_assistant,
             get_current_files=lambda: [],
+            operation_id=self_awake_operation_id(request) or None,
         ),
         profile="self_awake",
         owner_key=skill_owner_key,
@@ -219,6 +240,18 @@ async def run_self_awake_agent(
     tools = skill_runtime.active_tools()
     character = request_character(request, runtime_config.core)
     prompt_core = runtime_config.core if runtime_config.core else {"character": character}
+    relevant_memories: list[dict[str, Any]] = []
+    if token:
+        try:
+            relevant_memories = await asyncio.to_thread(
+                recall_character_memories,
+                app.core_client,
+                token,
+                prompt_core,
+                str(context.get("trigger") or context.get("event") or "系统自醒"),
+            )
+        except Exception as error:
+            logger.warning(f"自醒角色记忆召回失败，继续使用当前上下文: {error}")
     def system_prompt_for(active_skill_ids: tuple[str, ...]) -> str:
         return build_agent_system_prompt(
             prompt_core,
@@ -227,6 +260,7 @@ async def run_self_awake_agent(
             active_skill_ids=active_skill_ids,
             skill_resource_prompt=skill_runtime.prompt_section(),
             environment=context.get("environment") if isinstance(context.get("environment"), dict) else None,
+            relevant_memories=relevant_memories,
         )
 
     system_prompt = system_prompt_for(skill_runtime.active_skill_ids)
@@ -272,12 +306,12 @@ async def run_self_awake_agent(
         event_type = event.get("type")
         if event_type == "tool_execution_start":
             logger.info(f"工具开始: {event.get('toolName')} {event.get('toolCallId')}")
-            if event.get("toolName") == "notify_user":
+            if event.get("toolName") == "contact_user":
                 notification["attempted"] = True
         elif event_type == "tool_execution_end":
             logger.info(f"工具{'失败' if event.get('isError') else '完成'}: {event.get('toolName')} {event.get('toolCallId')}")
-            if event.get("toolName") == "notify_user":
-                # 模型偶尔会在首次通知成功后再次调用 notify_user。第二次调用会被
+            if event.get("toolName") == "contact_user":
+                # 模型偶尔会在首次联系成功后再次调用 contact_user。第二次调用会被
                 # 权限钩子拦截，但不能让这个“重复调用失败”覆盖已经完成的真实投递。
                 if not event.get("isError"):
                     notification["succeeded"] = True
@@ -313,10 +347,18 @@ async def run_self_awake(request: dict[str, Any], app: AppState, token: str | No
     started = now_ms()
     context = request.get("context") if isinstance(request.get("context"), dict) else {}
     runtime_config = await resolve_self_awake_runtime_config(app, token)
+    runtime_core = runtime_config.core or {}
+    runtime_assistant = runtime_core.get("assistant") if isinstance(runtime_core.get("assistant"), dict) else {}
+    runtime_character = runtime_core.get("character") if isinstance(runtime_core.get("character"), dict) else {}
     character = request_character(request, runtime_config.core)
     result: dict[str, Any] = {}
     try:
-        result = await run_self_awake_agent(request, app, token, runtime_config)
+        timeout_seconds = self_awake_run_timeout_seconds()
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                result = await run_self_awake_agent(request, app, token, runtime_config)
+        except TimeoutError as error:
+            raise SelfAwakeModelError(f"自醒整轮执行超过 {timeout_seconds:g} 秒，已终止并转入 fallback。") from error
         decision = parse_self_awake_decision(str(result.get("text") or ""))
         usage = result.get("usage") if isinstance(result.get("usage"), dict) else final_assistant_usage(result.get("messages") or [])
         decision["usage"] = usage
@@ -340,6 +382,7 @@ async def run_self_awake(request: dict[str, Any], app: AppState, token: str | No
         context,
         decision,
         result.get("notification") if isinstance(result.get("notification"), dict) else None,
+        self_awake_operation_id(request) or None,
     )
     decision["notification"]["memo_finalization"] = await finalize_memo_due_notification(
         app,
@@ -347,12 +390,54 @@ async def run_self_awake(request: dict[str, Any], app: AppState, token: str | No
         context,
         decision["notification"],
     )
+    decision["assistant_id"] = runtime_assistant.get("id")
+    decision["character_id"] = runtime_character.get("id")
     render_self_awake_decision(app, decision, runtime_config, now_ms() - started, character, decision["usage"])
     return decision
 
 
 def run_self_awake_sync(request: dict[str, Any], app: AppState, token: str | None) -> dict[str, Any]:
     return asyncio.run(run_self_awake(request, app, token))
+
+
+def run_self_awake_sync_with_watchdog(
+    request: dict[str, Any], app: AppState, token: str | None
+) -> dict[str, Any]:
+    """Bound the whole model runtime even when a provider blocks the asyncio loop."""
+    completed = threading.Event()
+    outcome: dict[str, Any] = {}
+
+    def target() -> None:
+        try:
+            outcome["decision"] = run_self_awake_sync(request, app, token)
+        except BaseException as error:
+            outcome["error"] = error
+        finally:
+            completed.set()
+
+    timeout_seconds = self_awake_run_timeout_seconds()
+    thread = threading.Thread(target=target, name="monagent-self-awake-model", daemon=True)
+    thread.start()
+    if not completed.wait(timeout_seconds):
+        context = request.get("context") if isinstance(request.get("context"), dict) else {}
+        character = request.get("character") if isinstance(request.get("character"), dict) else {}
+        reason = f"自醒整轮执行超过 {timeout_seconds:g} 秒，外层监控已终止等待并转入 fallback。"
+        decision = fallback_self_awake_decision(context, reason, character)
+        decision["usage"] = final_assistant_usage([])
+        decision["notification"] = {
+            "attempted": False,
+            "succeeded": False,
+            "source": "watchdog_timeout",
+            "delivered_channels": [],
+            "error": reason,
+            "memo_finalization": {"attempted": False, "completed": [], "errors": []},
+        }
+        decision["assistant_id"] = request.get("assistant_id")
+        decision["character_id"] = character.get("id")
+        return decision
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["decision"]
 
 
 def run_self_awake_and_persist_sync(
@@ -363,7 +448,7 @@ def run_self_awake_and_persist_sync(
 ) -> dict[str, Any]:
     request = enrich_self_awake_request(request, app, token=token)
     context = request.get("context") if isinstance(request.get("context"), dict) else {}
-    decision = run_self_awake_sync(request, app, token)
+    decision = run_self_awake_sync_with_watchdog(request, app, token)
     server_run_id = None
     server_error = ""
     if token:
@@ -397,6 +482,22 @@ def start_self_awake_run_async(request: dict[str, Any], app: AppState, token: st
             if existing.get("idempotency_key") != contract_fields["idempotency_key"]:
                 raise RuntimeError(f"自醒任务 ID 冲突: {async_run_id}")
             return {**existing, "deduplicated": True}
+
+    # The process-local cache is only an optimization. Core is the durable
+    # idempotency ledger, so completed jobs remain deduplicated after restart.
+    if token and hasattr(app.core_client, "get_self_awake_run_by_external_id"):
+        persisted = app.core_client.get_self_awake_run_by_external_id(token, async_run_id)
+        if isinstance(persisted, dict) and persisted.get("status") in {"succeeded", "skipped"}:
+            return {
+                **contract_fields,
+                "accepted": False,
+                "status": persisted.get("status"),
+                "async_run_id": async_run_id,
+                "server_run_id": persisted.get("id"),
+                "server_error": "",
+                "deduplicated": True,
+                "message": "自醒任务已在 Core 中完成。",
+            }
 
     # Enrichment may call external services. Do it before publishing the job so a
     # failed attempt cannot leave a permanently queued cache entry behind.

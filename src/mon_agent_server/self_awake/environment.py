@@ -43,6 +43,15 @@ def normalize_self_awake_event(context: dict[str, Any], occurred_at: str) -> dic
         "occurred_at": str(raw_event.get("occurred_at") or context.get("current_time") or occurred_at),
         "event_id": str(raw_event.get("event_id") or create_id("selfawakeevent")),
     }
+    wake_reason = str(raw_event.get("wake_reason") or "").strip()
+    if wake_reason:
+        event["wake_reason"] = wake_reason
+    if isinstance(raw_event.get("schedule"), dict):
+        event["schedule"] = {
+            key: raw_event["schedule"].get(key)
+            for key in ("request_id", "requested_by", "reason", "scheduled_at", "due_at")
+            if raw_event["schedule"].get(key) not in (None, "")
+        }
     for key in ("subject_type", "subject_id", "scheduler_reason"):
         if raw_event.get(key) not in (None, ""):
             event[key] = str(raw_event[key])

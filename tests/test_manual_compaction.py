@@ -100,7 +100,7 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_forced_compaction_summarizes_old_turns_below_eight_thousand_tokens(self):
+    async def test_forced_compaction_preserves_two_recent_turns_below_eight_thousand_tokens(self):
         store = SessionStore()
         session = store.create_session("短会话压缩")
         session_id = session["id"]
@@ -111,6 +111,8 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
             {"role": "assistant", "timestamp": 2, "content": [{"type": "text", "text": "第一轮回答" * 120}]},
             {"role": "user", "timestamp": 3, "content": [{"type": "text", "text": "最近问题"}]},
             {"role": "assistant", "timestamp": 4, "content": [{"type": "text", "text": "最近回答"}]},
+            {"role": "user", "timestamp": 5, "content": [{"type": "text", "text": "当前问题"}]},
+            {"role": "assistant", "timestamp": 6, "content": [{"type": "text", "text": "当前回答"}]},
         ]
         store.replace_context_messages(session_id, messages)
         runtime_config = RuntimeModelConfig(

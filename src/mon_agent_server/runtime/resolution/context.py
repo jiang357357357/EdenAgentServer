@@ -159,26 +159,26 @@ class RuntimeResolutionMixin:
         if runtime_config.supports_images or not image_parts:
             return ""
         if not auth_token or not runtime_config.core:
-            raise RuntimeError("当前对话模型不支持图片，且当前会话无法读取角色绑定的 Vision 配置。")
+            raise RuntimeError("当前对话模型不支持图片，且当前会话无法读取默认多模态 AI。")
 
         character = runtime_config.core.get("character")
-        vision_config = runtime_config.core.get("visionConfig")
+        vision_entity = runtime_config.core.get("visionAIEntity")
         character_name = character.get("name") if isinstance(character, dict) else "当前角色"
-        if not isinstance(vision_config, dict) or not vision_config.get("id"):
-            raise RuntimeError(f"角色「{character_name or '当前角色'}」的对话模型不支持图片，且角色未绑定 Vision 配置。")
-        if vision_config.get("status") == "unavailable":
+        if not isinstance(vision_entity, dict) or not vision_entity.get("id"):
+            raise RuntimeError(f"角色「{character_name or '当前角色'}」的对话模型不支持图片，且没有配置默认多模态 AI。")
+        if vision_entity.get("status") == "unavailable":
             raise RuntimeError(
-                f"无法读取角色「{character_name or '当前角色'}」绑定的 Vision 配置："
-                f"{vision_config.get('error') or 'Core Vision 配置不可用'}"
+                f"无法读取角色「{character_name or '当前角色'}」选定的多模态 AI："
+                f"{vision_entity.get('error') or 'Core 多模态 AI 不可用'}"
             )
-        if vision_config.get("status") not in (None, "", "active"):
+        if vision_entity.get("status") not in (None, "", "active"):
             raise RuntimeError(
-                f"角色「{character_name or '当前角色'}」绑定的 Vision 配置「{vision_config.get('vision_name') or vision_config.get('id')}」未启用。"
+                f"角色「{character_name or '当前角色'}」选定的多模态 AI「{vision_entity.get('ai_name') or vision_entity.get('id')}」未启用。"
             )
 
         images = _vision_inputs_from_parts(parts)
         if len(images) != len(image_parts):
-            raise RuntimeError("图片附件不是有效的 base64 data URL，无法交给角色绑定的 Vision 服务分析。")
+            raise RuntimeError("图片附件不是有效的 base64 data URL，无法交给多模态 AI 分析。")
 
         question = user_text.strip()
         prompt = (
@@ -188,10 +188,10 @@ class RuntimeResolutionMixin:
         if question:
             prompt += f"\n用户当前问题：{question[:2000]}"
         result = await asyncio.to_thread(
-            self.core_client.analyze_vision,
+            self.core_client.analyze_image,
             auth_token,
             {
-                "config_id": vision_config["id"],
+                "ai_entity_id": vision_entity["id"],
                 "images": images,
                 "prompt": prompt,
                 "source": "monagent",
@@ -208,17 +208,17 @@ class RuntimeResolutionMixin:
         )
         if not isinstance(result, dict) or not result.get("success"):
             error = (result.get("error") or result.get("error_message")) if isinstance(result, dict) else None
-            raise RuntimeError(error or "角色绑定的 Vision 服务分析失败。")
+            raise RuntimeError(error or "多模态 AI 图片分析失败。")
         analysis = str(result.get("content") or result.get("summary") or "").strip()
         if not analysis:
-            raise RuntimeError("角色绑定的 Vision 服务没有返回可用的图片分析结果。")
+            raise RuntimeError("多模态 AI 没有返回可用的图片分析结果。")
 
         references = "、".join(str(image.get("ref") or "图片") for image in images)
         return "\n".join(
             [
                 "### 自动视觉分析结果",
                 f"图片：{references}",
-                f"视觉配置：{vision_config.get('vision_name') or vision_config.get('name') or vision_config.get('id')}",
+                f"视觉模型：{vision_entity.get('ai_name') or vision_entity.get('name') or vision_entity.get('id')}",
                 analysis,
             ]
         )

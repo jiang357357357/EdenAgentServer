@@ -19,7 +19,10 @@ class RunState:
         self.final_assistant_message_id: str | None = None
         self.runtime_message_id: str | None = None
         self.runtime_created_at: int | None = None
+        self.runtime_speaker: dict[str, Any] | None = None
         self.runtime_thinking_lines: list[str] = []
+        self.context_user_message: dict[str, Any] | None = None
+        self.context_user_persisted = False
         self.error_message: str | None = None
         self.tool_inputs: dict[str, Any] = {}
         self.tool_starts: dict[str, int] = {}

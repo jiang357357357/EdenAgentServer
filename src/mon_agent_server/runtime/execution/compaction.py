@@ -152,28 +152,24 @@ class RuntimeCompactionMixin:
                 raise RuntimeError("当前会话没有可压缩的上下文。")
             return messages
         if force:
-            last_user_index = next(
-                (index for index in range(len(messages) - 1, -1, -1) if messages[index].get("role") == "user"),
-                len(messages) - 1,
-            )
-            recent_turn_tokens = int(estimate_context_tokens(messages[last_user_index:]).get("tokens") or 1)
-            configured_keep_recent = int(
-                settings.get("keepRecentTokens") or _MANUAL_COMPACTION_KEEP_RECENT_TOKENS
-            )
             settings = {
                 **settings,
                 "enabled": True,
-                "keepRecentTokens": min(
-                    configured_keep_recent,
-                    _MANUAL_COMPACTION_KEEP_RECENT_TOKENS,
-                    max(1, recent_turn_tokens),
-                ),
             }
         if not force and not settings.get("enabled", True):
             return messages
         estimate = estimate_context_tokens(messages)
         context_tokens = int(estimate.get("tokens") or 0)
         context_window = runtime_context_window(runtime_config.model)
+        if settings.get("keepRecentTokens") is None:
+            usable_context = max(0, context_window - int(settings.get("reserveTokens") or 0))
+            settings = {
+                **settings,
+                "keepRecentTokens": min(
+                    _MANUAL_COMPACTION_KEEP_RECENT_TOKENS,
+                    max(2_000, usable_context // 4),
+                ),
+            }
         if not force and not should_compact(context_tokens, context_window, settings):
             return messages
         if not runtime_config.api_key:

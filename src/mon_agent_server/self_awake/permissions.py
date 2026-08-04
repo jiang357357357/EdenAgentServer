@@ -60,7 +60,6 @@ def memo_due_notification_args(context_data: dict[str, Any] | None) -> dict[str,
         "title": f"提醒：{titles[0]}" if len(titles) == 1 else f"{len(titles)} 项提醒已到时间",
         "message": "\n".join(lines),
         "channel": "auto",
-        "priority": "high" if any(str(memo.get("priority") or "").lower() == "high" for memo in memos) else "normal",
         "source_type": "memo",
         "source_id": str(primary.get("id") or ""),
         "metadata": {"memo_ids": [memo.get("id") for memo in memos if memo.get("id") is not None]},
@@ -100,7 +99,9 @@ def self_awake_before_tool_call(context_data: dict[str, Any] | None):
         "external_email_status",
         "qq_bot_list",
         "qq_bot_targets",
-        "notify_user",
+        "send_qq_message",
+        "send_external_email",
+        "contact_user",
     }
     file_tools = {"read", "ls", "grep", "find"}
 
@@ -123,8 +124,13 @@ def self_awake_before_tool_call(context_data: dict[str, Any] | None):
                 "block": True,
                 "reason": "精准提醒的状态只能在通知真实成功后由运行时统一回写；本轮不要直接修改该提醒。",
             }
-        if tool_name == "notify_user":
+        if tool_name in {"contact_user", "send_qq_message", "send_external_email"}:
             forced_memo_args = memo_due_notification_args(context_data)
+            if forced_memo_args and tool_name != "contact_user":
+                return {
+                    "block": True,
+                    "reason": "精准到期提醒必须通过 contact_user 联系当前用户，不能改发给其他目标。",
+                }
             if forced_memo_args and isinstance(args, dict):
                 args.clear()
                 args.update(forced_memo_args)
@@ -133,7 +139,7 @@ def self_awake_before_tool_call(context_data: dict[str, Any] | None):
                 logger.warning("本轮重复通知已拦截")
                 return {
                     "block": True,
-                    "reason": "每次后台自醒只能调用一次 notify_user；首次调用已经负责通道回退，不能重复通知用户。",
+                    "reason": "每次后台自醒只能执行一次对外联系；首次调用已经完成发送或通道回退，不能在同一轮重复联系。",
                 }
             notification_calls += 1
         if self_awake_can_use_file_tool(context_data, tool_name, args):

@@ -56,8 +56,9 @@ def create_assistant_tools(context: MonToolContext) -> list[AgentTool]:
         character = assistant.get("character") if isinstance(assistant.get("character"), dict) else {}
         name = assistant.get("name") or character.get("name") or assistant_id
         return text_result(
-            f"切换完成。你现在是助手「{name}」，请直接以新身份完成用户当前请求。"
-            "会话历史已保留，不要替原助手告别或转交。",
+            f"交接请求已接受，目标助手是「{name}」。你仍是发起切换的原助手；"
+            "请简短结束当前回复，不得以目标助手身份发言。"
+            "你的回复完成后，系统才会切换会话参与者并启动目标助手的独立运行。",
             result,
         )
 

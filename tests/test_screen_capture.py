@@ -44,7 +44,7 @@ class FakeVisionCoreClient:
     def __init__(self):
         self.calls = []
 
-    def analyze_vision(self, token, payload):
+    def analyze_image(self, token, payload):
         self.calls.append((token, payload))
         return {"success": True, "content": "屏幕中显示 MonAgent 聊天窗口。"}
 
@@ -222,7 +222,7 @@ class AnalyzeScreenToolTest(unittest.IsolatedAsyncioTestCase):
                 current_model_supports_images=False,
                 core_client=core,
                 core_token="token",
-                vision_config={"id": 33, "status": "active"},
+                vision_ai_entity={"id": 33, "status": "active"},
                 get_message_id=lambda: "message-1",
             ),
         )
@@ -233,7 +233,7 @@ class AnalyzeScreenToolTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("MonAgent 聊天窗口", result["content"][0]["text"])
-        self.assertEqual(core.calls[0][1]["config_id"], 33)
+        self.assertEqual(core.calls[0][1]["ai_entity_id"], 33)
         self.assertEqual(core.calls[0][1]["metadata"]["width"], 1920)
 
 

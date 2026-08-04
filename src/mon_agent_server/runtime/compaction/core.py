@@ -28,10 +28,16 @@ def _env_int(name: str, default: int) -> int:
 
 
 def runtime_compaction_settings() -> dict[str, Any]:
+    configured_keep_recent = os.environ.get("MON_AGENT_COMPACTION_KEEP_RECENT_TOKENS")
     return {
         "enabled": _env_bool("MON_AGENT_COMPACTION_ENABLED", bool(DEFAULT_COMPACTION_SETTINGS["enabled"])),
         "reserveTokens": _env_int("MON_AGENT_COMPACTION_RESERVE_TOKENS", int(DEFAULT_COMPACTION_SETTINGS["reserveTokens"])),
-        "keepRecentTokens": _env_int("MON_AGENT_COMPACTION_KEEP_RECENT_TOKENS", int(DEFAULT_COMPACTION_SETTINGS["keepRecentTokens"])),
+        "keepRecentTokens": (
+            _env_int("MON_AGENT_COMPACTION_KEEP_RECENT_TOKENS", int(DEFAULT_COMPACTION_SETTINGS["keepRecentTokens"]))
+            if configured_keep_recent is not None
+            else None
+        ),
+        "tailTurns": _env_int("MON_AGENT_COMPACTION_TAIL_TURNS", int(DEFAULT_COMPACTION_SETTINGS.get("tailTurns", 2))),
     }
 
 

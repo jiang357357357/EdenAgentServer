@@ -36,6 +36,8 @@ def _model_option(entity: dict[str, Any], current_id: Any, vendors: dict[str, An
         "modelID": model_id,
         "status": entity.get("status") or "",
         "isMultimodal": bool(entity.get("is_multimodal")),
+        "isChoiceDefault": bool(entity.get("is_choice_default")),
+        "isVisionDefault": bool(entity.get("is_vision_default")),
         "contextWindow": runtime_context_window(entity),
         "selected": str(entity_id) == str(current_id),
     }
@@ -47,11 +49,28 @@ def _model_payload(handler: Any, token: str) -> dict[str, Any]:
     if not isinstance(character, dict) or not character.get("id"):
         raise RuntimeError("当前助手没有绑定角色，请先在 Core 助手管理中绑定角色。")
 
-    current_id = character.get("ai_talk_entity_id")
+    bound_id = character.get("ai_talk_entity_id")
+    settings = handler.app.core_client.get_agent_settings(token)
+    fallback_id = str(settings.get("default_model") or "").strip()
+    current_id = bound_id or fallback_id
     vendors = handler.app.core_client.list_service_vendors(token, "ai")
     entities = handler.app.core_client.list_ai_entities(token)
     options = [_model_option(entity, current_id, vendors) for entity in entities if isinstance(entity, dict)]
     current = next((option for option in options if option["selected"]), None)
+
+    if current is None and not bound_id:
+        active_options = [option for option in options if option.get("status") == "active"]
+        current = next(
+            (
+                option
+                for option in active_options
+                if not option.get("isVisionDefault") and not option.get("isChoiceDefault")
+            ),
+            active_options[0] if active_options else None,
+        )
+        if current is not None:
+            current["selected"] = True
+            current_id = current["aiEntityId"]
 
     if current is None and current_id:
         entity = handler.app.core_client.get_ai_entity(token, current_id)
@@ -72,6 +91,7 @@ def _model_payload(handler: Any, token: str) -> dict[str, Any]:
             "name": character.get("name") or "",
         },
         "current": current,
+        "selectionSource": "character" if bound_id else "input",
         "options": options,
     }
 
@@ -96,7 +116,12 @@ def handle_model(handler: Any, path: str, _query: dict[str, list[str]], method: 
         if not character_id:
             raise RuntimeError("当前助手没有绑定角色，请先在 Core 助手管理中绑定角色。")
 
-        handler.app.core_client.update_character(token, character_id, {"ai_talk_entity_id": int(ai_entity_id)})
+        assistant = handler.app.core_client.get_current_assistant(token)
+        character_detail = assistant.get("character") if isinstance(assistant, dict) else None
+        if isinstance(character_detail, dict) and character_detail.get("ai_talk_entity_id"):
+            handler.app.core_client.update_character(token, character_id, {"ai_talk_entity_id": int(ai_entity_id)})
+        else:
+            handler.app.core_client.update_agent_settings(token, {"default_model": str(ai_entity_id)})
         handler.json_response(_model_payload(handler, token))
         return True
 

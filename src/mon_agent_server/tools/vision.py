@@ -68,16 +68,16 @@ def create_vision_tools(root: Path, context: MonToolContext) -> list[AgentTool]:
             }
 
         core, token = require_core_access(context)
-        if not context.vision_config or not context.vision_config.get("id"):
-            raise RuntimeError("当前对话模型不支持图片，且角色没有绑定 Vision 配置。")
-        if context.vision_config.get("status") not in (None, "", "active"):
-            raise RuntimeError("当前对话模型不支持图片，且角色绑定的 Vision 配置不可用。")
+        if not context.vision_ai_entity or not context.vision_ai_entity.get("id"):
+            raise RuntimeError("当前对话模型不支持图片，且没有可用的默认多模态 AI。")
+        if context.vision_ai_entity.get("status") not in (None, "", "active"):
+            raise RuntimeError("当前对话模型不支持图片，且选定的多模态 AI 不可用。")
         result = await asyncio.to_thread(
             core_call,
-            core.analyze_vision,
+            core.analyze_image,
             token,
             {
-                "config_id": context.vision_config.get("id"),
+                "ai_entity_id": context.vision_ai_entity.get("id"),
                 "images": [{"type": "base64", "source": data, "media_type": mime_type, "ref": source}],
                 "prompt": question,
                 "source": "monagent",

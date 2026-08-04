@@ -50,13 +50,15 @@ class RuntimeEmitterMixin:
         created = run_state.runtime_created_at or now_ms()
         run_state.runtime_message_id = message_id
         run_state.runtime_created_at = created
+        if run_state.runtime_speaker is None:
+            run_state.runtime_speaker = dict(run_state.speaker)
         info = {
             "id": message_id,
             "role": "assistant",
             "agent": "python-agent-core",
             "kind": "runtime",
             "runID": run_state.run_id,
-            "speaker": run_state.speaker,
+            "speaker": run_state.runtime_speaker,
             "orchestration": run_state.orchestration,
             "time": {"created": created},
         }
@@ -97,7 +99,7 @@ class RuntimeEmitterMixin:
             "agent": "python-agent-core",
             "kind": "runtime",
             "runID": run_state.run_id,
-            "speaker": run_state.speaker,
+            "speaker": run_state.runtime_speaker,
             "orchestration": run_state.orchestration,
             "time": {
                 "created": run_state.runtime_created_at or completed,
@@ -119,7 +121,16 @@ class RuntimeEmitterMixin:
         event_type = event.get("type")
         message = event.get("message") or {}
         if event_type == "message_end" and message.get("role") == "user":
-            self.store.append_context_message(session_id, message, turn_id=run_state.run_id)
+            # Agent.prompt emits an internal actor/handoff task as a user-role
+            # message. Persist the real user request prepared by the runtime
+            # exactly once instead of copying that internal prompt.
+            if run_state.context_user_message is not None and not run_state.context_user_persisted:
+                self.store.append_context_message(
+                    session_id,
+                    run_state.context_user_message,
+                    turn_id=run_state.run_id,
+                )
+                run_state.context_user_persisted = True
             return
         if event_type == "message_start" and message.get("role") == "assistant":
             self.begin_assistant_message(run_state, message)

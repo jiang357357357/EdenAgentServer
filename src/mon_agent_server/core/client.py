@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import json
-import threading
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from ..ids import now_ms
@@ -16,12 +15,16 @@ from .serializers import message_from_map, run_id_from_millis, session_from_map,
 from ..service_auth import sign_service_request
 
 
+@dataclass(frozen=True)
+class CoreServiceIdentity:
+    service_id: str
+    scope: str
+    user_id: str
+
+
 class CoreClient:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
-        self._service_token = ""
-        self._service_token_cached_at = 0.0
-        self._service_token_lock = threading.Lock()
 
     def login_for_token(self, username: str, password: str, client_id: str, client_type: str) -> str:
         data = self._request(
@@ -35,24 +38,9 @@ class CoreClient:
             raise RuntimeError("Core 登录成功但未返回 token")
         return token
 
-    def login_for_service(self) -> str:
-        with self._service_token_lock:
-            if self._service_token and time.monotonic() - self._service_token_cached_at < 15 * 60:
-                return self._service_token
-            path = "/api/internal/service-token/"
-            payload = {"audience": "monagent", "requested_scope": "self_awake:user_context"}
-            body = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            headers = {"accept": "application/json", "content-type": "application/json"}
-            headers.update(sign_service_request("monagent", "core:service_token", "POST", path, body))
-            request = urllib.request.Request(f"{self.base_url}{path}", data=body, headers=headers, method="POST")
-            with urllib.request.urlopen(request, timeout=15) as response:
-                data = parse_json(response.read().decode("utf-8", errors="replace"))
-            token = data.get("token") if isinstance(data, dict) else None
-            if not token:
-                raise RuntimeError("Core 服务身份交换成功但未返回 token")
-            self._service_token = str(token)
-            self._service_token_cached_at = time.monotonic()
-            return self._service_token
+    @staticmethod
+    def self_awake_service_identity(user_id: int | str) -> CoreServiceIdentity:
+        return CoreServiceIdentity("monagent", "self_awake:user_context", str(user_id))
 
     def resolve_runtime_config(self, token: str | None) -> dict[str, Any] | None:
         if not token:
@@ -74,28 +62,77 @@ class CoreClient:
         if not character:
             raise RuntimeError("当前助手没有绑定角色，请先在 Core 助手管理中绑定角色。")
         ai_entity_id = character.get("ai_talk_entity_id")
-        if not ai_entity_id:
-            raise RuntimeError(f"角色「{character.get('name')}」没有绑定对话 AI，请先在角色配置中设置 AI 实体。")
-        ai_entity = self.get_ai_entity(token, ai_entity_id)
+        listed_entities = None
+        if ai_entity_id:
+            ai_entity = self.get_ai_entity(token, ai_entity_id)
+        else:
+            settings = self.get_agent_settings(token)
+            selected = str(settings.get("default_model") or "").strip()
+            listed_entities = self.list_ai_entities(token)
+            active_entities = [entity for entity in listed_entities if entity.get("status") == "active"]
+            ai_entity = next(
+                (
+                    entity
+                    for entity in active_entities
+                    if selected
+                    and (
+                        str(entity.get("id")) == selected
+                        or str(entity.get("ai_model") or "") == selected
+                        or str(entity.get("ai_name") or "") == selected
+                    )
+                ),
+                None,
+            )
+            if ai_entity is None:
+                ai_entity = next(
+                    (
+                        entity
+                        for entity in active_entities
+                        if not entity.get("is_vision_default") and not entity.get("is_choice_default")
+                    ),
+                    active_entities[0] if active_entities else None,
+                )
+            if ai_entity is not None and ai_entity.get("id") not in (None, ""):
+                ai_entity = self.get_ai_entity(token, ai_entity["id"])
+            if ai_entity is None:
+                raise RuntimeError(
+                    f"角色「{character.get('name')}」没有绑定对话 AI，且输入框当前没有可用模型。"
+                )
         if not ai_entity.get("api_key"):
             raise RuntimeError(f"AI 实体「{ai_entity.get('ai_name')}」没有配置 API Key。")
-        vision_config = None
-        vision_reference = character.get("vision_config_id")
+        vision_ai_entity = None
+        vision_reference = character.get("vision_ai_entity_id")
         if vision_reference is None:
-            vision_reference = character.get("vision_config")
+            vision_reference = character.get("vision_ai_entity")
         if isinstance(vision_reference, dict):
             vision_reference = vision_reference.get("id")
         if vision_reference not in (None, ""):
             try:
-                vision_config = self.get_vision_config(token, vision_reference)
+                vision_ai_entity = self.get_ai_entity(token, vision_reference)
             except Exception as error:
-                vision_config = {
+                vision_ai_entity = {
                     "id": vision_reference,
-                    "vision_name": character.get("vision_config_name") or "角色绑定 Vision",
+                    "ai_name": character.get("vision_ai_entity_name") or "角色绑定视觉 AI",
                     "status": "unavailable",
                     "error": str(error),
                 }
-        return {"assistant": assistant, "character": character, "aiEntity": ai_entity, "visionConfig": vision_config}
+        else:
+            vision_ai_entity = next(
+                (
+                    entity
+                    for entity in (listed_entities if listed_entities is not None else self.list_ai_entities(token))
+                    if entity.get("status") == "active"
+                    and entity.get("is_multimodal") is True
+                    and entity.get("is_vision_default") is True
+                ),
+                None,
+            )
+        return {
+            "assistant": assistant,
+            "character": character,
+            "aiEntity": ai_entity,
+            "visionAIEntity": vision_ai_entity,
+        }
 
     def get_assistant(self, token: str, assistant_id: int | str) -> dict[str, Any]:
         raw = self._request(f"/api/assistants/{urllib.parse.quote(str(assistant_id))}/", token)
@@ -372,7 +409,7 @@ class CoreClient:
                 "external_run_id": external_run_id,
                 "event_type": event.get("type") or "scheduled",
                 "event_source": event.get("source") or "monagent",
-                "event_reason": event.get("reason") or "",
+                "event_reason": event.get("wake_reason") or event.get("reason") or "",
                 "event_id": event.get("event_id") or "",
                 "event_occurred_at": event.get("occurred_at") or to_storage_iso(current),
                 "status": "pending",
@@ -397,11 +434,13 @@ class CoreClient:
         after_minutes = int(next_wake.get("after_minutes") or 720)
         failed = decision.get("source") == "fallback"
         payload = {
+            "assistant": decision.get("assistant_id"),
+            "character": decision.get("character_id"),
             "source_service": "monagent",
             "external_run_id": external_run_id or run_id_from_millis("monagent", current),
             "event_type": event.get("type") or "scheduled",
             "event_source": event.get("source") or "monagent",
-            "event_reason": event.get("reason") or "",
+            "event_reason": event.get("wake_reason") or event.get("reason") or "",
             "event_id": event.get("event_id") or "",
             "event_occurred_at": event.get("occurred_at") or to_storage_iso(current),
             "status": "failed" if failed else "succeeded",
@@ -430,6 +469,16 @@ class CoreClient:
     def list_self_awake_runs(self, token: str, limit: int = 30) -> list[dict[str, Any]]:
         return self.list_self_awake_runs_page(token, page=1, page_size=limit)["results"]
 
+    def get_self_awake_run_by_external_id(self, token: str, external_run_id: str) -> dict[str, Any] | None:
+        params = urllib.parse.urlencode(
+            {"source_service": "monagent", "external_run_id": external_run_id, "page_size": "1"}
+        )
+        raw = self._request(f"/api/agent/self-awake/runs/?{params}", token)
+        if isinstance(raw, list):
+            return raw[0] if raw else None
+        results = raw.get("results") if isinstance(raw, dict) else None
+        return results[0] if isinstance(results, list) and results else None
+
     def list_self_awake_runs_page(self, token: str, page: int = 1, page_size: int = 30, q: str | None = None) -> dict[str, Any]:
         page = max(1, int(page))
         page_size = min(max(int(page_size), 1), 100)
@@ -451,9 +500,16 @@ class CoreClient:
             "results": results,
         }
 
-    def get_self_awake_diary_context(self, token: str, limit: int = 5) -> dict[str, Any]:
+    def get_self_awake_diary_context(
+        self, token: str, limit: int = 5, *, character_id: int | str | None = None, assistant_id: int | str | None = None
+    ) -> dict[str, Any]:
         limit = min(max(int(limit), 1), 12)
-        raw = self._request(f"/api/agent/self-awake/diaries/context/?{urllib.parse.urlencode({'limit': str(limit)})}", token)
+        params = {"limit": str(limit)}
+        if character_id not in (None, ""):
+            params["character"] = str(character_id)
+        if assistant_id not in (None, ""):
+            params["assistant"] = str(assistant_id)
+        raw = self._request(f"/api/agent/self-awake/diaries/context/?{urllib.parse.urlencode(params)}", token)
         return raw if isinstance(raw, dict) else {"source": "core", "last": None, "recent": [], "memory": {}}
 
     def get_self_awake_diary(self, token: str, diary_id: int) -> dict[str, Any]:
@@ -542,13 +598,6 @@ class CoreClient:
         )
         return raw if isinstance(raw, dict) else {}
 
-    def list_vision_configs(self, token: str) -> list[dict[str, Any]]:
-        return unwrap_results(self._request("/api/vision/configs/", token))
-
-    def get_vision_config(self, token: str, config_id: int | str) -> dict[str, Any]:
-        raw = self._request(f"/api/vision/configs/{urllib.parse.quote(str(config_id))}/", token)
-        return raw if isinstance(raw, dict) else {}
-
     def get_user_profile(self, token: str) -> dict[str, Any]:
         raw = self._request("/api/users/me/profile/", token)
         return raw if isinstance(raw, dict) else {}
@@ -589,8 +638,8 @@ class CoreClient:
         raw = self._request("/api/users/me/profile/", token, method="PATCH", payload=payload)
         return raw if isinstance(raw, dict) else {}
 
-    def analyze_vision(self, token: str, payload: dict[str, Any]) -> Any:
-        return self._request("/api/vision/analyze/", token, method="POST", payload=payload)
+    def analyze_image(self, token: str, payload: dict[str, Any]) -> Any:
+        return self._request("/api/ai/entities/analyze-image/", token, method="POST", payload=payload)
 
     def external_email_status(self, token: str) -> Any:
         return self._request("/api/agent/external-email/status/", token)
@@ -622,12 +671,24 @@ class CoreClient:
             payload=payload,
         )
 
-    def _request(self, path: str, token: str | None, method: str = "GET", payload: Any | None = None) -> Any:
+    def _request(self, path: str, token: str | CoreServiceIdentity | None, method: str = "GET", payload: Any | None = None) -> Any:
         body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {"accept": "application/json"}
         if body is not None:
             headers["content-type"] = "application/json"
-        if token:
+        if isinstance(token, CoreServiceIdentity):
+            canonical_path = urllib.parse.urlparse(path).path
+            headers.update(
+                sign_service_request(
+                    token.service_id,
+                    token.scope,
+                    method,
+                    canonical_path,
+                    body or b"",
+                    subject_user_id=token.user_id,
+                )
+            )
+        elif token:
             headers["authorization"] = f"Token {token}"
         request = urllib.request.Request(f"{self.base_url}{path}", data=body, headers=headers, method=method)
         try:

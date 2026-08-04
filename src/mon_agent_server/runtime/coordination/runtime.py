@@ -763,7 +763,7 @@ class RuntimeCoordinationMixin:
                 screen_captures=self.screen_captures,
                 camera_captures=self.camera_captures,
                 current_model_supports_images=runtime_config.supports_images,
-                vision_config=(runtime_config.core or {}).get("visionConfig") if runtime_config.core else None,
+                vision_ai_entity=(runtime_config.core or {}).get("visionAIEntity") if runtime_config.core else None,
                 environment=environment,
                 emit_event=self.events.emit,
                 agent_path=thread.snapshot.path,
