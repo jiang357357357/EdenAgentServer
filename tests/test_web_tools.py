@@ -7,8 +7,10 @@ from datetime import date
 from unittest.mock import patch
 
 from mon_agent_server.tools.web import (
+    _merge_search_results,
     bing_freshness_filter,
     clear_search_cache,
+    clear_web_resources,
     create_web_tools,
     normalize_bing_url,
     parse_bing_results,
@@ -24,6 +26,11 @@ from mon_agent_server.tools.web_providers import (
     SearchResponse,
     SearxngSearchProvider,
     TavilySearchProvider,
+    DuckDuckGoSearchProvider,
+    ExaMcpSearchProvider,
+    ParallelMcpSearchProvider,
+    html_to_text,
+    parse_duck_lite_results,
     normalize_results,
 )
 
@@ -65,18 +72,31 @@ class BingParserTest(unittest.TestCase):
             "https://example.com/docs",
         )
 
+    def test_inline_highlight_tags_do_not_split_words(self) -> None:
+        self.assertEqual(html_to_text("普雷<strong>纳帕</strong>特斯"), "普雷纳帕特斯")
+
+    def test_parse_duck_lite_results(self) -> None:
+        raw = """
+        <a class='result-link' href='//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs'>示例<strong>文档</strong></a>
+        <td class='result-snippet'>正文摘要</td>
+        """
+        self.assertEqual(
+            parse_duck_lite_results(raw, 5),
+            [{"title": "示例文档", "url": "https://example.com/docs", "snippet": "正文摘要", "hostname": "example.com"}],
+        )
+
 
 class WebSearchProviderTest(unittest.TestCase):
     def setUp(self) -> None:
         clear_search_cache()
 
-    def test_bing_is_default_provider(self) -> None:
+    def test_remote_mcp_is_default_before_html_providers(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(search_provider_order(), ["bing", "duckduckgo"])
+            self.assertEqual(search_provider_order(), ["parallel_mcp", "exa_mcp", "bing", "duckduckgo"])
 
     def test_auto_provider_prefers_configured_structured_api(self) -> None:
         with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "secret", "EXA_API_KEY": "secret"}, clear=True):
-            self.assertEqual(search_provider_order(), ["brave", "exa", "bing", "duckduckgo"])
+            self.assertEqual(search_provider_order(), ["parallel_mcp", "exa_mcp", "brave", "exa", "bing", "duckduckgo"])
 
     def test_configured_duckduckgo_is_tried_first(self) -> None:
         with patch.dict(os.environ, {"MON_AGENT_SEARCH_PROVIDER": "ddg"}, clear=True):
@@ -97,10 +117,10 @@ class WebSearchProviderTest(unittest.TestCase):
         )
 
     def test_web_search_uses_bing_without_calling_fallback(self) -> None:
-        bing = FakeProvider("bing", results=[{"title": "结果", "url": "https://example.com"}])
+        bing = FakeProvider("bing", results=[{"title": "测试结果", "url": "https://example.com"}])
         duck = FakeProvider("duckduckgo", error=AssertionError("不应调用备用入口"))
         with (
-            patch.dict(os.environ, {"MON_AGENT_SEARCH_CACHE_TTL_SECONDS": "0"}, clear=True),
+            patch.dict(os.environ, {"MON_AGENT_SEARCH_CACHE_TTL_SECONDS": "0", "MON_AGENT_SEARCH_PROVIDER": "bing,duckduckgo"}, clear=True),
             patch("mon_agent_server.tools.web.create_search_providers", return_value={"bing": bing, "duckduckgo": duck}),
         ):
             result = web_search("测试")
@@ -112,10 +132,10 @@ class WebSearchProviderTest(unittest.TestCase):
         self.assertEqual(result["results"][0]["id"], "source_1")
 
     def test_web_search_uses_short_lived_cache(self) -> None:
-        bing = FakeProvider("bing", results=[{"title": "结果", "url": "https://example.com"}])
+        bing = FakeProvider("bing", results=[{"title": "测试结果", "url": "https://example.com"}])
         duck = FakeProvider("duckduckgo", error=AssertionError("不应调用备用入口"))
         with (
-            patch.dict(os.environ, {"MON_AGENT_SEARCH_CACHE_TTL_SECONDS": "120"}, clear=True),
+            patch.dict(os.environ, {"MON_AGENT_SEARCH_CACHE_TTL_SECONDS": "120", "MON_AGENT_SEARCH_PROVIDER": "bing,duckduckgo"}, clear=True),
             patch("mon_agent_server.tools.web.create_search_providers", return_value={"bing": bing, "duckduckgo": duck}),
         ):
             first = web_search("测试")
@@ -127,9 +147,9 @@ class WebSearchProviderTest(unittest.TestCase):
 
     def test_web_search_falls_back_to_duckduckgo(self) -> None:
         bing = FakeProvider("bing", error=OSError("bing unavailable"))
-        duck = FakeProvider("duckduckgo", results=[{"title": "备用结果", "url": "https://example.org"}])
+        duck = FakeProvider("duckduckgo", results=[{"title": "测试备用结果", "url": "https://example.org"}])
         with (
-            patch.dict(os.environ, {"MON_AGENT_SEARCH_CACHE_TTL_SECONDS": "0"}, clear=True),
+            patch.dict(os.environ, {"MON_AGENT_SEARCH_CACHE_TTL_SECONDS": "0", "MON_AGENT_SEARCH_PROVIDER": "bing,duckduckgo"}, clear=True),
             patch("mon_agent_server.tools.web.create_search_providers", return_value={"bing": bing, "duckduckgo": duck}),
         ):
             result = web_search("测试")
@@ -143,11 +163,23 @@ class WebSearchProviderTest(unittest.TestCase):
         bing = FakeProvider("bing", error=OSError("bing unavailable"))
         duck = FakeProvider("duckduckgo", error=OSError("duck unavailable"))
         with (
-            patch.dict(os.environ, {"MON_AGENT_SEARCH_CACHE_TTL_SECONDS": "0"}, clear=True),
+            patch.dict(os.environ, {"MON_AGENT_SEARCH_CACHE_TTL_SECONDS": "0", "MON_AGENT_SEARCH_PROVIDER": "bing,duckduckgo"}, clear=True),
             patch("mon_agent_server.tools.web.create_search_providers", return_value={"bing": bing, "duckduckgo": duck}),
         ):
             with self.assertRaisesRegex(RuntimeError, "必应: bing unavailable; DuckDuckGo: duck unavailable"):
                 web_search("测试")
+
+    def test_multiple_searches_merge_and_renumber_sources(self) -> None:
+        merged = _merge_search_results(
+            [
+                {"provider": "bing", "query": "普雷纳帕特斯", "results": [{"source_id": "source_1", "title": "中文资料", "url": "https://example.com/zh"}]},
+                {"provider": "bing", "query": "プレナパテス", "results": [{"source_id": "source_1", "title": "日本語資料", "url": "https://example.jp/ja"}]},
+            ],
+            10,
+        )
+
+        self.assertEqual(merged["queries"], ["普雷纳帕特斯", "プレナパテス"])
+        self.assertEqual([item["source_id"] for item in merged["results"]], ["source_1", "source_2"])
 
     def test_search_result_schema_deduplicates_urls(self) -> None:
         results = normalize_results(
@@ -167,19 +199,120 @@ class WebSearchProviderTest(unittest.TestCase):
         self.assertEqual(results[0]["provider"], "exa")
         self.assertEqual(results[1]["published_at"], "2026-07-22")
 
+    def test_search_results_deduplicate_similar_titles_and_limit_same_host(self) -> None:
+        results = normalize_results(
+            "bing",
+            [
+                {"title": "普雷纳帕特斯 - 萌娘百科", "url": "https://mirror-a.example/character"},
+                {"title": "普雷纳帕特斯—萌娘百科", "url": "https://mirror-b.example/character"},
+                {"title": "独立资料一", "url": "https://wiki.example/a"},
+                {"title": "独立资料二", "url": "https://wiki.example/b"},
+                {"title": "独立资料三", "url": "https://wiki.example/c"},
+            ],
+            10,
+            "普雷纳帕特斯",
+        )
+
+        self.assertEqual([item["title"] for item in results], ["普雷纳帕特斯 - 萌娘百科", "独立资料一", "独立资料二"])
+
+    def test_exact_title_match_is_ranked_before_loose_results(self) -> None:
+        results = normalize_results(
+            "bing",
+            [
+                {"title": "相关角色资料", "url": "https://example.org/related"},
+                {"title": "普雷纳帕特斯角色资料", "url": "https://example.com/exact"},
+            ],
+            10,
+            "普雷纳帕特斯",
+        )
+
+        self.assertEqual(results[0]["url"], "https://example.com/exact")
+
+    def test_duckduckgo_http_202_is_reported_as_anti_automation(self) -> None:
+        class Response:
+            status = 202
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b"<html><title>DuckDuckGo</title></html>"
+
+        DuckDuckGoSearchProvider.clear_cooldown()
+        with (
+            patch.dict(os.environ, {"MON_AGENT_DUCKDUCKGO_COOLDOWN_SECONDS": "900"}, clear=True),
+            patch("mon_agent_server.tools.web_providers.urllib.request.urlopen", return_value=Response()),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "HTML/Lite 均不可用.*HTTP 202"):
+                DuckDuckGoSearchProvider().search(SearchRequest("测试"))
+            with self.assertRaisesRegex(RuntimeError, "冷却期"):
+                DuckDuckGoSearchProvider().search(SearchRequest("测试"))
+        DuckDuckGoSearchProvider.clear_cooldown()
+
 
 class WebToolTimeoutTest(unittest.IsolatedAsyncioTestCase):
     async def test_web_search_has_total_async_timeout(self) -> None:
         async def hanging_to_thread(*_args, **_kwargs):
             await asyncio.Event().wait()
 
-        tool = next(item for item in create_web_tools() if item.name == "web_search")
+        tool = next(item for item in create_web_tools() if item.name == "web")
         with (
             patch("mon_agent_server.tools.web.asyncio.to_thread", new=hanging_to_thread),
             patch("mon_agent_server.tools.web._total_tool_timeout_seconds", return_value=0.01),
         ):
             with self.assertRaisesRegex(RuntimeError, "网页搜索总超时"):
-                await tool.execute("call-timeout", {"query": "测试"})
+                await tool.execute("call-timeout", {"action": "search", "query": "测试"})
+
+    async def test_batch_search_keeps_successful_queries_when_one_fails(self) -> None:
+        tool = next(item for item in create_web_tools() if item.name == "web")
+
+        def fake_search(query, *_args, **_kwargs):
+            if query == "失败查询":
+                raise RuntimeError("没有结果")
+            return {
+                "provider": "bing",
+                "query": query,
+                "results": [{"title": f"{query}结果", "url": "https://example.com/result", "provider": "bing"}],
+                "attempts": [],
+                "cached": False,
+                "elapsed_ms": 10,
+            }
+
+        with patch("mon_agent_server.tools.web.web_search", side_effect=fake_search):
+            result = await tool.execute("call-batch", {"action": "search", "query": "成功查询", "queries": ["失败查询"]})
+
+        self.assertIn("成功查询结果", result["content"][0]["text"])
+        self.assertEqual(result["details"]["query_errors"], {"失败查询": "没有结果"})
+
+    async def test_search_open_and_find_share_session_scoped_refs(self) -> None:
+        from mon_agent_server.tools.context import MonToolContext
+
+        clear_web_resources()
+        tool = create_web_tools(MonToolContext(session_id="session-a"))[0]
+        with patch(
+            "mon_agent_server.tools.web.web_search",
+            return_value={
+                "provider": "bing", "query": "MonAgent", "results": [
+                    {"title": "文档", "url": "https://example.com/docs", "provider": "bing"}
+                ], "attempts": [], "cached": False, "elapsed_ms": 1,
+            },
+        ):
+            searched = await tool.execute("search", {"action": "search", "query": "MonAgent"})
+        self.assertEqual(searched["details"]["results"][0]["ref_id"], "search_1")
+
+        fetched = {
+            "url": "https://example.com/docs", "title": "文档", "body": "MonAgent 支持统一网页工具。",
+            "contentType": "text/html", "bytes": 30, "truncated": False, "charset": "utf-8",
+        }
+        with patch("mon_agent_server.tools.web.fetch_web_page", return_value=fetched):
+            opened = await tool.execute("open", {"action": "open", "ref_id": "search_1"})
+        self.assertEqual(opened["details"]["ref_id"], "page_1")
+
+        found = await tool.execute("find", {"action": "find", "ref_id": "page_1", "pattern": "统一网页"})
+        self.assertEqual(len(found["details"]["matches"]), 1)
 
 
 class FakeProvider:
@@ -201,6 +334,35 @@ class FakeProvider:
 
 
 class StructuredProviderAdapterTest(unittest.TestCase):
+    def test_parallel_mcp_uses_anonymous_endpoint_and_maps_results(self) -> None:
+        tool_text = '{"results":[{"title":"条目","url":"https://example.com/a","excerpts":["摘要"]}]}'
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("mon_agent_server.tools.web_providers._mcp_call", return_value=tool_text) as call,
+        ):
+            result = ParallelMcpSearchProvider().search(SearchRequest("测试"))
+        self.assertEqual(result.results[0]["snippet"], "摘要")
+        self.assertIsNone(call.call_args.args[3])
+
+    def test_parallel_mcp_submits_only_parallel_key(self) -> None:
+        with (
+            patch.dict(os.environ, {"PARALLEL_API_KEY": "parallel-secret", "OPENCODE_API_KEY": "model-secret"}, clear=True),
+            patch("mon_agent_server.tools.web_providers._mcp_call", return_value='{"results":[]}') as call,
+        ):
+            ParallelMcpSearchProvider().search(SearchRequest("测试"))
+        self.assertEqual(call.call_args.args[3], {"authorization": "Bearer parallel-secret"})
+
+    def test_exa_mcp_maps_sse_tool_text_and_uses_only_exa_key(self) -> None:
+        tool_text = "Title: 示例条目\nURL: https://example.org/doc\nPublished: 2026-08-04\nAuthor: N/A\nHighlights:\n正文摘要"
+        with (
+            patch.dict(os.environ, {"EXA_API_KEY": "exa-secret", "OPENCODE_API_KEY": "model-secret"}, clear=True),
+            patch("mon_agent_server.tools.web_providers._mcp_call", return_value=tool_text) as call,
+        ):
+            result = ExaMcpSearchProvider().search(SearchRequest("示例"))
+        self.assertEqual(result.results[0]["title"], "示例条目")
+        self.assertEqual(result.results[0]["snippet"], "正文摘要")
+        self.assertEqual(call.call_args.args[3], {"x-api-key": "exa-secret"})
+
     def test_brave_maps_web_results_to_unified_schema(self) -> None:
         payload = {"web": {"results": [{"title": "文档", "url": "https://example.com/docs", "description": "摘要"}]}}
         with (

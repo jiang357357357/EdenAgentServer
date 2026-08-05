@@ -104,6 +104,7 @@ class MonAgentRuntime(
         screen_captures: ScreenCaptureBroker | None = None,
         environment: dict[str, Any] | None = None,
         camera_captures: CameraCaptureBroker | None = None,
+        skill_installer: Any | None = None,
     ) -> None:
         self.workspace_root = workspace_root.resolve()
         self.store = store
@@ -114,6 +115,7 @@ class MonAgentRuntime(
         self.screen_captures = screen_captures
         self.camera_captures = camera_captures
         self.environment = environment
+        self.skill_installer = skill_installer
         self.subagent_catalog = load_subagent_catalog(self.workspace_root)
         self.subagent_repository = SubagentThreadRepository.for_workspace(self.workspace_root)
         self.subagent_max_threads = _bounded_env_int(

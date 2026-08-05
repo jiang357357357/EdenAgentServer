@@ -381,14 +381,40 @@ class CoreClient:
             payload=payload,
         )
 
-    def synthesize_speech(self, token: str, text: str, config_id: int) -> dict[str, Any]:
+    def synthesize_speech(
+        self,
+        token: str,
+        text: str,
+        config_id: int,
+        session_id: str,
+        message_id: str,
+        segment_group_id: str,
+        group_index: int,
+        sequence: int,
+    ) -> dict[str, Any]:
         raw = self._request(
             "/api/tts/configs/synthesize/",
             token,
             method="POST",
-            payload={"text": text, "config_id": config_id},
+            payload={
+                "text": text,
+                "config_id": config_id,
+                "external_session_id": session_id,
+                "external_message_id": message_id,
+                "segment_group_id": segment_group_id,
+                "group_index": group_index,
+                "sequence": sequence,
+            },
         )
         return raw if isinstance(raw, dict) else {"success": False, "error_message": "Core TTS response is invalid"}
+
+    def get_message_speech_segments(self, token: str, session_id: str, message_id: str = "") -> list[dict[str, Any]]:
+        params = {"external_session_id": session_id}
+        if message_id:
+            params["external_message_id"] = message_id
+        query = urllib.parse.urlencode(params)
+        raw = self._request(f"/api/tts/configs/message-segments/?{query}", token)
+        return raw if isinstance(raw, list) else []
 
     def persist_self_awake_pending(
         self,
@@ -602,9 +628,9 @@ class CoreClient:
         raw = self._request("/api/users/me/profile/", token)
         return raw if isinstance(raw, dict) else {}
 
-    def list_skill_installations(self, token: str, device_id: str) -> list[dict[str, Any]]:
-        query = urllib.parse.urlencode({"device_id": device_id})
-        path = f"/api/agent/skills/?{query}"
+    def list_skill_installations(self, token: str, device_id: str | None = None) -> list[dict[str, Any]]:
+        query = urllib.parse.urlencode({"device_id": device_id}) if device_id else ""
+        path = f"/api/agent/skills/?{query}" if query else "/api/agent/skills/"
         installations: list[dict[str, Any]] = []
         for _page in range(100):
             raw = self._request(path, token)

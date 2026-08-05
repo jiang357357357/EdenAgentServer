@@ -8,6 +8,7 @@ from mon_agent_core import Agent, AgentOptions, AssistantMessageEventStream
 
 from mon_agent_server.prompts.builder import build_agent_tool_section
 from mon_agent_server.skills import SKILL_DEFINITIONS, create_skill_runtime
+from mon_agent_server.tools import MonToolContext
 
 
 def _model() -> dict[str, Any]:
@@ -45,6 +46,7 @@ class SkillCatalogTest(unittest.TestCase):
                 "workspace-development",
                 "multi-agent",
                 "assistant-switching",
+                "skill-creator",
             },
         )
 
@@ -55,8 +57,10 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertNotIn("loaded_tools", names)
         for name in {
             "load_skill", "read", "write", "edit", "apply_patch", "bash", "write_stdin",
-            "web_search", "create_memo", "analyze_screen", "send_qq_message",
+            "web", "create_memo", "analyze_screen", "send_qq_message",
             "switch_session_assistant", "remember_memory", "spawn_agent",
+            "create_skill",
+            "list_skills",
         }:
             self.assertIn(name, names)
 
@@ -85,7 +89,7 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertIn("create_memo", names)
         self.assertIn("create_reminder", names)
         self.assertIn("list_memos", names)
-        self.assertIn("web_search", names)
+        self.assertIn("web", names)
         self.assertIn("write", names)
         self.assertEqual(names, _tool_names(initial_tools))
         self.assertEqual(context["systemPrompt"], "active=memo-management")
@@ -176,11 +180,14 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertIn("send_external_email", names)
         self.assertIn("external-communication", runtime.loaded_skill_ids)
         self.assertIn("联系当前用户时优先调用 contact_user", runtime.prompt_section())
-        self.assertIn("web_search", names)
+        self.assertIn("web", names)
+        self.assertIn("create_skill", names)
+        self.assertIn("list_skills", names)
+        self.assertIn("skill-creator", runtime.available_skill_ids)
 
         result = runtime.load(["web-research"])
         self.assertTrue(result["success"])
-        self.assertIn("web_search", _tool_names(runtime.active_tools()))
+        self.assertIn("web", _tool_names(runtime.active_tools()))
 
     def test_skill_aware_prompt_lists_catalog_and_active_instructions(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
@@ -216,10 +223,48 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["loaded"], ["web-research"])
         self.assertEqual(result["userMessage"], "查一下今天的新闻")
-        self.assertIn("web_search", _tool_names(runtime.active_tools()))
+        self.assertIn("web", _tool_names(runtime.active_tools()))
 
 
 class SkillActivationLoopTest(unittest.IsolatedAsyncioTestCase):
+    async def test_list_skills_exposes_inventory_in_model_visible_text(self) -> None:
+        runtime = create_skill_runtime(
+            Path.cwd(),
+            MonToolContext(
+                list_skills=lambda _filters: [
+                    {
+                        "skillName": "skill-creator",
+                        "displayName": "技能创建",
+                        "description": "创建技能。",
+                        "scope": "system",
+                        "sourceType": "builtin",
+                        "builtin": True,
+                        "enabled": True,
+                    },
+                    {
+                        "skillName": "code-smoke",
+                        "displayName": "代码测试",
+                        "description": "运行代码测试。",
+                        "scope": "project",
+                        "sourceType": "generated",
+                        "builtin": False,
+                        "enabled": False,
+                    },
+                ]
+            ),
+            profile="user_chat",
+        )
+        tool = next(tool for tool in runtime.active_tools() if tool.name == "list_skills")
+
+        result = await tool.execute("list-skills", {"kind": "all"})
+        content = result["content"][0]["text"]
+
+        self.assertIn("skill-creator", content)
+        self.assertIn("基础", content)
+        self.assertIn("code-smoke", content)
+        self.assertIn("自编写", content)
+        self.assertIn("已禁用", content)
+
     async def test_tools_remain_available_when_skill_runtime_is_recreated_next_turn(self) -> None:
         first_turn = create_skill_runtime(Path.cwd(), profile="user_chat")
         loader = next(tool for tool in first_turn.active_tools() if tool.name == "load_skill")

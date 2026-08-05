@@ -10,7 +10,6 @@ from ..core import CoreClient
 from ..events import EventBus
 from ..runtime import MonAgentRuntime
 from ..store import SessionStore
-from ..speech import SpeechCache
 from ..skills import SkillInstallationService
 
 
@@ -27,7 +26,6 @@ class AppState:
         self.screen_captures = ScreenCaptureBroker(self.events)
         self.camera_captures = CameraCaptureBroker(self.events)
         self.core_client = CoreClient(self.config.core_base_url)
-        self.speech_cache = SpeechCache(self.config.workspace_root / ".artifacts" / "speech-cache")
         self.skill_installer = SkillInstallationService(self.config.workspace_root, self.core_client)
         self.runtime = MonAgentRuntime(
             self.config.workspace_root,
@@ -39,6 +37,7 @@ class AppState:
             self.screen_captures,
             environment_context(self.config.environment),
             camera_captures=self.camera_captures,
+            skill_installer=self.skill_installer,
         )
 
     permissions: PermissionBroker = field(init=False)
@@ -46,7 +45,6 @@ class AppState:
     screen_captures: ScreenCaptureBroker = field(init=False)
     camera_captures: CameraCaptureBroker = field(init=False)
     core_client: CoreClient = field(init=False)
-    speech_cache: SpeechCache = field(init=False)
     skill_installer: SkillInstallationService = field(init=False)
     runtime: MonAgentRuntime = field(init=False)
 
@@ -102,6 +100,7 @@ def is_agent_api_route(pathname: str) -> bool:
         or pathname == "/session"
         or pathname.startswith("/session/")
         or pathname == "/speech/synthesize"
+        or pathname == "/speech/segments"
         or pathname == "/permission"
         or pathname.startswith("/permission/")
         or pathname == "/question"

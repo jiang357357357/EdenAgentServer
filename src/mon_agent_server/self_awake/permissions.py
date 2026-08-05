@@ -81,8 +81,7 @@ def self_awake_before_tool_call(context_data: dict[str, Any] | None):
         "get_self_awake_state",
         "list_self_awake_diaries",
         "read_self_awake_diary",
-        "web_search",
-        "web_fetch",
+        "web",
         "get_calendar_context",
         "get_weather",
         "analyze_image",
@@ -102,6 +101,8 @@ def self_awake_before_tool_call(context_data: dict[str, Any] | None):
         "send_qq_message",
         "send_external_email",
         "contact_user",
+        "create_skill",
+        "list_skills",
     }
     file_tools = {"read", "ls", "grep", "find"}
 

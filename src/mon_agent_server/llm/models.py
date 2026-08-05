@@ -46,7 +46,14 @@ def endpoint_to_responses_url(model: dict[str, Any]) -> str:
 
 
 def uses_responses_api(model: dict[str, Any]) -> bool:
+    if model.get("api") == "openai-responses":
+        return True
     return normalize_vendor(model.get("provider")) == "opencode-go" and str(model.get("id") or "").lower() == "gpt-5.6-luna"
+
+
+def supports_native_web_search(model: dict[str, Any]) -> bool:
+    """Return true only for an adapter explicitly configured for hosted search."""
+    return uses_responses_api(model) and model.get("nativeWebSearch") is True
 
 
 def http_user_agent() -> str:
@@ -73,6 +80,7 @@ def env_model() -> tuple[dict[str, Any], str | None, str, str]:
         "input": ["text", "image"],
         "reasoning": thinking_level != "off",
         "thinkingLevel": thinking_level,
+        "nativeWebSearch": (os.environ.get("MON_AGENT_NATIVE_WEB_SEARCH") or "").strip().lower() in {"1", "true", "yes", "on"},
     }
     return model, api_key, f"{provider}/{model_id}", "env"
 
@@ -111,7 +119,10 @@ def core_model(core: dict[str, Any]) -> tuple[dict[str, Any], str | None, str, s
         "input": ["text", "image"] if ai_entity.get("is_multimodal") else ["text"],
         "reasoning": reasoning_enabled,
         "thinkingLevel": thinking_level,
+        "nativeWebSearch": default_params.get("native_web_search") is True,
     }
+    if str(default_params.get("api") or "").strip().lower() in {"responses", "openai-responses"}:
+        model["api"] = "openai-responses"
     context_window = ai_entity.get("contextWindow") or ai_entity.get("context_window") or ai_entity.get("contextLength")
     if context_window is not None:
         model["contextWindow"] = context_window

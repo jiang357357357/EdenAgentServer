@@ -214,12 +214,25 @@ async def run_self_awake_agent(
     current_character = request_character(request, runtime_config.core)
     current_assistant = runtime_core.get("assistant") if isinstance(runtime_core.get("assistant"), dict) else {}
     skill_owner_key = None
+    skill_owner_id = None
     if token:
         try:
             profile = await asyncio.to_thread(app.core_client.get_user_profile, token)
-            skill_owner_key = owner_storage_key(profile.get("id"))
+            skill_owner_id = profile.get("id")
+            skill_owner_key = owner_storage_key(skill_owner_id)
         except Exception as error:
             logger.warning(f"读取自醒技能所有者失败，继续使用内置技能: {error}")
+
+    def create_skill(payload: dict[str, Any]) -> dict[str, Any]:
+        if not token or skill_owner_id in (None, ""):
+            raise RuntimeError("自醒创建技能需要有效登录态。")
+        return app.skill_installer.create_generated(skill_owner_id, token, "local", payload)
+
+    def list_skills(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        if not token or skill_owner_id in (None, ""):
+            raise RuntimeError("自醒查看技能需要有效登录态。")
+        return app.skill_installer.list_for_model(skill_owner_id, token, "local", payload)
+
     skill_runtime = create_skill_runtime(
         app.config.workspace_root,
         MonToolContext(
@@ -233,6 +246,8 @@ async def run_self_awake_agent(
             assistant=current_assistant,
             get_current_files=lambda: [],
             operation_id=self_awake_operation_id(request) or None,
+            list_skills=list_skills,
+            create_skill=create_skill,
         ),
         profile="self_awake",
         owner_key=skill_owner_key,

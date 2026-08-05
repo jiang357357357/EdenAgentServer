@@ -3,9 +3,15 @@ import json
 import ssl
 import unittest
 import urllib.error
+import asyncio
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
+
 from mon_agent_server.model_stream import _usage_from_openai, call_openai_compatible, stream_openai_compatible, to_openai_messages
+from mon_agent_server.llm.responses import responses_stream_payload
 from mon_agent_server.llm.messages import to_responses_input
 
 
@@ -50,6 +56,43 @@ class InterruptedStreamResponse(FakeStreamResponse):
     def __iter__(self):
         yield from self.lines
         raise ssl.SSLEOFError(8, "unexpected eof while reading")
+
+
+class AsyncStreamResponse:
+    def __init__(self, response, request):
+        self._response = response
+        self.request = request
+        self.status_code = getattr(response, "status", 200)
+
+    async def aread(self):
+        return self._response.read()
+
+    async def aiter_lines(self):
+        try:
+            for raw_line in self._response:
+                for line in raw_line.decode("utf-8", errors="replace").splitlines():
+                    yield line
+        except ssl.SSLError as error:
+            raise httpx.ReadError(str(error), request=self.request) from error
+
+
+def make_open_sse(fake_urlopen):
+    @asynccontextmanager
+    async def fake_open_sse(url, *, payload, headers, connect_timeout_seconds):
+        request = SimpleNamespace(
+            full_url=url,
+            data=json.dumps(payload, ensure_ascii=False).encode(),
+            get_header=lambda name: next((value for key, value in headers.items() if key.lower() == name.lower()), None),
+        )
+        try:
+            response = fake_urlopen(request, connect_timeout_seconds)
+        except urllib.error.HTTPError as error:
+            response = SimpleNamespace(status=error.code, read=error.read, __iter__=lambda self: iter(()))
+        except urllib.error.URLError as error:
+            raise httpx.ConnectError(str(error), request=request) from error
+        yield AsyncStreamResponse(response, request)
+
+    return fake_open_sse
 
 
 class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
@@ -271,7 +314,7 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
             "tools": [],
         }
 
-        with patch("urllib.request.urlopen", fake_urlopen):
+        with patch("mon_agent_server.llm.openai_compatible.open_sse", make_open_sse(fake_urlopen)):
             stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test"})
             events = [event async for event in stream]
 
@@ -280,6 +323,46 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([event["type"] for event in events], ["start", "text_start", "text_delta", "text_delta", "text_end", "done"])
         self.assertEqual(events[-1]["message"]["content"], [{"type": "text", "text": "hello"}])
         self.assertEqual(events[-1]["message"]["usage"]["totalTokens"], 5)
+
+    async def test_cancelling_stream_consumer_closes_provider_request(self):
+        entered = asyncio.Event()
+        closed = asyncio.Event()
+
+        @asynccontextmanager
+        async def hanging_open_sse(*_args, **_kwargs):
+            class HangingResponse:
+                status_code = 200
+
+                async def aiter_lines(self):
+                    entered.set()
+                    await asyncio.Future()
+                    yield ""
+
+            try:
+                yield HangingResponse()
+            finally:
+                closed.set()
+
+        model = {
+            "id": "deepseek-v4-flash",
+            "api": "openai-completions",
+            "provider": "opencode-go",
+            "baseUrl": "https://opencode.ai/zen/go/v1",
+        }
+        context = {"messages": [{"role": "user", "content": "ping"}], "tools": []}
+        with patch("mon_agent_server.llm.openai_compatible.open_sse", hanging_open_sse):
+            stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test"})
+
+            async def consume():
+                async for _event in stream:
+                    pass
+
+            consumer = asyncio.create_task(consume())
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            consumer.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await consumer
+            await asyncio.wait_for(closed.wait(), timeout=1)
 
     async def test_openai_compatible_retries_ssl_eof_before_stream_starts(self):
         attempts = 0
@@ -304,7 +387,7 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
         }
         context = {"messages": [{"role": "user", "content": "ping"}], "tools": []}
 
-        with patch("urllib.request.urlopen", fake_urlopen), patch("mon_agent_server.llm.openai_compatible.time.sleep"):
+        with patch("mon_agent_server.llm.openai_compatible.open_sse", make_open_sse(fake_urlopen)), patch("mon_agent_server.llm.openai_compatible.asyncio.sleep"):
             stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test"})
             events = [event async for event in stream]
 
@@ -342,7 +425,7 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
         }
         context = {"messages": [{"role": "user", "content": "ping"}], "tools": []}
 
-        with patch("urllib.request.urlopen", fake_urlopen), patch("mon_agent_server.llm.openai_compatible.time.sleep"):
+        with patch("mon_agent_server.llm.openai_compatible.open_sse", make_open_sse(fake_urlopen)), patch("mon_agent_server.llm.openai_compatible.asyncio.sleep"):
             stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test"})
             events = [event async for event in stream]
 
@@ -368,7 +451,7 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
         }
         context = {"messages": [{"role": "user", "content": "ping"}], "tools": []}
 
-        with patch("urllib.request.urlopen", fake_urlopen), patch("mon_agent_server.llm.openai_compatible.time.sleep"):
+        with patch("mon_agent_server.llm.openai_compatible.open_sse", make_open_sse(fake_urlopen)), patch("mon_agent_server.llm.openai_compatible.asyncio.sleep"):
             stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test"})
             events = [event async for event in stream]
 
@@ -397,7 +480,7 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
             "tools": [],
         }
 
-        with patch("urllib.request.urlopen", fake_urlopen):
+        with patch("mon_agent_server.llm.openai_compatible.open_sse", make_open_sse(fake_urlopen)):
             stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test"})
             events = [event async for event in stream]
 
@@ -424,7 +507,7 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
         }
         context = {"messages": [{"role": "user", "content": [{"type": "text", "text": "read"}]}], "tools": []}
 
-        with patch("urllib.request.urlopen", fake_urlopen):
+        with patch("mon_agent_server.llm.openai_compatible.open_sse", make_open_sse(fake_urlopen)):
             stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test"})
             events = [event async for event in stream]
 
@@ -456,7 +539,7 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
         }
         context = {"systemPrompt": "be concise", "messages": [{"role": "user", "content": "solve"}], "tools": []}
 
-        with patch("urllib.request.urlopen", fake_urlopen):
+        with patch("mon_agent_server.llm.responses.open_sse", make_open_sse(fake_urlopen)):
             stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test", "reasoning": "medium"})
             events = [event async for event in stream]
 
@@ -493,7 +576,7 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
             "baseUrl": "https://opencode.ai/zen/go/v1",
         }
         context = {"messages": [{"role": "user", "content": "read"}], "tools": [Tool()]}
-        with patch("urllib.request.urlopen", fake_urlopen):
+        with patch("mon_agent_server.llm.responses.open_sse", make_open_sse(fake_urlopen)):
             stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test", "reasoning": "medium"})
             events = [event async for event in stream]
 
@@ -519,6 +602,31 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay[0]["id"], "fc_1")
         self.assertEqual(replay[0]["call_id"], "call_1")
         self.assertEqual(replay[1], {"type": "function_call_output", "call_id": "call_1", "output": "contents"})
+
+    def test_explicit_native_web_search_replaces_local_web_function(self):
+        class Tool:
+            name = "web"
+            description = "Unified web"
+            parameters = {"type": "object", "properties": {}}
+
+        model = {
+            "id": "search-model",
+            "provider": "openai",
+            "api": "openai-responses",
+            "nativeWebSearch": True,
+        }
+        payload = responses_stream_payload(model, {"messages": [], "tools": [Tool()]}, {})
+        self.assertEqual(payload["tools"], [{"type": "web_search"}])
+
+    def test_local_web_remains_for_unconfirmed_provider_support(self):
+        class Tool:
+            name = "web"
+            description = "Unified web"
+            parameters = {"type": "object", "properties": {}}
+
+        model = {"id": "deepseek-v4-pro", "provider": "deepseek", "api": "openai-responses"}
+        payload = responses_stream_payload(model, {"messages": [], "tools": [Tool()]}, {})
+        self.assertEqual(payload["tools"][0]["name"], "web")
 
 
 if __name__ == "__main__":

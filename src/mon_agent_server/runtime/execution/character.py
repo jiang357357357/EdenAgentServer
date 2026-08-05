@@ -155,6 +155,24 @@ class RuntimeCharacterMixin:
                 "effectiveFrom": "next_root_run",
             }
 
+        def create_skill(payload: dict[str, Any]) -> dict[str, Any]:
+            if not auth_token or self.skill_installer is None:
+                raise RuntimeError("创建技能需要有效登录态和技能安装服务。")
+            profile = self.core_client.get_user_profile(auth_token)
+            owner_id = profile.get("id")
+            if owner_id in (None, ""):
+                raise RuntimeError("Core 用户资料缺少 id。")
+            return self.skill_installer.create_generated(owner_id, auth_token, "local", payload)
+
+        def list_skills(payload: dict[str, Any]) -> list[dict[str, Any]]:
+            if not auth_token or self.skill_installer is None:
+                raise RuntimeError("查看技能需要有效登录态和技能安装服务。")
+            profile = self.core_client.get_user_profile(auth_token)
+            owner_id = profile.get("id")
+            if owner_id in (None, ""):
+                raise RuntimeError("Core 用户资料缺少 id。")
+            return self.skill_installer.list_for_model(owner_id, auth_token, "local", payload)
+
         tool_context = MonToolContext(
             session_id=session_id,
             core_client=self.core_client,
@@ -174,6 +192,8 @@ class RuntimeCharacterMixin:
             get_current_files=lambda: files,
             append_assistant_part=append_assistant_part,
             switch_session_assistant=switch_session_assistant,
+            list_skills=list_skills,
+            create_skill=create_skill,
             agent_path="/root",
             permission_mode=(
                 self.permissions.mode_for_session(session_id)

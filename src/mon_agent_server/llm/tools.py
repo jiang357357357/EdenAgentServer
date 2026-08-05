@@ -20,8 +20,8 @@ def tool_payload(tools: list[Any]) -> list[dict[str, Any]]:
     return output
 
 
-def responses_tool_payload(tools: list[Any]) -> list[dict[str, Any]]:
-    return [
+def responses_tool_payload(tools: list[Any], *, native_web_search: bool = False) -> list[dict[str, Any]]:
+    output = [
         {
             "type": "function",
             "name": tool.name,
@@ -29,7 +29,11 @@ def responses_tool_payload(tools: list[Any]) -> list[dict[str, Any]]:
             "parameters": dict(tool.parameters or {"type": "object", "properties": {}}),
         }
         for tool in tools
+        if not (native_web_search and tool.name == "web")
     ]
+    if native_web_search:
+        output.append({"type": "web_search"})
+    return output
 
 
 def parse_tool_arguments(raw: str | None) -> dict[str, Any]:

@@ -19,6 +19,7 @@ from .notify import create_notify_tools
 from .profiles import allowed_tool_names
 from .qq import create_qq_tools
 from .self_awake_tools import create_self_awake_tools
+from .skill_creation import create_skill_creation_tools
 from .stickers import create_sticker_tools
 from .subagents import create_subagent_tools
 from .timer import create_timer_tools
@@ -36,12 +37,13 @@ def create_mon_agent_tools(
     tools: list[Any] = []
     tools.extend(create_loaded_tools(tools))
     tools.extend(create_assistant_tools(context))
-    tools.extend(create_web_tools())
+    tools.extend(create_web_tools(context))
     tools.extend(create_environment_tools(context))
     tools.extend(create_external_file_tools(root, context))
     tools.extend(create_interaction_tools(context))
     tools.extend(create_character_action_tools(context))
     tools.extend(create_self_awake_tools(root, context))
+    tools.extend(create_skill_creation_tools(context))
     tools.extend(create_memo_tools(root, context))
     tools.extend(create_memory_tools(context))
     tools.extend(create_sticker_tools(context))

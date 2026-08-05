@@ -268,7 +268,7 @@ class SubagentToolPolicyTest(unittest.IsolatedAsyncioTestCase):
         hook = runtime._before_tool_call("ses_soft_delegation", RunState(), delegation_mode="proactive")
 
         calls = (
-            {"toolCall": {"name": "web_search"}, "args": {"query": "AI 行业最新资讯", "max_results": 10}},
+            {"toolCall": {"name": "web"}, "args": {"action": "search", "query": "AI 行业最新资讯", "max_results": 10}},
             {"toolCall": {"name": "find"}, "args": {"path": "/home", "pattern": "*save*", "max_depth": 8}},
             {"toolCall": {"name": "bash"}, "args": {"command": 'find /home/manager -iname "*galgame*"'}},
         )

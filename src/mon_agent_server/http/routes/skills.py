@@ -49,6 +49,11 @@ def handle_skills(handler: Any, path: str, _query: dict[str, list[str]], method:
         )
         return True
 
+    if match and method == "GET":
+        token, owner_id, device_id = _identity(handler)
+        handler.json_response(handler.app.skill_installer.details(owner_id, token, device_id, match.group(1)))
+        return True
+
     if match and method == "PATCH":
         token, owner_id, device_id = _identity(handler)
         body = handler.read_json_body()

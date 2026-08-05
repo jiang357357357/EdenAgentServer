@@ -8,6 +8,7 @@ class RuntimePermissionMixin:
     def is_safe_tool(tool_name: str) -> bool:
         return tool_name in {
             "load_skill",
+            "list_skills",
             "activate_skill",
             "read",
             "ls",
@@ -18,8 +19,7 @@ class RuntimePermissionMixin:
             "external_find",
             "external_grep",
             "search_memories",
-            "web_search",
-            "web_fetch",
+            "web",
             "get_self_awake_state",
             "list_self_awake_diaries",
             "read_self_awake_diary",
@@ -60,4 +60,4 @@ class RuntimePermissionMixin:
 
     @staticmethod
     def permission_always_patterns(tool_name: str) -> list[str]:
-        return ["*"] if tool_name in {"web_search", "web_fetch"} else []
+        return ["*"] if tool_name == "web" else []

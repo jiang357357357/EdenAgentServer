@@ -28,6 +28,8 @@ class MonToolContext:
     get_current_files: Callable[[], list[dict[str, Any]]] | None = None
     append_assistant_part: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     switch_session_assistant: Callable[[int | str], Awaitable[dict[str, Any]]] | None = None
+    list_skills: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None
+    create_skill: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     agent_path: str = "/root"
     operation_id: str | None = None
     permission_mode: str = "restricted"

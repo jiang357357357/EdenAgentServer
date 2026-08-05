@@ -8,8 +8,7 @@ SELF_AWAKE_ALLOWED_TOOLS = {
     "get_self_awake_state",
     "list_self_awake_diaries",
     "read_self_awake_diary",
-    "web_search",
-    "web_fetch",
+    "web",
     "get_calendar_context",
     "get_weather",
     "analyze_image",
@@ -33,6 +32,8 @@ SELF_AWAKE_ALLOWED_TOOLS = {
     "ls",
     "grep",
     "find",
+    "create_skill",
+    "list_skills",
 }
 
 

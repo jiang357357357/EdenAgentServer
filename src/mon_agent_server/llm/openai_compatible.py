@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-import asyncio
 from copy import deepcopy
 import json
-import os
-import ssl
-import time
-import urllib.error
-import urllib.request
-from typing import Any, Callable
+import asyncio
+from typing import Any
+
+import httpx
 
 from mon_agent_core import AssistantMessageEventStream
 from mon_agent_core.types import now_ms
 from .messages import message_content, to_openai_messages
+from .http_stream import RETRYABLE_STATUS_CODES, iter_sse_data, open_sse, stream_timeouts
 from .models import core_model, endpoint_to_chat_url, env_model, http_user_agent, normalize_vendor, trim_endpoint_to_base, uses_responses_api
 from .responses import stream_responses_sync
 from .sync import call_openai_compatible
@@ -44,26 +42,14 @@ def _openai_stream_payload(model: dict[str, Any], context: dict[str, Any], optio
     return payload
 
 
-def _iter_sse_data(response: Any) -> Any:
-    for raw_line in response:
-        line = raw_line.decode("utf-8", errors="replace").strip()
-        if not line or line.startswith(":"):
-            continue
-        if not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if data:
-            yield data
-
-
-def _stream_openai_compatible_sync(
+async def _stream_openai_compatible(
     model: dict[str, Any],
     context: dict[str, Any],
     options: dict[str, Any],
-    push: Callable[[dict[str, Any]], None],
+    push: Any,
 ) -> None:
     if uses_responses_api(model):
-        stream_responses_sync(model, context, options, push)
+        await stream_responses_sync(model, context, options, push)
         return
 
     api_key = options.get("apiKey")
@@ -87,23 +73,14 @@ def _stream_openai_compatible_sync(
     usage: dict[str, Any] | None = None
     stream_started = False
 
-    def request_for_payload() -> urllib.request.Request:
-        return urllib.request.Request(
-            endpoint_to_chat_url(model),
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            method="POST",
-            headers={
-                "content-type": "application/json",
-                "authorization": f"Bearer {api_key}",
-                "accept": "text/event-stream",
-                "user-agent": http_user_agent(),
-            },
-        )
-
-    def consume(response: Any) -> bool:
+    async def consume(response: Any, first_event_timeout: int, idle_timeout: int) -> bool:
         nonlocal finish_reason, stream_started, thinking_index, text_index, usage
         received_data = False
-        for data in _iter_sse_data(response):
+        async for data in iter_sse_data(
+            response,
+            first_event_timeout_seconds=first_event_timeout,
+            idle_timeout_seconds=idle_timeout,
+        ):
             received_data = True
             stream_started = True
             if data == "[DONE]":
@@ -188,35 +165,46 @@ def _stream_openai_compatible_sync(
 
     max_attempts = max(1, min(5, int(options.get("maxRetries", 2)) + 1))
     max_delay_ms = max(0, int(options.get("maxRetryDelayMs") or 5_000))
-    try:
-        idle_timeout_seconds = max(10, min(300, int(os.environ.get("MON_AGENT_MODEL_IDLE_TIMEOUT_SECONDS", "60"))))
-    except ValueError:
-        idle_timeout_seconds = 60
+    connect_timeout_seconds, first_event_timeout_seconds, idle_timeout_seconds = stream_timeouts()
     attempt = 1
     stream_options_fallback_used = False
     while True:
         stream_started = False
         try:
-            with urllib.request.urlopen(request_for_payload(), timeout=idle_timeout_seconds) as response:
-                consume(response)
+            async with open_sse(
+                endpoint_to_chat_url(model),
+                payload=payload,
+                headers={
+                    "content-type": "application/json",
+                    "authorization": f"Bearer {api_key}",
+                    "accept": "text/event-stream",
+                    "user-agent": http_user_agent(),
+                },
+                connect_timeout_seconds=connect_timeout_seconds,
+            ) as response:
+                if response.status_code >= 400:
+                    error_text = (await response.aread()).decode("utf-8", errors="replace")
+                    if (
+                        not stream_options_fallback_used
+                        and response.status_code in {400, 422}
+                        and "stream_options" in error_text
+                    ):
+                        payload.pop("stream_options", None)
+                        stream_options_fallback_used = True
+                        continue
+                    if response.status_code not in RETRYABLE_STATUS_CODES or attempt >= max_attempts:
+                        raise RuntimeError(f"模型请求失败: {response.status_code} {error_text[:800]}")
+                    raise httpx.HTTPStatusError(
+                        f"HTTP {response.status_code}", request=response.request, response=response
+                    )
+                await consume(response, first_event_timeout_seconds, idle_timeout_seconds)
             if not stream_started:
                 raise EOFError("模型流在返回任何事件前结束")
             break
-        except urllib.error.HTTPError as error:
-            error_text = error.read().decode("utf-8", errors="replace")
-            if (
-                not stream_options_fallback_used
-                and error.code in {400, 422}
-                and "stream_options" in error_text
-            ):
-                payload.pop("stream_options", None)
-                stream_options_fallback_used = True
-                continue
-            if error.code not in {408, 425, 429, 500, 502, 503, 504} or attempt >= max_attempts:
-                raise RuntimeError(f"模型请求失败: {error.code} {error.reason} {error_text[:800]}") from error
-            retry_reason = f"HTTP {error.code} {error.reason}"
-            status_code: int | None = error.code
-        except (urllib.error.URLError, ssl.SSLError, TimeoutError, ConnectionError, EOFError) as error:
+        except httpx.HTTPStatusError as error:
+            retry_reason = f"HTTP {error.response.status_code}"
+            status_code: int | None = error.response.status_code
+        except (httpx.HTTPError, TimeoutError, ConnectionError, EOFError) as error:
             if stream_started or attempt >= max_attempts:
                 raise
             retry_reason = str(error)
@@ -235,7 +223,7 @@ def _stream_openai_compatible_sync(
             }
         )
         if delay_ms:
-            time.sleep(delay_ms / 1000)
+            await asyncio.sleep(delay_ms / 1000)
 
     if thinking_index is not None:
         push_partial({"type": "thinking_end", "contentIndex": thinking_index})
@@ -253,14 +241,9 @@ def _stream_openai_compatible_sync(
 
 async def stream_openai_compatible(model: dict[str, Any], context: dict[str, Any], options: dict[str, Any]) -> AssistantMessageEventStream:
     stream = AssistantMessageEventStream()
-    loop = asyncio.get_running_loop()
-
-    def push_threadsafe(event: dict[str, Any]) -> None:
-        loop.call_soon_threadsafe(stream.push, event)
-
     async def run() -> None:
         try:
-            await asyncio.to_thread(_stream_openai_compatible_sync, model, context, options, push_threadsafe)
+            await _stream_openai_compatible(model, context, options, stream.push)
         except Exception as error:
             message = {
                 "role": "assistant",
@@ -274,5 +257,5 @@ async def stream_openai_compatible(model: dict[str, Any], context: dict[str, Any
             }
             stream.push({"type": "error", "error": message})
 
-    asyncio.create_task(run())
+    stream.attach_producer(asyncio.create_task(run()))
     return stream

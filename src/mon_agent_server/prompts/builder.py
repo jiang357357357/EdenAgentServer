@@ -282,7 +282,7 @@ def build_agent_tool_section(
         [
             "工具是你观察和完成任务的方式，不是你对外表达的身份。",
             "你可以使用工具读取、搜索和修改当前工作区文件。",
-            "你可以使用 web_search 搜索实时网页信息，使用 web_fetch 抓取网页正文；回答中的重要事实应对应搜索结果的 source_id 和实际 URL。",
+            "需要实时或外部网页信息时使用 web：先 search，必要时用 open 阅读来源、用 find 定位页面内容；重要事实应对应工具返回的实际 URL。",
             vision_instruction,
             "你可以使用 get_calendar_context 查询节日、农历和近期特殊日期；可以使用 get_weather 查询实时天气。",
             "当用户询问天气、温度、降水或出行影响时优先使用 get_weather；询问节日、农历、今天是什么日子时优先使用 get_calendar_context。",

@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from mon_agent_core import AgentTool
 
 from .result import text_result, truncate
+from .context import MonToolContext
 from .web_fetcher import extract_html, fetch_web_page
 from .web_providers import (
     DEFAULT_SEARCH_PROVIDER,
@@ -31,6 +32,46 @@ from .web_providers import (
 
 _SEARCH_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _SEARCH_CACHE_LOCK = threading.Lock()
+_WEB_RESOURCES: dict[str, dict[str, dict[str, Any]]] = {}
+_WEB_RESOURCES_LOCK = threading.Lock()
+_WEB_RESOURCE_LIMIT = 128
+
+
+def _resource_scope(context: MonToolContext) -> str:
+    return context.session_id or context.operation_id or "unbound"
+
+
+def _put_resource(context: MonToolContext, kind: str, value: dict[str, Any]) -> str:
+    scope = _resource_scope(context)
+    with _WEB_RESOURCES_LOCK:
+        resources = _WEB_RESOURCES.setdefault(scope, {})
+        prefix = "search" if kind == "search" else "page"
+        next_index = 1 + max(
+            (int(key.rsplit("_", 1)[1]) for key in resources if key.startswith(f"{prefix}_") and key.rsplit("_", 1)[1].isdigit()),
+            default=0,
+        )
+        ref_id = f"{prefix}_{next_index}"
+        resources[ref_id] = {"kind": kind, **deepcopy(value), "created_at": time.time()}
+        while len(resources) > _WEB_RESOURCE_LIMIT:
+            oldest = min(resources, key=lambda key: float(resources[key].get("created_at") or 0))
+            resources.pop(oldest, None)
+        return ref_id
+
+
+def _get_resource(context: MonToolContext, ref_id: str) -> dict[str, Any]:
+    with _WEB_RESOURCES_LOCK:
+        resource = deepcopy(_WEB_RESOURCES.get(_resource_scope(context), {}).get(ref_id))
+    if resource is None:
+        raise ValueError(f"当前会话中不存在网页引用 {ref_id}")
+    return resource
+
+
+def clear_web_resources(session_id: str | None = None) -> None:
+    with _WEB_RESOURCES_LOCK:
+        if session_id is None:
+            _WEB_RESOURCES.clear()
+        else:
+            _WEB_RESOURCES.pop(session_id, None)
 
 
 def _total_tool_timeout_seconds(env_name: str, default_ms: int) -> float:
@@ -103,6 +144,45 @@ def _normalized_domains(domains: list[str] | tuple[str, ...] | None) -> tuple[st
         if domain and domain not in normalized:
             normalized.append(domain)
     return tuple(normalized[:20])
+
+
+def _search_term_key(value: Any) -> str:
+    return re.sub(r"[^\w\u3040-\u30ff\u3400-\u9fff]+", "", str(value or "").casefold())
+
+
+def _merge_search_results(searches: list[dict[str, Any]], max_results: int) -> dict[str, Any]:
+    merged: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    seen_titles: set[str] = set()
+    for search in searches:
+        for item in search.get("results") or []:
+            url_key = str(item.get("url") or "").split("#", 1)[0]
+            title_key = _search_term_key(item.get("title"))
+            if not url_key or url_key in seen_urls or (title_key and title_key in seen_titles):
+                continue
+            seen_urls.add(url_key)
+            if title_key:
+                seen_titles.add(title_key)
+            merged.append(dict(item))
+            if len(merged) >= max_results:
+                break
+        if len(merged) >= max_results:
+            break
+    for index, item in enumerate(merged, 1):
+        item["id"] = f"source_{index}"
+        item["source_id"] = f"source_{index}"
+    providers = list(dict.fromkeys(str(item.get("provider") or "") for item in searches))
+    return {
+        "provider": providers[0] if len(providers) == 1 else "multi",
+        "providers": providers,
+        "endpoint": "",
+        "results": merged,
+        "elapsed_ms": max((int(item.get("elapsed_ms") or 0) for item in searches), default=0),
+        "query": searches[0].get("query") if len(searches) == 1 else " | ".join(str(item.get("query") or "") for item in searches),
+        "queries": [item.get("query") for item in searches],
+        "attempts": {str(item.get("query") or ""): item.get("attempts") or [] for item in searches},
+        "cached": all(bool(item.get("cached")) for item in searches),
+    }
 
 
 def web_search(
@@ -181,72 +261,139 @@ def _search_text(result: dict[str, Any]) -> str:
     return "\n\n".join(lines)
 
 
-def create_web_tools() -> list[AgentTool]:
-    async def web_search_execute(
+def create_web_tools(context: MonToolContext | None = None) -> list[AgentTool]:
+    context = context or MonToolContext()
+
+    async def web_execute(
         _tool_call_id: str,
         params: dict[str, Any],
         _signal: Any = None,
         _on_update: Any = None,
     ) -> dict[str, Any]:
+        action = str(params.get("action") or "").strip().lower()
+        if action == "open":
+            ref_id = str(params.get("ref_id") or "").strip()
+            url = str(params.get("url") or "").strip()
+            if ref_id:
+                resource = _get_resource(context, ref_id)
+                url = str(resource.get("url") or "")
+            if not url:
+                raise ValueError("open 操作需要 ref_id 或 url")
+            max_chars = min(max(int(round(float(params.get("max_chars") or 28_000))), 2_000), 60_000)
+            total_timeout = _total_tool_timeout_seconds("MON_AGENT_FETCH_TOTAL_TIMEOUT_MS", 30_000)
+            try:
+                async with asyncio.timeout(total_timeout):
+                    fetched = await asyncio.to_thread(fetch_web_page, url)
+            except TimeoutError as error:
+                raise RuntimeError(f"网页打开超时：目标页面未在 {total_timeout:g} 秒内返回。") from error
+            body = truncate(
+                f"{'标题: ' + fetched['title'] + chr(10) + chr(10) if fetched.get('title') else ''}{fetched['body']}",
+                max_chars,
+            )
+            page_ref = _put_resource(context, "page", {"url": fetched["url"], "title": fetched.get("title"), "body": body})
+            details = {
+                "action": "open", "ref_id": page_ref, "provider": "direct", "final_url": fetched["url"],
+                "content_type": fetched["contentType"], "max_chars": max_chars, "bytes": fetched["bytes"],
+                "response_truncated": fetched["truncated"], "charset": fetched["charset"],
+            }
+            return text_result(f"[{page_ref}] {fetched['url']}\n\n{body}", details)
+
+        if action == "find":
+            ref_id = str(params.get("ref_id") or "").strip()
+            pattern = str(params.get("pattern") or "").strip()
+            if not ref_id or not pattern:
+                raise ValueError("find 操作需要 ref_id 和 pattern")
+            resource = _get_resource(context, ref_id)
+            if resource.get("kind") != "page":
+                raise ValueError("find 只能用于 open 返回的 page 引用")
+            body = str(resource.get("body") or "")
+            matches: list[str] = []
+            for match in re.finditer(re.escape(pattern), body, flags=re.IGNORECASE):
+                start = max(0, match.start() - 180)
+                end = min(len(body), match.end() + 280)
+                excerpt = re.sub(r"\s+", " ", body[start:end]).strip()
+                if excerpt not in matches:
+                    matches.append(excerpt)
+                if len(matches) >= 10:
+                    break
+            text = f"在 [{ref_id}] 中找到 {len(matches)} 处匹配：{pattern}"
+            if matches:
+                text += "\n\n" + "\n\n".join(f"[{index}] {item}" for index, item in enumerate(matches, 1))
+            return text_result(text, {"action": "find", "ref_id": ref_id, "pattern": pattern, "matches": matches})
+
+        if action != "search":
+            raise ValueError("action 只支持 search、open 或 find")
+
         max_results = min(max(int(round(float(params.get("max_results") or 5))), 1), 10)
+        raw_queries = params.get("queries")
+        queries = [str(params.get("query") or "").strip()]
+        if isinstance(raw_queries, list):
+            queries.extend(str(item).strip() for item in raw_queries)
+        queries = list(dict.fromkeys(item for item in queries if item))[:4]
+        if not queries:
+            raise ValueError("query 或 queries 至少需要提供一条搜索查询")
         raw_domains = params.get("domains")
         domains = raw_domains if isinstance(raw_domains, list) else None
         total_timeout = _total_tool_timeout_seconds("MON_AGENT_SEARCH_TOTAL_TIMEOUT_MS", 30_000)
         try:
             async with asyncio.timeout(total_timeout):
-                result = await asyncio.to_thread(
-                    web_search,
-                    str(params["query"]),
-                    max_results,
-                    params.get("language"),
-                    params.get("time_range"),
-                    None,
-                    domains,
+                completed = await asyncio.gather(
+                    *(
+                        asyncio.to_thread(
+                            web_search,
+                            query,
+                            max_results,
+                            params.get("language"),
+                            params.get("time_range"),
+                            None,
+                            domains,
+                        )
+                        for query in queries
+                    ),
+                    return_exceptions=True,
                 )
+                search_results = [item for item in completed if isinstance(item, dict)]
+                query_errors = {
+                    query: str(item)
+                    for query, item in zip(queries, completed, strict=True)
+                    if isinstance(item, BaseException)
+                }
+                if not search_results:
+                    details = "; ".join(f"{query}: {error}" for query, error in query_errors.items())
+                    raise RuntimeError(f"所有独立查询均失败：{details}")
+                result = _merge_search_results(search_results, max_results)
+                result["query_errors"] = query_errors
         except TimeoutError as error:
             raise RuntimeError(f"网页搜索总超时：所有搜索入口未在 {total_timeout:g} 秒内返回可用结果。") from error
+        for item in result["results"]:
+            item["ref_id"] = _put_resource(context, "search", item)
+            item["source_id"] = item["ref_id"]
+            item["id"] = item["ref_id"]
+        result["action"] = "search"
         return text_result(truncate(_search_text(result), 20_000), result)
-
-    async def web_fetch_execute(
-        _tool_call_id: str,
-        params: dict[str, Any],
-        _signal: Any = None,
-        _on_update: Any = None,
-    ) -> dict[str, Any]:
-        max_chars = min(max(int(round(float(params.get("max_chars") or 28_000))), 2_000), 60_000)
-        total_timeout = _total_tool_timeout_seconds("MON_AGENT_FETCH_TOTAL_TIMEOUT_MS", 30_000)
-        try:
-            async with asyncio.timeout(total_timeout):
-                result = await asyncio.to_thread(fetch_web_page, str(params["url"]))
-        except TimeoutError as error:
-            raise RuntimeError(f"网页抓取总超时：目标页面未在 {total_timeout:g} 秒内返回。") from error
-        body = truncate(
-            f"{'标题: ' + result['title'] + chr(10) + chr(10) if result.get('title') else ''}{result['body']}",
-            max_chars,
-        )
-        details = {
-            "provider": "direct",
-            "final_url": result["url"],
-            "content_type": result["contentType"],
-            "max_chars": max_chars,
-            "bytes": result["bytes"],
-            "response_truncated": result["truncated"],
-            "charset": result["charset"],
-        }
-        return text_result(body, details)
 
     return [
         AgentTool(
-            name="web_search",
-            label="网页搜索",
+            name="web",
+            label="网页",
             description=(
-                "搜索实时网页信息并返回带 source_id 的结构化来源。自动优先使用已配置的 Brave、Exa、Tavily 或 "
-                "SearXNG，失败时降级到必应和 DuckDuckGo。"
+                "统一的网页研究工具。使用 search 搜索并获得当前会话内有效的 ref_id；使用 open 打开 ref_id 或公开 URL；"
+                "使用 find 在已打开页面中定位文字。引用事实时保留结果的实际 URL。"
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "搜索关键词。"},
+                    "action": {"type": "string", "enum": ["search", "open", "find"], "description": "要执行的网页操作。"},
+                    "query": {
+                        "type": "string",
+                        "description": "search 的主要查询。",
+                    },
+                    "queries": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 3,
+                        "description": "可选的独立补充查询。不同语言、别名或不同检索意图分别写成一条简短查询，工具会并行搜索并合并成功结果，单条失败不影响其他查询。",
+                    },
                     "max_results": {"type": "number", "description": "最多返回多少条结果，默认 5，最大 10。"},
                     "language": {"type": "string", "description": "搜索语言或地区，例如 zh-CN、en-US。"},
                     "time_range": {
@@ -257,26 +404,16 @@ def create_web_tools() -> list[AgentTool]:
                     "domains": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "可选的域名白名单，例如 [\"docs.python.org\"]。",
+                        "description": "由智能体按任务选择的域名白名单，例如 [\"docs.python.org\"]；无需白名单时省略。",
                     },
+                    "ref_id": {"type": "string", "description": "search 或 open 返回的当前会话引用，供 open/find 使用。"},
+                    "url": {"type": "string", "description": "open 可直接打开的公开 http/https URL。"},
+                    "pattern": {"type": "string", "description": "find 要在页面中定位的文字。"},
+                    "max_chars": {"type": "number", "description": "open 最多返回多少字符，默认 28000。"},
                 },
-                "required": ["query"],
+                "required": ["action"],
             },
-            execute=web_search_execute,
-        ),
-        AgentTool(
-            name="web_fetch",
-            label="网页抓取",
-            description="安全抓取公开网页，校验重定向并提取适合阅读的正文；不允许访问本机或私网地址。",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string", "description": "要抓取的公开 http/https 网页 URL。"},
-                    "max_chars": {"type": "number", "description": "最多返回多少字符，默认 28000。"},
-                },
-                "required": ["url"],
-            },
-            execute=web_fetch_execute,
+            execute=web_execute,
         ),
     ]
 
@@ -290,6 +427,7 @@ __all__ = [
     "SEARCH_PROVIDER_LABELS",
     "bing_freshness_filter",
     "clear_search_cache",
+    "clear_web_resources",
     "create_web_tools",
     "fetch_web_page",
     "html_title",

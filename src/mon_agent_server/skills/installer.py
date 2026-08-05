@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import re
@@ -26,6 +29,13 @@ MAX_FILES = 512
 MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_BYTES = 50 * 1024 * 1024
 PREVIEW_TTL_SECONDS = 15 * 60
+GENERATED_RESOURCE_ROOTS = {"scripts", "references", "assets", "agents"}
+GENERATED_FORBIDDEN_NAMES = {
+    "README.md",
+    "INSTALLATION_GUIDE.md",
+    "QUICK_REFERENCE.md",
+    "CHANGELOG.md",
+}
 
 
 @dataclass(slots=True)
@@ -63,6 +73,125 @@ def _safe_subpath(value: str | None) -> Path:
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("技能子目录必须是安全的相对路径")
     return relative
+
+
+def _generated_file_path(value: Any) -> Path:
+    raw = str(value or "").strip().replace("\\", "/")
+    relative = Path(raw)
+    if (
+        not raw
+        or relative.is_absolute()
+        or ".." in relative.parts
+        or len(relative.parts) < 2
+        or relative.parts[0] not in GENERATED_RESOURCE_ROOTS
+        or any(part in {"", "."} or part.startswith(".") for part in relative.parts)
+    ):
+        raise ValueError(
+            "技能资源路径必须位于 scripts/、references/、assets/ 或 agents/ 下，且不能包含隐藏目录或上级目录"
+        )
+    if relative.name in GENERATED_FORBIDDEN_NAMES:
+        raise ValueError(f"技能包不应包含额外文档：{relative.name}")
+    return relative
+
+
+def _write_generated_files(root: Path, raw_files: Any) -> list[str]:
+    if raw_files in (None, []):
+        return []
+    if not isinstance(raw_files, list):
+        raise ValueError("files 必须是技能资源文件数组")
+    written: list[str] = []
+    seen: set[str] = set()
+    for raw_file in raw_files:
+        if not isinstance(raw_file, dict):
+            raise ValueError("每个技能资源文件必须是对象")
+        relative = _generated_file_path(raw_file.get("path"))
+        key = relative.as_posix()
+        if key in seen:
+            raise ValueError(f"技能资源路径重复：{key}")
+        seen.add(key)
+        encoding = str(raw_file.get("encoding") or "utf-8").strip().lower()
+        content = raw_file.get("content")
+        if not isinstance(content, str):
+            raise ValueError(f"技能资源 content 必须是字符串：{key}")
+        if encoding == "utf-8":
+            data = content.encode("utf-8")
+        elif encoding == "base64":
+            try:
+                data = base64.b64decode(content, validate=True)
+            except (ValueError, binascii.Error) as error:
+                raise ValueError(f"技能资源不是有效 Base64：{key}") from error
+        else:
+            raise ValueError(f"技能资源 encoding 只支持 utf-8 或 base64：{key}")
+        if len(data) > MAX_FILE_BYTES:
+            raise ValueError(f"技能文件超过 10MB：{key}")
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+        if bool(raw_file.get("executable")):
+            if relative.parts[0] != "scripts":
+                raise ValueError(f"只有 scripts/ 下的文件可以标记 executable：{key}")
+            destination.chmod(0o755)
+        written.append(key)
+    return written
+
+
+def _short_skill_description(description: str) -> str:
+    value = description.strip().replace("\n", " ")
+    if len(value) < 25:
+        value = f"{value}；为相关任务提供可复用且可靠的工作流程。"
+    return value if len(value) <= 64 else value[:61].rstrip() + "..."
+
+
+def _validate_agent_metadata(root: Path, skill_name: str) -> None:
+    target = root / "agents" / "openai.yaml"
+    try:
+        data = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+    except Exception as error:
+        raise ValueError("agents/openai.yaml 不是有效 YAML") from error
+    interface = data.get("interface") if isinstance(data, dict) else None
+    if not isinstance(interface, dict):
+        raise ValueError("agents/openai.yaml 缺少 interface")
+    for field in ("display_name", "short_description", "default_prompt"):
+        if not isinstance(interface.get(field), str) or not str(interface[field]).strip():
+            raise ValueError(f"agents/openai.yaml 缺少 interface.{field}")
+    short_description = str(interface["short_description"]).strip()
+    if not 25 <= len(short_description) <= 64:
+        raise ValueError("agents/openai.yaml 的 short_description 必须为 25–64 个字符")
+    if f"${skill_name}" not in str(interface["default_prompt"]):
+        raise ValueError(f"agents/openai.yaml 的 default_prompt 必须明确提及 ${skill_name}")
+
+
+def _write_agent_metadata(
+    root: Path,
+    skill_name: str,
+    display_name: str,
+    description: str,
+    default_prompt: str,
+) -> None:
+    target = root / "agents" / "openai.yaml"
+    if target.exists():
+        _validate_agent_metadata(root, skill_name)
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    prompt = default_prompt.strip() or "完成当前任务。"
+    if f"${skill_name}" not in prompt:
+        prompt = f"使用 ${skill_name} 技能：{prompt}"
+    # JSON string literals are valid YAML quoted scalars. Keep keys unquoted to
+    # match Codex's agents/openai.yaml interface format exactly.
+    quote = lambda value: json.dumps(str(value), ensure_ascii=False)
+    target.write_text(
+        "\n".join(
+            (
+                "interface:",
+                f"  display_name: {quote(display_name)}",
+                f"  short_description: {quote(_short_skill_description(description))}",
+                f"  default_prompt: {quote(prompt)}",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    _validate_agent_metadata(root, skill_name)
 
 
 def _read_frontmatter(skill_file: Path) -> dict[str, Any]:
@@ -151,7 +280,17 @@ def _clone_source(uri: str, reference: str, destination: Path) -> None:
 
 
 def _definition_from_directory(root: Path, known_tools: set[str]) -> tuple[SkillDefinition, str]:
-    result = asyncio.run(load_skills(LocalExecutionEnv(root), str(root)))
+    coroutine = load_skills(LocalExecutionEnv(root), str(root))
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        result = asyncio.run(coroutine)
+    else:
+        # Candidate creation is exposed as an agent tool and therefore normally
+        # runs inside AgentCore's event loop. Keep the synchronous installer API
+        # while giving the async skill loader its own loop in a worker thread.
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="skill-validation") as executor:
+            result = executor.submit(asyncio.run, coroutine).result()
     skills = result.get("skills") or []
     diagnostics = result.get("diagnostics") or []
     if len(skills) != 1:
@@ -292,6 +431,117 @@ class SkillInstallationService:
             shutil.rmtree(checkout.parent, ignore_errors=True)
             raise
 
+    def inspect_generated(self, owner_id: object, payload: dict[str, Any]) -> dict[str, Any]:
+        """Build and validate a complete model-authored skill package."""
+        owner_key = owner_storage_key(owner_id)
+        scope = str(payload.get("scope") or "user").strip()
+        name = str(payload.get("name") or "").strip()
+        description = str(payload.get("description") or "").strip()
+        instructions = str(payload.get("instructions") or "").strip()
+        display_name = str(payload.get("display_name") or name).strip()
+        version = str(payload.get("version") or "1.0.0").strip()
+        tools = _string_tuple(payload.get("tools"))
+        profiles = _string_tuple(payload.get("profiles"), ("user_chat",))
+        if scope not in {"user", "project"}:
+            raise ValueError("scope 必须是 user 或 project")
+        if not SKILL_NAME_PATTERN.fullmatch(name):
+            raise ValueError("技能 name 只能包含小写字母、数字和单个连字符")
+        if not description:
+            raise ValueError("技能 description 不能为空")
+        if not instructions:
+            raise ValueError("技能 instructions 不能为空")
+
+        root = skill_roots(self.workspace_root, owner_key)[scope]
+        preview_id = f"skill_preview_{uuid.uuid4().hex}"
+        checkout = root / ".staging" / preview_id / "checkout"
+        checkout.mkdir(parents=True, exist_ok=False)
+        frontmatter = {
+            "name": name,
+            "description": description,
+            "metadata": {
+                "monagent": {
+                    "display_name": display_name,
+                    "version": version,
+                    "tools": list(tools),
+                    "profiles": list(profiles),
+                }
+            },
+        }
+        skill_text = f"---\n{yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False)}---\n\n{instructions}\n"
+        (checkout / "SKILL.md").write_text(skill_text, encoding="utf-8")
+        try:
+            written_files = _write_generated_files(checkout, payload.get("files"))
+            _write_agent_metadata(
+                checkout,
+                name,
+                display_name,
+                description,
+                str(payload.get("default_prompt") or ""),
+            )
+            file_count, total_bytes = _validate_tree(checkout)
+            known_tools = {
+                tool.name
+                for profile in ("user_chat", "self_awake")
+                for tool in create_mon_agent_tools(self.workspace_root, MonToolContext(), profile)
+            }
+            definition, normalized_version = _definition_from_directory(checkout, known_tools)
+            preview = SkillPreview(
+                preview_id=preview_id,
+                owner_key=owner_key,
+                scope=scope,
+                source={"type": "generated", "uri": f"generated:{name}", "ref": "", "subpath": ""},
+                stage_dir=checkout,
+                definition=definition,
+                version=normalized_version,
+                content_hash=_content_hash(checkout),
+                file_count=file_count,
+                total_bytes=total_bytes,
+                created_at=time.time(),
+            )
+            with self._lock:
+                self._discard_expired_previews()
+                self._previews[preview_id] = preview
+            result = self._preview_payload(preview)
+            result["generatedFiles"] = written_files
+            return result
+        except Exception:
+            shutil.rmtree(checkout.parent, ignore_errors=True)
+            raise
+
+    def create_generated(
+        self,
+        owner_id: object,
+        token: str,
+        device_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Validate and atomically create or update a model-authored skill."""
+        preview_payload = self.inspect_generated(owner_id, payload)
+        preview_id = str(preview_payload["previewID"])
+        name = str(preview_payload["skillName"])
+        scope = str(preview_payload["scope"])
+        existing = next(
+            (
+                record
+                for record in self._list_records(token, device_id)
+                if record.get("skill_name") == name and record.get("scope") == scope
+            ),
+            None,
+        )
+        if existing:
+            with self._lock:
+                preview = self._previews.get(preview_id)
+                if preview is not None:
+                    preview.replace_installation_id = str(existing.get("external_installation_id") or "")
+        try:
+            return self.install(owner_id, token, device_id, preview_id)
+        except Exception:
+            with self._lock:
+                abandoned = self._previews.pop(preview_id, None)
+            if abandoned is not None:
+                shutil.rmtree(abandoned.stage_dir.parent, ignore_errors=True)
+            raise
+
     def install(self, owner_id: object, token: str, device_id: str, preview_id: str) -> dict[str, Any]:
         owner_key = owner_storage_key(owner_id)
         with self._lock:
@@ -313,8 +563,11 @@ class SkillInstallationService:
             "source": preview.source,
             "version": preview.version,
             "contentHash": preview.content_hash,
+            "fileCount": preview.file_count,
+            "totalBytes": preview.total_bytes,
             "enabled": preview.enabled,
             "trustStatus": "trusted",
+            "deviceID": device_id,
         }
         (preview.stage_dir / INSTALLATION_MANIFEST).write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
@@ -363,6 +616,8 @@ class SkillInstallationService:
         record = self._find_record(token, device_id, installation_id)
         snapshot = record.get("manifest_snapshot") if isinstance(record.get("manifest_snapshot"), dict) else {}
         source = snapshot.get("source") if isinstance(snapshot.get("source"), dict) else {}
+        if (record.get("source_type") or source.get("type")) == "generated":
+            raise ValueError("智能体生成的技能请通过技能创建流程直接更新。")
         return self.inspect(
             owner_id,
             {
@@ -378,8 +633,9 @@ class SkillInstallationService:
 
     def list(self, owner_id: object, token: str, device_id: str) -> list[dict[str, Any]]:
         owner_key = owner_storage_key(owner_id)
-        records = self.core_client.list_skill_installations(token, device_id)
+        records = self._list_records(token, device_id)
         roots = skill_roots(self.workspace_root, owner_key)
+        records = self._reconcile_local_records(token, device_id, roots, records)
         items: list[dict[str, Any]] = []
         for definition in SKILLS_BY_ID.values():
             items.append({
@@ -396,11 +652,91 @@ class SkillInstallationService:
                 "profiles": list(definition.profiles),
                 "available": True,
             })
+        installed_names: dict[str, list[str]] = {}
+        for record in records:
+            installed_names.setdefault(str(record.get("skill_name") or ""), []).append(str(record.get("scope") or "user"))
         for record in records:
             scope = str(record.get("scope") or "user")
             path = roots.get(scope, roots["user"]) / str(record.get("skill_name") or "")
-            items.append(self._record_payload(record, path))
+            payload = self._record_payload(record, path)
+            scopes = installed_names.get(str(record.get("skill_name") or ""), [])
+            payload["shadowed"] = scope == "user" and "project" in scopes
+            items.append(payload)
         return items
+
+    def list_for_model(
+        self,
+        owner_id: object,
+        token: str,
+        device_id: str,
+        filters: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return a compact, truthful skill inventory for model-facing tools."""
+        filters = filters or {}
+        kind = str(filters.get("kind") or "all").strip()
+        scope = str(filters.get("scope") or "all").strip()
+        enabled = str(filters.get("enabled") or "all").strip()
+        if kind not in {"all", "builtin", "generated", "installed"}:
+            raise ValueError("kind 必须是 all、builtin、generated 或 installed")
+        if scope not in {"all", "system", "user", "project"}:
+            raise ValueError("scope 必须是 all、system、user 或 project")
+        if enabled not in {"all", "enabled", "disabled"}:
+            raise ValueError("enabled 必须是 all、enabled 或 disabled")
+
+        def matches(item: dict[str, Any]) -> bool:
+            source_type = str(item.get("sourceType") or "")
+            is_builtin = bool(item.get("builtin"))
+            if kind == "builtin" and not is_builtin:
+                return False
+            if kind == "generated" and source_type != "generated":
+                return False
+            if kind == "installed" and (is_builtin or source_type == "generated"):
+                return False
+            if scope != "all" and str(item.get("scope") or "") != scope:
+                return False
+            if enabled == "enabled" and not bool(item.get("enabled")):
+                return False
+            if enabled == "disabled" and bool(item.get("enabled")):
+                return False
+            return True
+
+        fields = (
+            "id",
+            "skillName",
+            "displayName",
+            "description",
+            "scope",
+            "sourceType",
+            "version",
+            "enabled",
+            "trustStatus",
+            "builtin",
+            "available",
+            "shadowed",
+            "fileCount",
+            "totalBytes",
+        )
+        return [
+            {field: item.get(field) for field in fields if field in item}
+            for item in self.list(owner_id, token, device_id)
+            if matches(item)
+        ]
+
+    def details(self, owner_id: object, token: str, device_id: str, installation_id: str) -> dict[str, Any]:
+        owner_key = owner_storage_key(owner_id)
+        record = self._find_record(token, device_id, installation_id)
+        scope = str(record.get("scope") or "user")
+        path = skill_roots(self.workspace_root, owner_key)[scope] / str(record.get("skill_name") or "")
+        payload = self._record_payload(record, path)
+        payload["manifest"] = self._read_manifest(path) if path.is_dir() else {}
+        skill_file = path / "SKILL.md"
+        payload["content"] = skill_file.read_text(encoding="utf-8") if skill_file.is_file() else ""
+        payload["files"] = [
+            item.relative_to(path).as_posix()
+            for item in sorted(path.rglob("*"))
+            if item.is_file() and item.name != INSTALLATION_MANIFEST
+        ] if path.is_dir() else []
+        return payload
 
     def set_enabled(
         self,
@@ -450,12 +786,69 @@ class SkillInstallationService:
 
     def _find_record(self, token: str, device_id: str, installation_id: str) -> dict[str, Any]:
         record = next(
-            (item for item in self.core_client.list_skill_installations(token, device_id) if item.get("external_installation_id") == installation_id),
+            (item for item in self._list_records(token, device_id) if item.get("external_installation_id") == installation_id),
             None,
         )
         if not record:
             raise ValueError("技能安装记录不存在")
         return record
+
+    def _list_records(self, token: str, device_id: str) -> list[dict[str, Any]]:
+        """Return every installation owned by the user on this local runtime."""
+        return list(self.core_client.list_skill_installations(token, None))
+
+    def _reconcile_local_records(
+        self,
+        token: str,
+        device_id: str,
+        roots: dict[str, Path],
+        records: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Restore missing Core metadata from trusted local installation manifests."""
+        known = {str(item.get("external_installation_id") or "") for item in records}
+        known_tools = {
+            tool.name
+            for profile in ("user_chat", "self_awake")
+            for tool in create_mon_agent_tools(self.workspace_root, MonToolContext(), profile)
+        }
+        for scope, root in roots.items():
+            if not root.is_dir():
+                continue
+            for path in sorted(root.iterdir()):
+                manifest_path = path / INSTALLATION_MANIFEST
+                if not path.is_dir() or not manifest_path.is_file():
+                    continue
+                try:
+                    manifest = self._read_manifest(path)
+                    installation_id = str(manifest.get("installationID") or "")
+                    if not installation_id or installation_id in known:
+                        continue
+                    definition, version = _definition_from_directory(path, known_tools)
+                    source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+                    record = self.core_client.upsert_skill_installation(
+                        token,
+                        {
+                            "external_installation_id": installation_id,
+                            "device_id": str(manifest.get("deviceID") or device_id or "local"),
+                            "skill_name": definition.id,
+                            "display_name": definition.name,
+                            "description": definition.description,
+                            "scope": scope,
+                            "source_type": str(source.get("type") or "local"),
+                            "source_uri": str(source.get("uri") or ""),
+                            "source_ref": str(source.get("ref") or ""),
+                            "installed_version": str(manifest.get("version") or version),
+                            "content_hash": str(manifest.get("contentHash") or _content_hash(path)),
+                            "enabled": bool(manifest.get("enabled", True)),
+                            "trust_status": str(manifest.get("trustStatus") or "trusted"),
+                            "manifest_snapshot": manifest,
+                        },
+                    )
+                    records.append(record)
+                    known.add(installation_id)
+                except Exception:
+                    continue
+        return records
 
     @staticmethod
     def _read_manifest(path: Path) -> dict[str, Any]:
@@ -508,6 +901,8 @@ class SkillInstallationService:
             "sourceSubpath": source.get("subpath") or "",
             "version": record.get("installed_version"),
             "contentHash": record.get("content_hash"),
+            "fileCount": snapshot.get("fileCount"),
+            "totalBytes": snapshot.get("totalBytes"),
             "enabled": bool(record.get("enabled")),
             "trustStatus": record.get("trust_status"),
             "builtin": False,

@@ -2,17 +2,16 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
-import os
-import ssl
-import time
-import urllib.error
-import urllib.request
-from typing import Any, Callable
+import asyncio
+from typing import Any
+
+import httpx
 
 from mon_agent_core.types import now_ms
 
 from .messages import to_responses_input
-from .models import endpoint_to_responses_url, http_user_agent
+from .http_stream import RETRYABLE_STATUS_CODES, iter_sse_data, open_sse, stream_timeouts
+from .models import endpoint_to_responses_url, http_user_agent, supports_native_web_search
 from .tools import parse_tool_arguments, responses_tool_payload
 from .usage import base_assistant_message, usage_from_openai
 
@@ -33,21 +32,14 @@ def responses_stream_payload(model: dict[str, Any], context: dict[str, Any], opt
     if options.get("maxTokens"):
         payload["max_output_tokens"] = options.get("maxTokens")
 
-    tools = responses_tool_payload(context.get("tools", []))
+    tools = responses_tool_payload(
+        context.get("tools", []),
+        native_web_search=supports_native_web_search(model),
+    )
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
     return payload
-
-
-def _iter_sse_data(response: Any) -> Any:
-    for raw_line in response:
-        line = raw_line.decode("utf-8", errors="replace").strip()
-        if not line or line.startswith(":") or not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if data:
-            yield data
 
 
 def _responses_usage(raw: dict[str, Any] | None) -> dict[str, Any]:
@@ -65,11 +57,11 @@ def _responses_usage(raw: dict[str, Any] | None) -> dict[str, Any]:
     )
 
 
-def stream_responses_sync(
+async def stream_responses_sync(
     model: dict[str, Any],
     context: dict[str, Any],
     options: dict[str, Any],
-    push: Callable[[dict[str, Any]], None],
+    push: Any,
 ) -> None:
     api_key = options.get("apiKey")
     if not api_key:
@@ -90,6 +82,7 @@ def stream_responses_sync(
     usage: dict[str, Any] | None = None
     response_status = "completed"
     stream_started = False
+    native_sources: list[dict[str, str]] = []
 
     def ensure_tool(output_index: int, item: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
         item = item or {}
@@ -119,23 +112,14 @@ def stream_responses_sync(
             block["providerItemId"] = item["id"]
         return content_index, block
 
-    def request_for_payload() -> urllib.request.Request:
-        return urllib.request.Request(
-            endpoint_to_responses_url(model),
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            method="POST",
-            headers={
-                "content-type": "application/json",
-                "authorization": f"Bearer {api_key}",
-                "accept": "text/event-stream",
-                "user-agent": http_user_agent(),
-            },
-        )
-
-    def consume(response: Any) -> bool:
+    async def consume(response: Any, first_event_timeout: int, idle_timeout: int) -> bool:
         nonlocal thinking_index, text_index, usage, response_status, stream_started
         received_data = False
-        for data in _iter_sse_data(response):
+        async for data in iter_sse_data(
+            response,
+            first_event_timeout_seconds=first_event_timeout,
+            idle_timeout_seconds=idle_timeout,
+        ):
             received_data = True
             stream_started = True
             if data == "[DONE]":
@@ -200,6 +184,17 @@ def stream_responses_sync(
                     if isinstance(raw_arguments, str) and raw_arguments:
                         tool_argument_buffers[output_index] = raw_arguments
                         block["arguments"] = parse_tool_arguments(raw_arguments)
+                elif item.get("type") == "message":
+                    for content_item in item.get("content") or []:
+                        if not isinstance(content_item, dict):
+                            continue
+                        for annotation in content_item.get("annotations") or []:
+                            if not isinstance(annotation, dict) or annotation.get("type") != "url_citation":
+                                continue
+                            url = str(annotation.get("url") or "").strip()
+                            title = str(annotation.get("title") or url).strip()
+                            if url and not any(source["url"] == url for source in native_sources):
+                                native_sources.append({"title": title, "url": url})
                 continue
 
             if event_type == "response.completed":
@@ -211,26 +206,37 @@ def stream_responses_sync(
 
     max_attempts = max(1, min(5, int(options.get("maxRetries", 2)) + 1))
     max_delay_ms = max(0, int(options.get("maxRetryDelayMs") or 5_000))
-    try:
-        idle_timeout_seconds = max(10, min(300, int(os.environ.get("MON_AGENT_MODEL_IDLE_TIMEOUT_SECONDS", "60"))))
-    except ValueError:
-        idle_timeout_seconds = 60
+    connect_timeout_seconds, first_event_timeout_seconds, idle_timeout_seconds = stream_timeouts()
     attempt = 1
     while True:
         stream_started = False
         try:
-            with urllib.request.urlopen(request_for_payload(), timeout=idle_timeout_seconds) as response:
-                consume(response)
+            async with open_sse(
+                endpoint_to_responses_url(model),
+                payload=payload,
+                headers={
+                    "content-type": "application/json",
+                    "authorization": f"Bearer {api_key}",
+                    "accept": "text/event-stream",
+                    "user-agent": http_user_agent(),
+                },
+                connect_timeout_seconds=connect_timeout_seconds,
+            ) as response:
+                if response.status_code >= 400:
+                    error_text = (await response.aread()).decode("utf-8", errors="replace")
+                    if response.status_code not in RETRYABLE_STATUS_CODES or attempt >= max_attempts:
+                        raise RuntimeError(f"模型请求失败: {response.status_code} {error_text[:800]}")
+                    raise httpx.HTTPStatusError(
+                        f"HTTP {response.status_code}", request=response.request, response=response
+                    )
+                await consume(response, first_event_timeout_seconds, idle_timeout_seconds)
             if not stream_started:
                 raise EOFError("模型流在返回任何事件前结束")
             break
-        except urllib.error.HTTPError as error:
-            error_text = error.read().decode("utf-8", errors="replace")
-            if error.code not in {408, 425, 429, 500, 502, 503, 504} or attempt >= max_attempts:
-                raise RuntimeError(f"模型请求失败: {error.code} {error.reason} {error_text[:800]}") from error
-            retry_reason = f"HTTP {error.code} {error.reason}"
-            status_code: int | None = error.code
-        except (urllib.error.URLError, ssl.SSLError, TimeoutError, ConnectionError, EOFError) as error:
+        except httpx.HTTPStatusError as error:
+            retry_reason = f"HTTP {error.response.status_code}"
+            status_code: int | None = error.response.status_code
+        except (httpx.HTTPError, TimeoutError, ConnectionError, EOFError) as error:
             if stream_started or attempt >= max_attempts:
                 raise
             retry_reason = str(error)
@@ -249,7 +255,22 @@ def stream_responses_sync(
             }
         )
         if delay_ms:
-            time.sleep(delay_ms / 1000)
+            await asyncio.sleep(delay_ms / 1000)
+
+    if native_sources:
+        content = partial.setdefault("content", [])
+        existing_text = "\n".join(
+            str(block.get("text") or "") for block in content if isinstance(block, dict) and block.get("type") == "text"
+        )
+        missing = [source for source in native_sources if source["url"] not in existing_text]
+        if missing:
+            suffix = "\n\n来源：\n" + "\n".join(f"- [{source['title']}]({source['url']})" for source in missing)
+            if text_index is None:
+                text_index = len(content)
+                content.append({"type": "text", "text": ""})
+                push_partial({"type": "text_start", "contentIndex": text_index})
+            content[text_index]["text"] += suffix
+            push_partial({"type": "text_delta", "contentIndex": text_index, "delta": suffix})
 
     if thinking_index is not None:
         push_partial({"type": "thinking_end", "contentIndex": thinking_index})

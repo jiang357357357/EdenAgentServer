@@ -42,7 +42,8 @@ def _load_workspace_service_environment() -> None:
             if key.strip() == SERVICE_SECRET_ENV:
                 os.environ.setdefault(SERVICE_SECRET_ENV, value.strip().strip('"').strip("'"))
                 return
-        return
+        # 当前项目层可能只有 .monconfig，密钥由更上层工作区统一维护。
+        # 本文件未包含目标配置时继续向父级查找。
 
 
 _load_workspace_service_environment()
