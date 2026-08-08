@@ -4,6 +4,13 @@ import json
 from typing import Any
 
 
+def _model_tool_output(text: str, structured: Any) -> str:
+    if structured is None:
+        return text
+    encoded = json.dumps(structured, ensure_ascii=False, separators=(",", ":"), default=str)
+    return f"{text}\n\n<structured_output>{encoded}</structured_output>" if text else encoded
+
+
 def message_content(blocks: Any) -> Any:
     if isinstance(blocks, str):
         return blocks
@@ -117,11 +124,13 @@ def to_openai_messages(context: dict[str, Any]) -> list[dict[str, Any]]:
             blocks = [block for block in message.get("content", []) if isinstance(block, dict)]
             text = "\n".join(block.get("text", "") for block in blocks if block.get("type") == "text")
             images = [block for block in blocks if block.get("type") == "image" and block.get("data")]
+            structured = message.get("structuredContent")
+            model_output = _model_tool_output(text, structured)
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": message.get("toolCallId"),
-                    "content": text or ("图片已由工具获取。" if images else ""),
+                    "content": model_output or ("图片已由工具获取。" if images else ""),
                 }
             )
             if images:
@@ -205,11 +214,13 @@ def to_responses_input(context: dict[str, Any]) -> list[dict[str, Any]]:
             blocks = [block for block in message.get("content", []) if isinstance(block, dict)]
             text = "\n".join(str(block.get("text") or "") for block in blocks if block.get("type") == "text")
             images = [block for block in blocks if block.get("type") == "image" and block.get("data")]
+            structured = message.get("structuredContent")
+            model_output = _model_tool_output(text, structured)
             items.append(
                 {
                     "type": "function_call_output",
                     "call_id": message.get("toolCallId"),
-                    "output": text or ("The tool returned an image." if images else ""),
+                    "output": model_output or ("The tool returned an image." if images else ""),
                 }
             )
             if images:

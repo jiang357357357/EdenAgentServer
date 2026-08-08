@@ -7,7 +7,7 @@ from mon_agent_core import AgentTool
 
 from .context import MonToolContext
 from .core_access import core_call, require_core_access
-from .result import text_result
+from .result import text_result, tool_failure
 
 
 async def send_external_email(context: MonToolContext, params: dict[str, Any]) -> dict[str, Any]:
@@ -15,7 +15,7 @@ async def send_external_email(context: MonToolContext, params: dict[str, Any]) -
     subject = str(params.get("subject") or "").strip()
     content = str(params.get("content") or "").strip()
     if not subject or not content:
-        raise RuntimeError("发送外部邮件需要 subject 和 content。")
+        raise tool_failure("invalid_arguments", "发送外部邮件需要 subject 和 content。")
     payload = {
         "subject": subject,
         "content": content,

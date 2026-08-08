@@ -12,6 +12,7 @@ from .catalog import (
 from .runtime import MonAgentSkillRuntime, create_skill_runtime
 from .installer import SkillInstallationService, load_installed_skill_definitions, owner_storage_key
 from .resources import ResolvedSkillResources, SkillCapabilityBinding, resolve_skill_resources
+from .watcher import SkillDirectoryWatcher
 
 __all__ = [
     "BASE_TOOL_NAMES_BY_PROFILE",
@@ -31,4 +32,5 @@ __all__ = [
     "ResolvedSkillResources",
     "SkillCapabilityBinding",
     "resolve_skill_resources",
+    "SkillDirectoryWatcher",
 ]

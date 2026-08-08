@@ -7,7 +7,7 @@ from mon_agent_core import AgentTool
 from .context import MonToolContext
 from .email import send_external_email
 from .qq import send_qq_message
-from .result import text_result
+from .result import text_result, tool_failure
 
 
 def create_notify_tools(context: MonToolContext) -> list[AgentTool]:
@@ -15,11 +15,11 @@ def create_notify_tools(context: MonToolContext) -> list[AgentTool]:
         title = str(params.get("title") or "").strip()
         message = str(params.get("message") or "").strip()
         if not message:
-            raise RuntimeError("通知用户需要 message。")
+            raise tool_failure("invalid_arguments", "通知用户需要 message。")
 
         requested_channel = str(params.get("channel") or "auto").strip().lower()
         if requested_channel not in {"auto", "qq", "email", "both"}:
-            raise RuntimeError("channel 必须是 auto、qq、email 或 both。")
+            raise tool_failure("invalid_arguments", "channel 必须是 auto、qq、email 或 both。")
         metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
         source_type = str(params.get("source_type") or metadata.get("source_type") or "").strip()
         source_id = str(params.get("source_id") or metadata.get("source_id") or "").strip()
@@ -90,7 +90,7 @@ def create_notify_tools(context: MonToolContext) -> list[AgentTool]:
 
         if not delivered_channels:
             errors = "; ".join(f"{item['channel']}: {item.get('error')}" for item in attempts)
-            raise RuntimeError(f"通知用户失败：{errors}")
+            raise tool_failure("delivery_failed", f"通知用户失败：{errors}", retryable=True, details={"errors": errors})
 
         body = "\n".join(
             [

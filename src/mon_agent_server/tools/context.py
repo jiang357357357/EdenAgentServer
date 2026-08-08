@@ -12,6 +12,7 @@ class MonToolContext:
     session_id: str | None = None
     core_client: CoreClient | None = None
     core_token: str | None = None
+    connector_manager: Any | None = None
     permissions: PermissionBroker | None = None
     questions: QuestionBroker | None = None
     screen_captures: ScreenCaptureBroker | None = None

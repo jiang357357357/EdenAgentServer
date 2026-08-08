@@ -5,7 +5,7 @@ from pathlib import Path
 
 from mon_agent_core import ResourceSnapshot, SkillResource
 
-from .catalog import SKILL_DEFINITIONS, SkillDefinition, skill_definitions_for_profile
+from .catalog import SkillDefinition, load_builtin_skill_definitions, skill_definitions_for_profile
 from .installer import load_installed_skill_definitions
 
 
@@ -38,9 +38,7 @@ class ResolvedSkillResources:
 
 
 def _definition_content(definition: SkillDefinition) -> str:
-    if definition.source == "installed":
-        return "\n\n".join(item.strip() for item in definition.instructions if item.strip())
-    return "\n".join(f"- {item.strip()}" for item in definition.instructions if item.strip())
+    return "\n\n".join(item.strip() for item in definition.instructions if item.strip())
 
 
 def _definition_resource(definition: SkillDefinition) -> SkillResource:
@@ -48,8 +46,7 @@ def _definition_resource(definition: SkillDefinition) -> SkillResource:
         location = str(Path(definition.file_path).expanduser().resolve(strict=False))
         base_dir = str(Path(location).parent)
     else:
-        location = f"builtin://skills/{definition.id}/SKILL.md"
-        base_dir = f"builtin://skills/{definition.id}"
+        raise ValueError(f"技能缺少真实 SKILL.md 路径：{definition.id}")
     return SkillResource(
         name=definition.id,
         display_name=definition.name,
@@ -72,7 +69,7 @@ def resolve_skill_resources(
     installed = load_installed_skill_definitions(workspace_root, owner_key) if owner_key else ()
     definitions = skill_definitions_for_profile(
         profile,
-        definitions=(*SKILL_DEFINITIONS, *installed),
+        definitions=(*load_builtin_skill_definitions(), *installed),
     )
     snapshot = ResourceSnapshot.from_skills(_definition_resource(definition) for definition in definitions)
     bindings = tuple(

@@ -25,7 +25,10 @@ class RunState:
         self.context_user_persisted = False
         self.error_message: str | None = None
         self.tool_inputs: dict[str, Any] = {}
+        self.tool_names: dict[str, str] = {}
+        self.tool_message_ids: dict[str, str] = {}
         self.tool_starts: dict[str, int] = {}
+        self.seen_tool_calls: set[str] = set()
         self.finished_tool_calls: set[str] = set()
         self.text_part_snapshots: dict[str, str] = {}
         self.speaker = dict(speaker or {})

@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 logger = get_logger("MonAgent", "SelfAwake")
 _SELF_AWAKE_JOBS: dict[str, dict[str, Any]] = {}
 _SELF_AWAKE_JOBS_LOCK = threading.Lock()
+_SELF_AWAKE_ASSISTANT_LOCKS: dict[str, threading.Lock] = {}
 _SELF_AWAKE_JOB_CACHE_LIMIT = 512
 
 
@@ -50,6 +51,104 @@ def self_awake_run_timeout_seconds() -> float:
 
 def self_awake_operation_id(request: dict[str, Any]) -> str:
     return str(request.get("idempotency_key") or request.get("event_id") or request.get("job_id") or "").strip()
+
+
+def persist_connector_chat_message(
+    app: AppState,
+    token: str | None,
+    context: dict[str, Any],
+    decision: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Append one connector-owned background turn to its captured chat session."""
+    if not token or str(context.get("trigger") or "") != "connector_event":
+        return None
+    session_id = str(context.get("chat_session_id") or "").strip()
+    assistant_id = decision.get("assistant_id")
+    character_id = decision.get("character_id")
+    if not session_id or assistant_id in (None, ""):
+        return None
+
+    restored = app.core_client.get_agent_session(token, session_id)
+    session = restored.get("info") if isinstance(restored.get("info"), dict) else None
+    if not session:
+        return None
+    participant_ids = list(session.get("participantAssistantIDs") or [])
+    if not any(str(item) == str(assistant_id) for item in participant_ids):
+        participant_ids.append(assistant_id)
+        app.core_client.update_agent_session_participants(token, session, participant_ids)
+
+    event = context.get("event") if isinstance(context.get("event"), dict) else {}
+    diary = decision.get("diary") if isinstance(decision.get("diary"), dict) else {}
+    action = decision.get("action") if isinstance(decision.get("action"), dict) else {}
+    event_type = str(event.get("event_type") or "event").strip()
+    body = str(diary.get("content") or action.get("message") or decision.get("current_desire") or "").strip()
+    text = f"【Lichess · {event_type}】\n{body}" if event.get("connector_key") == "lichess" else body
+    if not text:
+        return None
+
+    current = now_ms()
+    message_id = create_id("connector_msg")
+    message = {
+        "info": {
+            "id": message_id,
+            "role": "assistant",
+            "kind": "connector-event",
+            "speaker": {
+                "assistantID": assistant_id,
+                "characterID": character_id,
+            },
+            "orchestration": {
+                "source": "connector_event",
+                "connectorID": event.get("connector_id"),
+                "connectorEventID": event.get("connector_event_id"),
+                "externalEventID": event.get("external_event_id"),
+            },
+            "time": {"created": current, "completed": current},
+        },
+        "parts": [{
+            "id": f"{message_id}_text_0",
+            "messageID": message_id,
+            "sessionID": session_id,
+            "type": "text",
+            "text": text,
+            "time": {"start": current, "end": current},
+        }],
+    }
+    session["time"] = {**(session.get("time") or {}), "updated": current}
+    return app.core_client.sync_agent_message(token, session, message)
+
+
+def connector_conversation_history(
+    app: AppState,
+    token: str | None,
+    context: dict[str, Any],
+    *,
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    if not token or str(context.get("trigger") or "") != "connector_event":
+        return []
+    session_id = str(context.get("chat_session_id") or "").strip()
+    if not session_id:
+        return []
+    restored = app.core_client.get_agent_session(token, session_id)
+    result: list[dict[str, Any]] = []
+    for message in (restored.get("messages") or [])[-limit:]:
+        info = message.get("info") if isinstance(message.get("info"), dict) else {}
+        texts = [
+            str(part.get("text") or "").strip()
+            for part in message.get("parts") or []
+            if isinstance(part, dict) and part.get("type") == "text" and str(part.get("text") or "").strip()
+        ]
+        if not texts:
+            continue
+        speaker = info.get("speaker") if isinstance(info.get("speaker"), dict) else {}
+        result.append({
+            "role": info.get("role") or "assistant",
+            "assistant_id": speaker.get("assistantID"),
+            "created_at": (info.get("time") or {}).get("created"),
+            "text": "\n".join(texts)[:4000],
+        })
+    return result
 
 
 def memo_due_items(context: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -134,6 +233,7 @@ async def ensure_self_awake_notification(
             MonToolContext(
                 core_client=app.core_client,
                 core_token=token,
+                connector_manager=getattr(app, "connector_manager", None),
                 environment=context.get("environment") if isinstance(context.get("environment"), dict) else None,
                 operation_id=operation_id,
             ),
@@ -239,8 +339,11 @@ async def run_self_awake_agent(
             session_id=session_id,
             core_client=app.core_client,
             core_token=token,
+            connector_manager=getattr(app, "connector_manager", None),
             current_model_supports_images=runtime_config.supports_images,
             vision_ai_entity=(runtime_config.core or {}).get("visionAIEntity") if runtime_config.core else None,
+            screen_captures=getattr(app, "screen_captures", None),
+            camera_captures=getattr(app, "camera_captures", None),
             environment=context.get("environment") if isinstance(context.get("environment"), dict) else None,
             character=current_character,
             assistant=current_assistant,
@@ -279,7 +382,14 @@ async def run_self_awake_agent(
         )
 
     system_prompt = system_prompt_for(skill_runtime.active_skill_ids)
-    user_prompt = build_self_awake_task_prompt(context)
+    prompt_context = context
+    try:
+        history = await asyncio.to_thread(connector_conversation_history, app, token, context)
+        if history:
+            prompt_context = {**context, "conversation_history": history}
+    except Exception as error:
+        logger.warning(f"读取连接器绑定会话历史失败，继续按事件处理: {error}")
+    user_prompt = build_self_awake_task_prompt(prompt_context)
     logger.info(f"调用开始 session={session_id} model={runtime_config.label} tools={len(tools)} context_keys={list(context.keys())}")
     render_self_awake_request(
         app,
@@ -332,7 +442,8 @@ async def run_self_awake_agent(
                     notification["succeeded"] = True
                     notification["error"] = ""
                 elif not notification["succeeded"]:
-                    notification["error"] = str(event.get("error") or "通知工具调用失败")
+                    error_info = event.get("error") if isinstance(event.get("error"), dict) else {}
+                    notification["error"] = str(error_info.get("message") or "通知工具调用失败")
         elif event_type == "message_end":
             message = event.get("message") or {}
             if message.get("errorMessage"):
@@ -361,7 +472,7 @@ async def run_self_awake(request: dict[str, Any], app: AppState, token: str | No
     request = enrich_self_awake_request(request, app, token=token)
     started = now_ms()
     context = request.get("context") if isinstance(request.get("context"), dict) else {}
-    runtime_config = await resolve_self_awake_runtime_config(app, token)
+    runtime_config = await resolve_self_awake_runtime_config(app, token, request.get("assistant_id"))
     runtime_core = runtime_config.core or {}
     runtime_assistant = runtime_core.get("assistant") if isinstance(runtime_core.get("assistant"), dict) else {}
     runtime_character = runtime_core.get("character") if isinstance(runtime_core.get("character"), dict) else {}
@@ -478,6 +589,10 @@ def run_self_awake_and_persist_sync(
         except Exception as error:
             server_error = str(error)
             logger.error(f"异步自醒写入 Core 失败 run={async_run_id or '-'}: {error}", exc_info=True)
+        try:
+            persist_connector_chat_message(app, token, context, decision)
+        except Exception as error:
+            logger.error(f"连接器活动写入聊天会话失败 run={async_run_id or '-'}: {error}", exc_info=True)
     return {
         **decision,
         **contract_response_fields(request),
@@ -552,11 +667,15 @@ def start_self_awake_run_async(request: dict[str, Any], app: AppState, token: st
         accepted_response.update({"server_run_id": server_run_id, "server_error": server_error})
 
     def worker() -> None:
+        assistant_key = str(request.get("assistant_id") or "default")
+        with _SELF_AWAKE_JOBS_LOCK:
+            assistant_lock = _SELF_AWAKE_ASSISTANT_LOCKS.setdefault(assistant_key, threading.Lock())
         try:
-            with _SELF_AWAKE_JOBS_LOCK:
-                accepted_response["status"] = "running"
-            logger.info(f"异步自醒开始 run={async_run_id} context_keys={list(context.keys())}")
-            result = run_self_awake_and_persist_sync(request, app, token, async_run_id)
+            with assistant_lock:
+                with _SELF_AWAKE_JOBS_LOCK:
+                    accepted_response["status"] = "running"
+                logger.info(f"异步自醒开始 run={async_run_id} context_keys={list(context.keys())}")
+                result = run_self_awake_and_persist_sync(request, app, token, async_run_id)
             action_type = ((result.get("action") or {}) if isinstance(result.get("action"), dict) else {}).get("type") or ""
             after_minutes = (
                 ((result.get("next_wake") or {}) if isinstance(result.get("next_wake"), dict) else {}).get("after_minutes")

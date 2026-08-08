@@ -83,6 +83,9 @@ class RuntimePromptMixin:
         *,
         internal_batch_id: str | None = None,
         continuation_run_id: str | None = None,
+        active_assistant_id: int | str | None = None,
+        runtime_profile: str = "user_chat",
+        active_skill_ids: tuple[str, ...] = (),
     ) -> None:
         session = self.store.require_session(session_id)
         started = now_ms()
@@ -94,7 +97,11 @@ class RuntimePromptMixin:
         participants: list[dict[str, Any]] = []
         self.events.emit({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "busy"}}})
         if internal_batch_id:
-            user_message = self.store.append_internal_user_message(session_id, content_text(parts))
+            user_message = self.store.append_internal_user_message(
+                session_id,
+                content_text(parts),
+                persist_context=runtime_profile != "self_awake",
+            )
         else:
             user_message = self.store.append_user_message(session_id, content_text(parts), prompt_files(parts))
             self.emit_message(session_id, user_message["info"])
@@ -104,6 +111,11 @@ class RuntimePromptMixin:
         try:
             self._raise_if_cancelled(session_id)
             participants = [item for item in session["info"].get("participants", []) if item.get("assistantID") is not None]
+            if active_assistant_id not in (None, ""):
+                participants = [
+                    item for item in participants
+                    if str(item.get("assistantID")) == str(active_assistant_id)
+                ]
             primary_id = participants[0].get("assistantID") if participants else None
             director_config = await self._resolve_runtime_config(auth_token, primary_id)
             self._session_runtime_auth[session_id] = (auth_token, director_config.core)
@@ -113,7 +125,8 @@ class RuntimePromptMixin:
             if not participants:
                 raise RuntimeError("当前会话没有可用的参与助手。")
             await self.sync_core_session(session_id, auth_token, director_config.core)
-            await self.sync_core_message(session_id, user_message, auth_token, director_config.core)
+            if runtime_profile != "self_awake":
+                await self.sync_core_message(session_id, user_message, auth_token, director_config.core)
             environment, skill_owner_key = await self._resolve_user_context(auth_token)
             active_main_run_id = self._start_character_main_run(
                 session_id,
@@ -262,6 +275,8 @@ class RuntimePromptMixin:
                         environment=environment,
                         skill_owner_key=skill_owner_key,
                         handoff_from=handoff_from,
+                        runtime_profile=runtime_profile,
+                        active_skill_ids=active_skill_ids,
                     )
                     if message:
                         batch_id = internal_batch_id or self._open_coordination_batch_ids.get(session_id)
@@ -376,6 +391,9 @@ class RuntimePromptMixin:
             logger.info(f"session {session_id} companion turn completed in {now_ms() - started}ms")
         except TurnAborted:
             if active_run_state is not None:
+                self.fail_unfinished_tool_calls(
+                    session_id, active_run_state, "当前回合已由用户停止。", aborted=True
+                )
                 self.emit_runtime_thinking(session_id, active_run_state, "当前回合已停止。", done=True)
                 self.store.append_session_event(
                     session_id,
@@ -428,6 +446,7 @@ class RuntimePromptMixin:
             if active_run_state is None:
                 active_run_state = RunState(speaker=participants[0] if participants else {})
             if active_run_state:
+                self.fail_unfinished_tool_calls(session_id, active_run_state, error)
                 self.store.append_session_event(
                     session_id,
                     "turn_failed",
@@ -476,9 +495,12 @@ class RuntimePromptMixin:
                         f"{tool_policy.sandbox_mode} 策略禁止。"
                     ),
                 }
-            pattern = self.permission_pattern(tool_name, args)
-            if self.is_safe_tool(tool_name):
+            permission_request = context.get("permissionRequest")
+            if not isinstance(permission_request, dict):
                 return None
+            permission_name = str(permission_request.get("permission") or tool_name)
+            patterns = [str(item) for item in permission_request.get("patterns") or [tool_name]]
+            pattern = patterns[0]
             if self.permissions is None:
                 return {
                     "block": True,
@@ -486,7 +508,7 @@ class RuntimePromptMixin:
                 }
             permission_mode = self.permissions.mode_for_session(session_id)
             if (
-                self.permissions.is_always_allowed(tool_name, pattern, session_id)
+                self.permissions.is_always_allowed(permission_name, pattern, session_id)
                 or (permission_mode == "full_access" and tool_name != "bash")
             ):
                 return None
@@ -494,9 +516,9 @@ class RuntimePromptMixin:
                 self.permissions.ask,
                 {
                     "sessionID": session_id,
-                    "permission": tool_name,
-                    "patterns": [pattern],
-                    "always": self.permission_always_patterns(tool_name),
+                    "permission": permission_name,
+                    "patterns": patterns,
+                    "always": [str(item) for item in permission_request.get("always") or []],
                     "metadata": {"args": args, "toolName": tool_name, "agentPath": agent_path},
                     "tool": {
                         "messageID": run_state.assistant_message_id,

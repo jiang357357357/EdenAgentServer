@@ -7,6 +7,8 @@ from typing import Any
 def tool_payload(tools: list[Any]) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for tool in tools:
+        if getattr(tool, "exposure", "direct") != "direct":
+            continue
         output.append(
             {
                 "type": "function",
@@ -29,6 +31,7 @@ def responses_tool_payload(tools: list[Any], *, native_web_search: bool = False)
             "parameters": dict(tool.parameters or {"type": "object", "properties": {}}),
         }
         for tool in tools
+        if getattr(tool, "exposure", "direct") == "direct"
         if not (native_web_search and tool.name == "web")
     ]
     if native_web_search:

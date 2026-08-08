@@ -287,6 +287,57 @@ class RuntimePersistenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("第 2/3 次", runtime_message["parts"][0]["text"])
         self.assertIn("0.5 秒", runtime_message["parts"][0]["text"])
 
+    def test_failed_turn_closes_every_unfinished_tool_part(self):
+        store = SessionStore()
+        session = store.create_session("工具异常收尾")
+        emitter = EmitterHarness(store)
+        run_state = RunState()
+        assistant = {
+            "role": "assistant",
+            "timestamp": 1,
+            "provider": "provider",
+            "model": "model",
+            "content": [
+                {"type": "toolCall", "id": "bash-empty", "name": "bash", "arguments": {}},
+            ],
+            "stopReason": "tool_calls",
+        }
+
+        emitter.handle_agent_event(session["id"], {"type": "message_end", "message": assistant}, run_state)
+        emitter.fail_unfinished_tool_calls(session["id"], run_state, RuntimeError("整轮任务已终止"))
+
+        message = store.list_messages(session["id"])[0]
+        tool_part = next(part for part in message["parts"] if part["type"] == "tool")
+        self.assertEqual(tool_part["state"]["status"], "error")
+        self.assertIn("整轮任务已终止", tool_part["state"]["error"])
+        self.assertIn("bash-empty", run_state.finished_tool_calls)
+
+    def test_aborted_turn_marks_unfinished_tool_part_aborted(self):
+        store = SessionStore()
+        session = store.create_session("工具中止收尾")
+        emitter = EmitterHarness(store)
+        run_state = RunState()
+        assistant = {
+            "role": "assistant",
+            "timestamp": 1,
+            "provider": "provider",
+            "model": "model",
+            "content": [
+                {"type": "toolCall", "id": "long-call", "name": "bash", "arguments": {"command": "work"}},
+            ],
+            "stopReason": "tool_calls",
+        }
+
+        emitter.handle_agent_event(session["id"], {"type": "message_end", "message": assistant}, run_state)
+        emitter.fail_unfinished_tool_calls(
+            session["id"], run_state, RuntimeError("当前回合已由用户停止"), aborted=True
+        )
+
+        message = store.list_messages(session["id"])[0]
+        tool_part = next(part for part in message["parts"] if part["type"] == "tool")
+        self.assertEqual(tool_part["state"]["status"], "aborted")
+        self.assertIn("用户停止", tool_part["state"]["error"])
+
     def test_companion_speaker_and_orchestration_are_kept_on_message(self):
         store = SessionStore()
         session = store.create_session("多人编排")

@@ -12,7 +12,7 @@ from mon_agent_core import AgentTool
 
 from .context import MonToolContext
 from .core_access import core_call, require_core_access
-from .result import text_result
+from .result import text_result, tool_failure
 from .workspace import maybe_ask_outside_workspace
 
 MAX_CAPTURE_BYTES = 10 * 1024 * 1024
@@ -69,9 +69,9 @@ def create_vision_tools(root: Path, context: MonToolContext) -> list[AgentTool]:
 
         core, token = require_core_access(context)
         if not context.vision_ai_entity or not context.vision_ai_entity.get("id"):
-            raise RuntimeError("当前对话模型不支持图片，且没有可用的默认多模态 AI。")
+            raise tool_failure("capability_unavailable", "当前对话模型不支持图片，且没有可用的默认多模态 AI。")
         if context.vision_ai_entity.get("status") not in (None, "", "active"):
-            raise RuntimeError("当前对话模型不支持图片，且选定的多模态 AI 不可用。")
+            raise tool_failure("capability_unavailable", "当前对话模型不支持图片，且选定的多模态 AI 不可用。")
         result = await asyncio.to_thread(
             core_call,
             core.analyze_image,
@@ -94,7 +94,7 @@ def create_vision_tools(root: Path, context: MonToolContext) -> list[AgentTool]:
             },
         )
         if not result.get("success"):
-            raise RuntimeError(result.get("error") or result.get("error_message") or "Core Vision 分析失败。")
+            raise tool_failure("vision_failed", result.get("error") or result.get("error_message") or "Core Vision 分析失败。", retryable=True)
         return text_result(result.get("content") or result.get("summary") or "", {"source": source, "vision": result})
 
     async def analyze_image_execute(tool_call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
@@ -114,7 +114,7 @@ def create_vision_tools(root: Path, context: MonToolContext) -> list[AgentTool]:
                 "读取图片",
             )
             if not file_path.is_file():
-                raise RuntimeError(f"图片文件不存在: {file_path}")
+                raise tool_failure("not_found", f"图片文件不存在: {file_path}")
             mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
             if not mime_type.startswith("image/"):
                 raise RuntimeError(f"不是支持的图片类型: {file_path}")
@@ -143,12 +143,12 @@ def create_vision_tools(root: Path, context: MonToolContext) -> list[AgentTool]:
 
     async def analyze_screen_execute(tool_call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
         if not context.session_id:
-            raise RuntimeError("当前会话无法读取屏幕。")
+                raise tool_failure("capability_unavailable", "当前会话无法读取屏幕。")
         requested_source = str(params.get("source") or "auto").strip().lower()
         if requested_source not in {"auto", "desktop", "game"}:
             raise RuntimeError("屏幕来源无效，只支持 auto、desktop 或 game。")
         if not context.screen_captures:
-            raise RuntimeError("当前没有可用的桌面截图客户端。")
+                raise tool_failure("capability_unavailable", "当前没有可用的桌面截图客户端。")
 
         capture = await asyncio.to_thread(
             context.screen_captures.capture,
@@ -197,9 +197,9 @@ def create_vision_tools(root: Path, context: MonToolContext) -> list[AgentTool]:
         _on_update: Any = None,
     ) -> dict[str, Any]:
         if not context.session_id:
-            raise RuntimeError("当前会话无法读取摄像头。")
+                raise tool_failure("capability_unavailable", "当前会话无法读取摄像头。")
         if not context.camera_captures:
-            raise RuntimeError("当前没有可用的摄像头采集客户端。")
+                raise tool_failure("capability_unavailable", "当前没有可用的摄像头采集客户端。")
         facing_mode = str(params.get("facing_mode") or "user").strip().lower()
         if facing_mode not in {"user", "environment"}:
             raise RuntimeError("摄像头方向无效，只支持 user 或 environment。")

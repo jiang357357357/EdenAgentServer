@@ -91,8 +91,8 @@ def create_skill_creation_tools(context: MonToolContext) -> list[AgentTool]:
             name="create_skill",
             label="创建技能",
             description=(
-                "创建或更新一个完整的可复用技能包，支持 SKILL.md 说明以及 scripts、references、assets、agents 资源，"
-                "完成路径、大小、结构与工具校验后原子安装并立即生效。"
+                "创建或更新一个完整的可复用技能包，支持 SKILL.md、scripts、references、assets、agents，"
+                "以及 tools/*.json 声明的代码工具；完成结构校验和代码工具自测后原子安装并立即生效。"
             ),
             parameters={
                 "type": "object",
@@ -105,7 +105,7 @@ def create_skill_creation_tools(context: MonToolContext) -> list[AgentTool]:
                     "files": {
                         "type": "array",
                         "description": (
-                            "技能附属文件。路径必须位于 scripts/、references/、assets/ 或 agents/ 下；"
+                            "技能附属文件。路径必须位于 scripts/、references/、assets/、agents/、tools/ 或 tests/ 下；"
                             "文本使用 utf-8，二进制资源使用 base64。"
                         ),
                         "items": {
@@ -119,7 +119,11 @@ def create_skill_creation_tools(context: MonToolContext) -> list[AgentTool]:
                             "required": ["path", "content"],
                         },
                     },
-                    "tools": {"type": "array", "items": {"type": "string"}, "description": "需要绑定的现有工具名称。"},
+                    "tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "需要绑定的宿主工具名称或本包 tools/*.json 声明的代码工具名称。",
+                    },
                     "profiles": {
                         "type": "array",
                         "items": {"type": "string", "enum": ["user_chat", "self_awake"]},

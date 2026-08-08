@@ -25,7 +25,12 @@ from mon_agent_server.self_awake import (
 )
 from mon_agent_server.self_awake.permissions import self_awake_before_tool_call
 from mon_agent_server.self_awake.contract import normalize_self_awake_request
-from mon_agent_server.self_awake.runner import run_self_awake, run_self_awake_sync_with_watchdog
+from mon_agent_server.self_awake.runner import (
+    connector_conversation_history,
+    persist_connector_chat_message,
+    run_self_awake,
+    run_self_awake_sync_with_watchdog,
+)
 
 
 class FakeConfig:
@@ -64,6 +69,36 @@ class FakeCoreClient:
 class FakeApp:
     config = FakeConfig()
     core_client = FakeCoreClient()
+
+
+class FakeConnectorChatCoreClient:
+    def __init__(self):
+        self.participant_updates = []
+        self.messages = []
+
+    def get_agent_session(self, token, session_id):
+        return {
+            "info": {
+                "id": session_id,
+                "title": "最近会话",
+                "participantAssistantIDs": [1],
+                "participants": [{"assistantID": 1, "characterID": 11}],
+                "time": {"created": 1, "updated": 2},
+            },
+            "messages": [{
+                "info": {"role": "user", "time": {"created": 10}},
+                "parts": [{"type": "text", "text": "下棋时记得稳一点"}],
+            }],
+            "modelEvents": [],
+        }
+
+    def update_agent_session_participants(self, token, session, assistant_ids):
+        self.participant_updates.append((token, session["id"], assistant_ids))
+        return {}
+
+    def sync_agent_message(self, token, session, message):
+        self.messages.append((token, session, message))
+        return {"id": 99}
 
 
 class FakeProfileApp(FakeApp):
@@ -164,6 +199,48 @@ class DuplicateNotifyAgent(FakeAgent):
 
 
 class SelfAwakePromptTest(unittest.TestCase):
+    def test_connector_context_reads_bound_chat_history(self):
+        app = SimpleNamespace(core_client=FakeConnectorChatCoreClient())
+        history = connector_conversation_history(
+            app,
+            "token-1",
+            {"trigger": "connector_event", "chat_session_id": "session-latest"},
+        )
+        self.assertEqual(history[0]["role"], "user")
+        self.assertEqual(history[0]["text"], "下棋时记得稳一点")
+
+    def test_connector_activity_is_appended_to_captured_latest_session(self):
+        core = FakeConnectorChatCoreClient()
+        app = SimpleNamespace(core_client=core)
+        result = persist_connector_chat_message(
+            app,
+            "token-1",
+            {
+                "trigger": "connector_event",
+                "chat_session_id": "session-latest",
+                "event": {
+                    "connector_key": "lichess",
+                    "connector_id": 2,
+                    "connector_event_id": 7,
+                    "external_event_id": "game:g1:turn:2",
+                    "event_type": "gameState",
+                },
+            },
+            {
+                "assistant_id": 6,
+                "character_id": 16,
+                "diary": {"content": "我检查了局面并走出下一步。"},
+                "action": {"message": "已落子"},
+            },
+        )
+
+        self.assertEqual(result, {"id": 99})
+        self.assertEqual(core.participant_updates, [("token-1", "session-latest", [1, 6])])
+        _, session, message = core.messages[0]
+        self.assertEqual(session["id"], "session-latest")
+        self.assertEqual(message["info"]["speaker"], {"assistantID": 6, "characterID": 16})
+        self.assertEqual(message["parts"][0]["text"], "【Lichess · gameState】\n我检查了局面并走出下一步。")
+
     def test_outer_watchdog_returns_fallback_when_event_loop_is_blocked(self):
         def blocked_run(*_args):
             import time

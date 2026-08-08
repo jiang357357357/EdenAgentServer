@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
 from mon_agent_core import Agent, AgentOptions, AssistantMessageEventStream
 
 from mon_agent_server.prompts.builder import build_agent_tool_section
-from mon_agent_server.skills import SKILL_DEFINITIONS, create_skill_runtime
+from mon_agent_server.skills import SKILL_DEFINITIONS, SkillDirectoryWatcher, create_skill_runtime
 from mon_agent_server.tools import MonToolContext
 
 
@@ -32,6 +34,13 @@ def _tool_names(tools: list[Any]) -> set[str]:
 
 
 class SkillCatalogTest(unittest.TestCase):
+    def test_external_connector_skill_can_research_openttd_rules(self) -> None:
+        skill = next(item for item in SKILL_DEFINITIONS if item.id == "external-connectors")
+
+        self.assertIn("web", skill.tool_names)
+        self.assertIn("wiki.openttd.org", "\n".join(skill.instructions))
+        self.assertIn("docs.openttd.org", "\n".join(skill.instructions))
+
     def test_catalog_contains_the_bounded_skills(self) -> None:
         self.assertEqual(
             {skill.id for skill in SKILL_DEFINITIONS},
@@ -43,12 +52,46 @@ class SkillCatalogTest(unittest.TestCase):
                 "daily-context",
                 "visual-observation",
                 "external-communication",
+                "external-connectors",
                 "workspace-development",
                 "multi-agent",
                 "assistant-switching",
                 "skill-creator",
             },
         )
+
+    def test_builtin_skills_are_real_packages_loaded_from_disk(self) -> None:
+        for skill in SKILL_DEFINITIONS:
+            self.assertEqual(skill.source, "builtin")
+            self.assertEqual(skill.scope, "system")
+            self.assertIsNotNone(skill.file_path)
+            path = Path(str(skill.file_path))
+            self.assertTrue(path.is_file())
+            self.assertEqual(path.name, "SKILL.md")
+            self.assertIn("skills/builtin", path.as_posix())
+
+    def test_skill_directory_watcher_emits_one_change_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            received = threading.Event()
+            events: list[dict[str, Any]] = []
+
+            def emit(event: dict[str, Any]) -> None:
+                events.append(event)
+                received.set()
+
+            watcher = SkillDirectoryWatcher(workspace, emit, interval_seconds=0.02)
+            watcher.start()
+            try:
+                target = workspace / ".pi" / "skills" / "monagent" / "owner" / "sample"
+                target.mkdir(parents=True)
+                (target / "SKILL.md").write_text("---\nname: sample\ndescription: sample skill\n---\n", encoding="utf-8")
+                self.assertTrue(received.wait(timeout=1.0))
+            finally:
+                watcher.close()
+
+            self.assertEqual(events[-1]["type"], "tools.changed")
+            self.assertEqual(events[-1]["properties"]["reason"], "files_changed")
 
     def test_user_chat_exposes_stable_profile_tools(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
@@ -119,7 +162,7 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertIn("analyze_screen", names)
         self.assertIn("capture_camera", names)
         self.assertEqual(names, before)
-        self.assertIn("只拍摄完成当前请求所需的一帧", runtime.prompt_section())
+        self.assertIn("一次调用只采集当前一帧", runtime.prompt_section())
 
     def test_assistant_switching_loads_instructions_without_changing_tools(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
@@ -177,9 +220,17 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertNotIn("ask_user", names)
         self.assertNotIn("write", names)
         self.assertIn("send_qq_message", names)
+        self.assertIn("read_qq_messages", names)
         self.assertIn("send_external_email", names)
         self.assertIn("external-communication", runtime.loaded_skill_ids)
+        self.assertIn("external-connectors", runtime.loaded_skill_ids)
+        self.assertIn("claim_connector_events", names)
+        self.assertIn("execute_connector_action", names)
+        self.assertIn("visual-observation", runtime.loaded_skill_ids)
+        self.assertIn("analyze_screen", names)
+        self.assertIn("capture_camera", names)
         self.assertIn("联系当前用户时优先调用 contact_user", runtime.prompt_section())
+        self.assertIn("可主动使用 capture_camera", runtime.prompt_section())
         self.assertIn("web", names)
         self.assertIn("create_skill", names)
         self.assertIn("list_skills", names)
@@ -336,14 +387,51 @@ class SkillActivationLoopTest(unittest.IsolatedAsyncioTestCase):
         await agent.prompt("提醒我明天开会")
 
         self.assertEqual(len(observed_tools), 2)
-        self.assertIn("create_reminder", observed_tools[0])
-        self.assertIn("create_reminder", observed_tools[1])
-        self.assertIn("create_memo", observed_tools[1])
+        self.assertNotIn("create_reminder", observed_tools[0])
+        self.assertNotIn("create_reminder", observed_tools[1])
+        self.assertNotIn("create_memo", observed_tools[1])
         self.assertEqual(observed_tools[0], observed_tools[1])
         self.assertEqual(
             [message["role"] for message in agent.state.messages],
             ["user", "assistant", "toolResult", "assistant"],
         )
+
+    async def test_tool_search_reveals_deferred_tool_on_next_model_call(self) -> None:
+        runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
+        observed_tools: list[set[str]] = []
+
+        async def stream_fn(_model_value, context, _options):
+            observed_tools.append(_tool_names(context["tools"]))
+            if len(observed_tools) == 1:
+                return _done_stream({
+                    "role": "assistant",
+                    "content": [{
+                        "type": "toolCall",
+                        "id": "search-1",
+                        "name": "tool_search",
+                        "arguments": {"query": "OpenTTD game industries"},
+                    }],
+                    "stopReason": "tool_calls",
+                    "timestamp": 1,
+                })
+            return _done_stream({
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ready"}],
+                "stopReason": "stop",
+                "timestamp": 2,
+            })
+
+        agent = Agent(AgentOptions(
+            initial_state={"model": _model(), "tools": runtime.active_tools()},
+            stream_fn=stream_fn,
+            tool_execution="sequential",
+        ))
+        await agent.prompt("检查 OpenTTD")
+
+        self.assertNotIn("query_openttd", observed_tools[0])
+        self.assertIn("query_openttd", observed_tools[1])
+        result = next(message for message in agent.state.messages if message["role"] == "toolResult")
+        self.assertIn("query_openttd", result["content"][0]["text"])
 
 
 if __name__ == "__main__":

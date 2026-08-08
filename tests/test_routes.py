@@ -215,6 +215,50 @@ class RouteTest(unittest.TestCase):
         with self.assertRaises(CoreAuthenticationExpiredError):
             handler.event_stream_response()
 
+    def test_event_stream_reconciles_persisted_connectors(self):
+        calls = []
+
+        class CoreClient:
+            @staticmethod
+            def get_user_profile(token):
+                calls.append(("profile", token))
+
+        class ConnectorManager:
+            @staticmethod
+            def reconcile_user(token):
+                calls.append(("reconcile", token))
+
+        class Events:
+            @staticmethod
+            def stream():
+                return iter(())
+
+        class App:
+            core_client = CoreClient()
+            connector_manager = ConnectorManager()
+            events = Events()
+
+        class Output:
+            @staticmethod
+            def write(_body):
+                return None
+
+            @staticmethod
+            def flush():
+                return None
+
+        handler = object.__new__(AgentRequestHandler)
+        handler.headers = {"Authorization": "Bearer token-1"}
+        handler.server = type("Server", (), {"app": App()})()
+        handler.wfile = Output()
+        handler.send_response = lambda _status: None
+        handler.send_header = lambda _name, _value: None
+        handler.end_headers = lambda: None
+
+        handler.event_stream_response()
+
+        self.assertEqual(calls, [("profile", "token-1"), ("reconcile", "token-1")])
+
     def test_internal_self_awake_rejects_non_monos_event(self):
         class Handler:
             headers = {}

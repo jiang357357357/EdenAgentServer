@@ -172,6 +172,10 @@ class RuntimeEmitterMixin:
         if event_type == "tool_execution_start":
             call_id = event.get("toolCallId")
             tool_name = event.get("toolName")
+            run_state.seen_tool_calls.add(str(call_id))
+            run_state.tool_names[str(call_id)] = str(tool_name)
+            if run_state.assistant_message_id:
+                run_state.tool_message_ids[str(call_id)] = run_state.assistant_message_id
             run_state.tool_inputs[str(call_id)] = event.get("args")
             run_state.tool_starts[str(call_id)] = now_ms()
             self.emit_runtime_thinking(session_id, run_state, f"正在调用工具：{tool_name}。")
@@ -184,16 +188,43 @@ class RuntimeEmitterMixin:
                     {"status": "running", "input": event.get("args"), "time": {"start": run_state.tool_starts[str(call_id)]}},
                 )
             return
+        if event_type == "tool_execution_update":
+            call_id = str(event.get("toolCallId"))
+            tool_name = str(event.get("toolName") or run_state.tool_names.get(call_id) or "tool")
+            started = run_state.tool_starts.get(call_id) or now_ms()
+            body = text_from_tool_result(event.get("partialResult") or {})
+            if run_state.assistant_message_id:
+                self.emit_tool_part(
+                    session_id,
+                    run_state.assistant_message_id,
+                    call_id,
+                    tool_name,
+                    {
+                        "status": "running",
+                        "input": run_state.tool_inputs.get(call_id),
+                        "output": body,
+                        "time": {"start": started},
+                    },
+                )
+            return
         if event_type == "tool_execution_end":
             call_id = str(event.get("toolCallId"))
             tool_name = str(event.get("toolName"))
             started = run_state.tool_starts.get(call_id)
             body = text_from_tool_result(event.get("result") or {})
+            error_info = event.get("error") if isinstance(event.get("error"), dict) else {}
             run_state.finished_tool_calls.add(call_id)
             self.emit_runtime_thinking(session_id, run_state, f"工具 {tool_name} {'执行失败' if event.get('isError') else '执行完成'}。")
             if run_state.assistant_message_id:
                 state = (
-                    {"status": "error", "input": run_state.tool_inputs.get(call_id), "error": body or "工具执行失败。", "time": {"start": started, "end": now_ms()}}
+                    {
+                        "status": "error",
+                        "input": run_state.tool_inputs.get(call_id),
+                        "error": str(error_info.get("message") or body or "工具执行失败。"),
+                        "errorCode": str(error_info.get("code") or "execution_error"),
+                        "retryable": bool(error_info.get("retryable", False)),
+                        "time": {"start": started, "end": now_ms()},
+                    }
                     if event.get("isError")
                     else {"status": "completed", "input": run_state.tool_inputs.get(call_id), "output": body, "time": {"start": started, "end": now_ms()}}
                 )
@@ -260,13 +291,43 @@ class RuntimeEmitterMixin:
                     },
                 )
             elif block.get("type") == "toolCall" and block.get("id") not in run_state.finished_tool_calls:
+                tool_call_id = str(block.get("id"))
+                run_state.seen_tool_calls.add(tool_call_id)
+                run_state.tool_names[tool_call_id] = str(block.get("name") or "tool")
+                run_state.tool_message_ids[tool_call_id] = message_id
+                run_state.tool_inputs[tool_call_id] = block.get("arguments")
                 self.emit_tool_part(
                     session_id,
                     message_id,
-                    block.get("id"),
+                    tool_call_id,
                     block.get("name"),
                     {"status": "pending", "input": block.get("arguments"), "time": {"start": created}},
                 )
+
+    def fail_unfinished_tool_calls(
+        self, session_id: str, run_state: RunState, error: Any, *, aborted: bool = False
+    ) -> None:
+        if not run_state.assistant_message_id and not run_state.tool_message_ids:
+            return
+        completed = now_ms()
+        message = str(error) or "智能体运行已终止。"
+        for call_id in run_state.seen_tool_calls - run_state.finished_tool_calls:
+            message_id = run_state.tool_message_ids.get(call_id) or run_state.assistant_message_id
+            if not message_id:
+                continue
+            run_state.finished_tool_calls.add(call_id)
+            self.emit_tool_part(
+                session_id,
+                message_id,
+                call_id,
+                run_state.tool_names.get(call_id, "tool"),
+                {
+                    "status": "aborted" if aborted else "error",
+                    "input": run_state.tool_inputs.get(call_id),
+                    "error": message,
+                    "time": {"start": run_state.tool_starts.get(call_id), "end": completed},
+                },
+            )
 
     def emit_tool_part(self, session_id: str, message_id: str, tool_call_id: str, tool_name: str, state: dict[str, Any]) -> None:
         self.emit_part(

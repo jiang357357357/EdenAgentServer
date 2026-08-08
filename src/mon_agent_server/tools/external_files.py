@@ -9,7 +9,7 @@ from typing import Any, Iterable
 from mon_agent_core import AgentTool
 
 from .context import MonToolContext
-from .result import text_result
+from .result import text_result, tool_failure
 MAX_LIST_ENTRIES = 500
 MAX_FIND_RESULTS = 500
 MAX_READ_BYTES = 256 * 1024
@@ -21,10 +21,10 @@ MAX_GREP_MATCHES = 500
 def _validate_root(value: Any) -> Path:
     raw = str(value or "").strip()
     if not raw:
-        raise RuntimeError("root 必须是一个目录")
+        raise tool_failure("invalid_arguments", "root 必须是一个目录")
     root = Path(raw).expanduser().resolve(strict=True)
     if not root.is_dir():
-        raise RuntimeError(f"外部读取根目录不存在或不是目录: {raw}")
+        raise tool_failure("not_found", f"外部读取根目录不存在或不是目录: {raw}")
     return root
 
 
@@ -33,7 +33,7 @@ def _resolve_scoped(root: Path, relative_path: Any = ".", *, require_file: bool 
     candidate = Path(raw).expanduser()
     resolved = candidate.resolve(strict=True) if candidate.is_absolute() else (root / candidate).resolve(strict=True)
     if require_file and not resolved.is_file():
-        raise RuntimeError(f"目标不是普通文件: {raw}")
+        raise tool_failure("not_found", f"目标不是普通文件: {raw}")
     return resolved
 
 

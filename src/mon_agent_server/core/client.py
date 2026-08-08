@@ -42,6 +42,10 @@ class CoreClient:
     def self_awake_service_identity(user_id: int | str) -> CoreServiceIdentity:
         return CoreServiceIdentity("monagent", "self_awake:user_context", str(user_id))
 
+    @staticmethod
+    def connector_runtime_service_identity() -> CoreServiceIdentity:
+        return CoreServiceIdentity("monagent", "connector:runtime", "")
+
     def resolve_runtime_config(self, token: str | None) -> dict[str, Any] | None:
         if not token:
             return None
@@ -542,6 +546,75 @@ class CoreClient:
         raw = self._request(f"/api/agent/self-awake/diaries/{urllib.parse.quote(str(int(diary_id)))}/", token)
         return raw if isinstance(raw, dict) else {}
 
+    def list_connectors(self, token: str) -> list[dict[str, Any]]:
+        return unwrap_results(self._request("/api/agent/connectors/", token))
+
+    def register_connector(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        raw = self._request("/api/agent/connectors/", token, method="POST", payload=payload)
+        return raw if isinstance(raw, dict) else {}
+
+    def update_connector(self, token: str, connector_id: int | str, payload: dict[str, Any]) -> dict[str, Any]:
+        raw = self._request(
+            f"/api/agent/connectors/{urllib.parse.quote(str(connector_id))}/",
+            token,
+            method="PATCH",
+            payload=payload,
+        )
+        return raw if isinstance(raw, dict) else {}
+
+    def claim_connector_events(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        raw = self._request("/api/agent/connectors/claim_events/", token, method="POST", payload=payload)
+        return raw if isinstance(raw, dict) else {"events": []}
+
+    def complete_connector_events(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        raw = self._request("/api/agent/connectors/complete_events/", token, method="POST", payload=payload)
+        return raw if isinstance(raw, dict) else {}
+
+    def release_connector_events(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        raw = self._request("/api/agent/connectors/release_events/", token, method="POST", payload=payload)
+        return raw if isinstance(raw, dict) else {}
+
+    def publish_connector_event(self, token: str, connector_id: int | str, payload: dict[str, Any]) -> dict[str, Any]:
+        raw = self._request(
+            f"/api/agent/connectors/{urllib.parse.quote(str(connector_id))}/publish/",
+            token,
+            method="POST",
+            payload=payload,
+        )
+        return raw if isinstance(raw, dict) else {}
+
+    def bind_connector_thread_session(
+        self,
+        token: str,
+        connector_id: int | str,
+        thread_key: str,
+        session_external_id: str,
+    ) -> str:
+        raw = self._request(
+            f"/api/agent/connectors/{urllib.parse.quote(str(connector_id))}/bind_thread/",
+            token,
+            method="POST",
+            payload={"thread_key": thread_key, "session_external_id": session_external_id},
+        )
+        return str((raw or {}).get("session_external_id") or "")
+
+    def get_connector_event_status(self, token: str, event_id: int | str) -> dict[str, Any]:
+        raw = self._request(
+            "/api/agent/connectors/event_status/?"
+            + urllib.parse.urlencode({"event_id": str(event_id)}),
+            token,
+        )
+        return raw if isinstance(raw, dict) else {}
+
+    def report_connector_state(self, token: str, connector_id: int | str, payload: dict[str, Any]) -> dict[str, Any]:
+        raw = self._request(
+            f"/api/agent/connectors/{urllib.parse.quote(str(connector_id))}/report_state/",
+            token,
+            method="POST",
+            payload=payload,
+        )
+        return raw if isinstance(raw, dict) else {}
+
     def create_memo(self, token: str, payload: dict[str, Any]) -> Any:
         return self._request("/api/memos/", token, method="POST", payload=payload)
 
@@ -688,6 +761,13 @@ class CoreClient:
     def get_qq_bot_management(self, token: str, bot_id: int | str | None = None) -> Any:
         query = f"?{urllib.parse.urlencode({'bot_id': str(bot_id)})}" if bot_id not in (None, "") else ""
         return self._request(f"/api/devices/qq_bot/management/{query}", token)
+
+    def list_qq_messages(self, token: str, bot_id: int | str, params: dict[str, Any] | None = None) -> Any:
+        query = f"?{urllib.parse.urlencode(params or {})}" if params else ""
+        return self._request(
+            f"/api/devices/qq_bot/{urllib.parse.quote(str(bot_id))}/messages/{query}",
+            token,
+        )
 
     def send_qq_message(self, token: str, bot_id: int | str, payload: dict[str, Any]) -> Any:
         return self._request(

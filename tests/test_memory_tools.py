@@ -13,7 +13,13 @@ class FakeMemoryCore:
         self.last_query = None
 
     def remember_memory(self, token, payload):
-        memory = {"id": len(self.memories) + 1, **payload, "status": "active"}
+        memory = {
+            "id": len(self.memories) + 1,
+            **payload,
+            "status": "active",
+            "created_at": "2026-08-05T16:00:00+08:00",
+            "updated_at": "2026-08-05T16:00:00+08:00",
+        }
         self.memories.append(memory)
         return memory
 
@@ -50,6 +56,7 @@ class MemoryToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(core.memories[0]["agent_character"], 7)
         found = await by_name(root, "search_memories").execute("call", {"query": "简洁"})
         self.assertEqual(found["details"]["count"], 1)
+        self.assertIn("写入时间（本地）: 2026-08-05 16:00:00", found["content"][0]["text"])
 
         child = create_memory_tools(MonToolContext(core_client=core, core_token="token", agent_path="/root/child"))
         with self.assertRaisesRegex(RuntimeError, "子智能体只能检索"):

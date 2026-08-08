@@ -197,6 +197,92 @@ class SkillInstallationServiceTest(unittest.TestCase):
         preview = asyncio.run(inspect())
         self.assertEqual(preview["skillName"], "async-skill")
 
+    def test_existing_runtime_refreshes_after_skill_creation(self) -> None:
+        runtime = create_skill_runtime(
+            self.workspace,
+            profile="user_chat",
+            owner_key=self.owner_key,
+        )
+        self.assertNotIn("late-skill", runtime.available_skill_ids)
+        self.service.create_generated(
+            self.owner_id,
+            "token",
+            "local",
+            {
+                "name": "late-skill",
+                "description": "Use to verify same-run skill discovery after creation.",
+                "instructions": "报告技能已经在当前运行中可见。",
+                "tools": ["read"],
+                "scope": "project",
+            },
+        )
+        loaded = runtime.load(["late-skill"])
+        self.assertTrue(loaded["success"])
+        self.assertIn("late-skill", runtime.available_skill_ids)
+
+    def test_generated_skill_registers_and_executes_code_tool(self) -> None:
+        runtime = create_skill_runtime(
+            self.workspace,
+            profile="user_chat",
+            owner_key=self.owner_key,
+        )
+        installed = self.service.create_generated(
+            self.owner_id,
+            "token",
+            "local",
+            {
+                "name": "echo-tool-skill",
+                "description": "Use to verify a skill-defined runtime code tool.",
+                "instructions": "调用 echo_skill_value 返回输入内容。",
+                "tools": ["echo_skill_value"],
+                "scope": "project",
+                "files": [
+                    {
+                        "path": "scripts/echo.py",
+                        "content": (
+                            "#!/usr/bin/env python3\n"
+                            "import json, sys\n"
+                            "data = json.load(sys.stdin)\n"
+                            "print(json.dumps({'text': 'echo:' + str(data.get('value', ''))}))\n"
+                        ),
+                        "executable": True,
+                    },
+                    {
+                        "path": "tools/echo.json",
+                        "content": json.dumps(
+                            {
+                                "schemaVersion": 1,
+                                "name": "echo_skill_value",
+                                "label": "回显技能值",
+                                "description": "Return the supplied value through the skill process.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"value": {"type": "string"}},
+                                    "required": ["value"],
+                                },
+                                "outputSchema": {
+                                    "type": "object",
+                                    "properties": {"text": {"type": "string"}},
+                                    "required": ["text"],
+                                },
+                                "command": ["python3", "scripts/echo.py"],
+                                "testCommand": ["python3", "scripts/echo.py"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+            },
+        )
+        self.assertEqual(installed["skillName"], "echo-tool-skill")
+        loaded = runtime.load(["echo-tool-skill"])
+        self.assertTrue(loaded["success"])
+        tool = next(tool for tool in runtime.active_tools() if tool.name == "echo_skill_value")
+        self.assertEqual(tool.exposure, "deferred")
+        self.assertEqual(tool.output_schema["required"], ["text"])
+        result = asyncio.run(tool.execute("call-1", {"value": "hello"}))
+        self.assertEqual(result["details"]["result"]["text"], "echo:hello")
+
     def test_generated_skill_supports_scripts_references_assets_and_agent_metadata(self) -> None:
         installed = self.service.create_generated(
             self.owner_id,

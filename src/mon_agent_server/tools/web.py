@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from mon_agent_core import AgentTool
 
-from .result import text_result, truncate
+from .result import text_result, tool_failure, truncate
 from .context import MonToolContext
 from .web_fetcher import extract_html, fetch_web_page
 from .web_providers import (
@@ -223,7 +223,7 @@ def web_search(
         try:
             response = search_provider.search(request)
             if not response.results:
-                raise RuntimeError("搜索服务未返回可用结果")
+                raise tool_failure("temporarily_unavailable", "搜索服务未返回可用结果", retryable=True)
             result = {
                 **response.as_dict(),
                 "query": request.query,
@@ -238,7 +238,7 @@ def web_search(
     details = "; ".join(
         f"{SEARCH_PROVIDER_LABELS.get(item['provider'], item['provider'])}: {item['error']}" for item in attempts
     )
-    raise RuntimeError(f"所有网页搜索入口均不可用：{details}")
+    raise tool_failure("temporarily_unavailable", f"所有网页搜索入口均不可用：{details}", retryable=True)
 
 
 def _search_text(result: dict[str, Any]) -> str:
@@ -285,7 +285,7 @@ def create_web_tools(context: MonToolContext | None = None) -> list[AgentTool]:
                 async with asyncio.timeout(total_timeout):
                     fetched = await asyncio.to_thread(fetch_web_page, url)
             except TimeoutError as error:
-                raise RuntimeError(f"网页打开超时：目标页面未在 {total_timeout:g} 秒内返回。") from error
+                raise tool_failure("timeout", f"网页打开超时：目标页面未在 {total_timeout:g} 秒内返回。", retryable=True) from error
             body = truncate(
                 f"{'标题: ' + fetched['title'] + chr(10) + chr(10) if fetched.get('title') else ''}{fetched['body']}",
                 max_chars,
@@ -360,11 +360,11 @@ def create_web_tools(context: MonToolContext | None = None) -> list[AgentTool]:
                 }
                 if not search_results:
                     details = "; ".join(f"{query}: {error}" for query, error in query_errors.items())
-                    raise RuntimeError(f"所有独立查询均失败：{details}")
+                    raise tool_failure("temporarily_unavailable", f"所有独立查询均失败：{details}", retryable=True)
                 result = _merge_search_results(search_results, max_results)
                 result["query_errors"] = query_errors
         except TimeoutError as error:
-            raise RuntimeError(f"网页搜索总超时：所有搜索入口未在 {total_timeout:g} 秒内返回可用结果。") from error
+            raise tool_failure("timeout", f"网页搜索总超时：所有搜索入口未在 {total_timeout:g} 秒内返回可用结果。", retryable=True) from error
         for item in result["results"]:
             item["ref_id"] = _put_resource(context, "search", item)
             item["source_id"] = item["ref_id"]

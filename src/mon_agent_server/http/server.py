@@ -100,6 +100,10 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
     def event_stream_response(self) -> None:
         token = require_core_token(self.headers)
         self.app.core_client.get_user_profile(token)
+        # The SSE connection is the authenticated user's long-lived presence.
+        # Reconcile persisted connectors here so they recover after an Agent
+        # restart without requiring the model to invoke a tool again.
+        self.app.connector_manager.reconcile_user(token)
         self.send_response(HTTPStatus.OK)
         self.send_header("content-type", "text/event-stream")
         self.send_header("cache-control", "no-cache")

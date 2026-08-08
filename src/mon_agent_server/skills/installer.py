@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import binascii
-from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import re
@@ -17,11 +15,11 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from mon_agent_core.harness import LocalExecutionEnv, load_skills
 
 from ..core import CoreClient
 from ..tools import MonToolContext, create_mon_agent_tools
-from .catalog import SKILLS_BY_ID, SkillDefinition
+from .catalog import SKILLS_BY_ID, load_builtin_skill_definitions
+from .package import SkillDefinition, load_skill_package
 
 INSTALLATION_MANIFEST = ".monagent-skill.json"
 SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -29,7 +27,7 @@ MAX_FILES = 512
 MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_BYTES = 50 * 1024 * 1024
 PREVIEW_TTL_SECONDS = 15 * 60
-GENERATED_RESOURCE_ROOTS = {"scripts", "references", "assets", "agents"}
+GENERATED_RESOURCE_ROOTS = {"scripts", "references", "assets", "agents", "tools", "tests"}
 GENERATED_FORBIDDEN_NAMES = {
     "README.md",
     "INSTALLATION_GUIDE.md",
@@ -87,7 +85,7 @@ def _generated_file_path(value: Any) -> Path:
         or any(part in {"", "."} or part.startswith(".") for part in relative.parts)
     ):
         raise ValueError(
-            "技能资源路径必须位于 scripts/、references/、assets/ 或 agents/ 下，且不能包含隐藏目录或上级目录"
+            "技能资源路径必须位于 scripts/、references/、assets/、agents/、tools/ 或 tests/ 下，且不能包含隐藏目录或上级目录"
         )
     if relative.name in GENERATED_FORBIDDEN_NAMES:
         raise ValueError(f"技能包不应包含额外文档：{relative.name}")
@@ -194,25 +192,6 @@ def _write_agent_metadata(
     _validate_agent_metadata(root, skill_name)
 
 
-def _read_frontmatter(skill_file: Path) -> dict[str, Any]:
-    text = skill_file.read_text(encoding="utf-8")
-    if not text.startswith("---"):
-        return {}
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        return {}
-    parsed = yaml.safe_load(parts[1]) or {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def _monagent_metadata(frontmatter: dict[str, Any]) -> dict[str, Any]:
-    metadata = frontmatter.get("metadata")
-    if not isinstance(metadata, dict):
-        return {}
-    value = metadata.get("monagent")
-    return value if isinstance(value, dict) else {}
-
-
 def _string_tuple(value: Any, fallback: tuple[str, ...] = ()) -> tuple[str, ...]:
     if not isinstance(value, list):
         return fallback
@@ -280,51 +259,13 @@ def _clone_source(uri: str, reference: str, destination: Path) -> None:
 
 
 def _definition_from_directory(root: Path, known_tools: set[str]) -> tuple[SkillDefinition, str]:
-    coroutine = load_skills(LocalExecutionEnv(root), str(root))
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        result = asyncio.run(coroutine)
-    else:
-        # Candidate creation is exposed as an agent tool and therefore normally
-        # runs inside AgentCore's event loop. Keep the synchronous installer API
-        # while giving the async skill loader its own loop in a worker thread.
-        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="skill-validation") as executor:
-            result = executor.submit(asyncio.run, coroutine).result()
-    skills = result.get("skills") or []
-    diagnostics = result.get("diagnostics") or []
-    if len(skills) != 1:
-        message = "; ".join(str(item.get("message") or item) for item in diagnostics) or "必须且只能包含一个有效技能"
-        raise ValueError(message)
-    skill = skills[0]
-    skill_file = Path(skill.file_path)
-    frontmatter = _read_frontmatter(skill_file)
-    metadata = _monagent_metadata(frontmatter)
-    name = str(skill.name).strip()
-    if not SKILL_NAME_PATTERN.fullmatch(name):
-        raise ValueError("技能 name 只能包含小写字母、数字和单个连字符")
-    if name in SKILLS_BY_ID:
-        raise ValueError(f"技能名称与内置技能冲突：{name}")
-    tool_names = _string_tuple(metadata.get("tools"))
-    unknown_tools = sorted(set(tool_names) - known_tools)
-    if unknown_tools:
-        raise ValueError(f"技能声明了未知工具：{', '.join(unknown_tools)}")
-    profiles = _string_tuple(metadata.get("profiles"), ("user_chat",))
-    invalid_profiles = sorted(set(profiles) - {"user_chat", "self_awake"})
-    if invalid_profiles:
-        raise ValueError(f"技能声明了未知运行档案：{', '.join(invalid_profiles)}")
-    display_name = str(metadata.get("display_name") or frontmatter.get("display-name") or name).strip()
-    version = str(metadata.get("version") or frontmatter.get("version") or "0.0.0").strip()
-    definition = SkillDefinition(
-        id=name,
-        name=display_name,
-        description=str(skill.description).strip(),
-        tool_names=tool_names,
-        instructions=(str(skill.content).strip(),),
-        profiles=profiles,
-        model_invocable=not bool(skill.disable_model_invocation),
+    definition, version = load_skill_package(
+        root,
         source="installed",
-        file_path=str(skill_file),
+        scope="user",
+        known_tools=known_tools,
+        reserved_names=set(SKILLS_BY_ID),
+        run_tests=True,
     )
     return definition, version
 
@@ -637,7 +578,7 @@ class SkillInstallationService:
         roots = skill_roots(self.workspace_root, owner_key)
         records = self._reconcile_local_records(token, device_id, roots, records)
         items: list[dict[str, Any]] = []
-        for definition in SKILLS_BY_ID.values():
+        for definition in load_builtin_skill_definitions():
             items.append({
                 "id": f"builtin:{definition.id}",
                 "skillName": definition.id,

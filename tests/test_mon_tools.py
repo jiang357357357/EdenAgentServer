@@ -62,6 +62,7 @@ class FakeQQCoreClient:
     def __init__(self):
         self.management_args = None
         self.send_args = None
+        self.message_args = None
 
     def get_qq_bot_management(self, token, bot_id=None):
         self.management_args = (token, bot_id)
@@ -92,6 +93,32 @@ class FakeQQCoreClient:
                 "target_type": payload["target_type"],
                 "target_qq_number": payload["target_qq_number"],
                 "queued": True,
+            },
+        }
+
+    def list_qq_messages(self, token, bot_id, params):
+        self.message_args = (token, bot_id, params)
+        return {
+            "success": True,
+            "data": {
+                "messages": [
+                    {
+                        "id": 12,
+                        "role": "assistant",
+                        "sender": "凯伊",
+                        "content": "我会记得。",
+                        "created_at": "2026-08-06T00:02:00+08:00",
+                    },
+                    {
+                        "id": 11,
+                        "role": "user",
+                        "sender": "老师(123456)",
+                        "content": "别忘了明天的事。",
+                        "created_at": "2026-08-06T00:01:00+08:00",
+                    },
+                ],
+                "has_more": True,
+                "next_before_id": 11,
             },
         }
 
@@ -222,6 +249,26 @@ class FakeHTTPResponse:
 
 
 class MonToolsTest(unittest.IsolatedAsyncioTestCase):
+    def test_monagent_tool_catalog_has_strict_unique_contracts(self):
+        tools = create_mon_agent_tools(Path.cwd(), MonToolContext(), "user_chat")
+        names = [tool.name for tool in tools]
+        self.assertEqual(len(names), len(set(names)))
+        for tool in tools:
+            self.assertEqual(tool.parameters.get("type"), "object", tool.name)
+            if tool.name not in {"read", "ls", "grep", "find", "write", "edit", "apply_patch", "bash", "write_stdin"}:
+                self.assertIs(tool.parameters.get("additionalProperties"), False, tool.name)
+                if tool.name == "ask_user":
+                    self.assertIsNone(tool.timeout_seconds)
+                else:
+                    self.assertGreater(tool.timeout_seconds, 0, tool.name)
+            self.assertIn(tool.source, {"builtin", "coding", "connector"})
+            if tool.name == "bash":
+                request = tool.permission_request({"command": "git status"})
+                self.assertEqual(request["permission"], "bash")
+                self.assertEqual(request["patterns"], ["git status"])
+            if tool.name == "read":
+                self.assertIsNone(tool.permission_request({"path": "README.md"}))
+
     async def test_notify_auto_routes_normal_events_to_qq(self):
         with TemporaryDirectory() as temp_dir:
             tools = create_mon_agent_tools(Path(temp_dir), MonToolContext(operation_id="awake-job-1"), "self_awake")
@@ -466,6 +513,50 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertIn("默认目标: 是", result["content"][0]["text"])
             self.assertTrue(result["details"]["resolved"]["used_default_target"])
+
+    async def test_read_qq_messages_uses_default_target_and_returns_chronological_history(self):
+        with TemporaryDirectory() as temp_dir:
+            core = FakeQQCoreClient()
+            tools = create_mon_agent_tools(
+                Path(temp_dir),
+                MonToolContext(core_client=core, core_token="token-qq"),
+                "user_chat",
+            )
+
+            result = await tool_by_name(tools, "read_qq_messages").run("call_history", {"limit": 20})
+
+            self.assertEqual(
+                core.message_args,
+                (
+                    "token-qq",
+                    7,
+                    {"target_type": "user", "target_qq_number": "123456", "limit": 20},
+                ),
+            )
+            text = result["content"][0]["text"]
+            self.assertLess(text.index("别忘了明天的事"), text.index("我会记得"))
+            self.assertIn("更早消息游标: 11", text)
+            self.assertTrue(result["details"]["has_more"])
+
+    async def test_read_qq_messages_defaults_to_ten_items(self):
+        with TemporaryDirectory() as temp_dir:
+            core = FakeQQCoreClient()
+            tools = create_mon_agent_tools(
+                Path(temp_dir),
+                MonToolContext(core_client=core, core_token="token-qq"),
+                "user_chat",
+            )
+
+            await tool_by_name(tools, "read_qq_messages").run("call_history_default", {})
+
+            self.assertEqual(
+                core.message_args,
+                (
+                    "token-qq",
+                    7,
+                    {"target_type": "user", "target_qq_number": "123456", "limit": 10},
+                ),
+            )
 
     async def test_mark_triggered_auto_completes_one_time_reminder(self):
         with TemporaryDirectory() as temp_dir:

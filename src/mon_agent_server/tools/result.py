@@ -2,11 +2,25 @@ from __future__ import annotations
 
 from typing import Any
 
+from mon_agent_core import ToolExecutionError
+
+
+def tool_failure(
+    code: str,
+    message: str,
+    *,
+    retryable: bool = False,
+    details: Any = None,
+) -> ToolExecutionError:
+    """Create a typed tool failure without changing successful business results."""
+    return ToolExecutionError(code, message, retryable=retryable, details=details)
+
 
 def text_result(content: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
-    result: dict[str, Any] = {"content": [{"type": "text", "text": content}]}
+    result: dict[str, Any] = {"content": [{"type": "text", "text": content}], "success": True}
     if details is not None:
         result["details"] = details
+        result["structuredContent"] = details
     return result
 
 

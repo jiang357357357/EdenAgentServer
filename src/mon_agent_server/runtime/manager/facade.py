@@ -105,6 +105,7 @@ class MonAgentRuntime(
         environment: dict[str, Any] | None = None,
         camera_captures: CameraCaptureBroker | None = None,
         skill_installer: Any | None = None,
+        connector_manager: Any | None = None,
     ) -> None:
         self.workspace_root = workspace_root.resolve()
         self.store = store
@@ -116,6 +117,7 @@ class MonAgentRuntime(
         self.camera_captures = camera_captures
         self.environment = environment
         self.skill_installer = skill_installer
+        self.connector_manager = connector_manager
         self.subagent_catalog = load_subagent_catalog(self.workspace_root)
         self.subagent_repository = SubagentThreadRepository.for_workspace(self.workspace_root)
         self.subagent_max_threads = _bounded_env_int(
@@ -148,11 +150,17 @@ class MonAgentRuntime(
         self.model_request_timeout_seconds = _bounded_env_int(
             "MON_AGENT_MODEL_TIMEOUT_SECONDS", 120, minimum=10, maximum=1_800
         )
+        self.turn_timeout_seconds = _bounded_env_int(
+            "MON_AGENT_TURN_TIMEOUT_SECONDS", 1_800, minimum=60, maximum=14_400
+        )
         self._subagent_global_semaphore = asyncio.Semaphore(self.subagent_max_concurrent_global)
         self._host = RuntimeHost()
         self._running: dict[str, Future[Any]] = {}
         self._running_kinds: dict[str, str] = {}
         self._pending_user_prompts: dict[str, list[tuple[list[dict[str, Any]], str | None]]] = {}
+        self._pending_proactive_prompts: dict[
+            str, list[tuple[list[dict[str, Any]], str | None, int | str, str, int | str]]
+        ] = {}
         self._agents: dict[str, Agent] = {}
         self._cancelled_sessions: set[str] = set()
         self._agent_controls: dict[str, AgentControl] = {}

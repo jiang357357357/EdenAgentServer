@@ -8,7 +8,7 @@ from mon_agent_server.brokers import CameraCaptureBroker
 from mon_agent_server.core import CoreAuthenticationExpiredError
 from mon_agent_server.events import EventBus
 from mon_agent_server.http.routes.camera_capture import handle_camera_capture
-from mon_agent_server.runtime.permissions import RuntimePermissionMixin
+from mon_agent_server.tools import create_mon_agent_tools
 from mon_agent_server.tools.context import MonToolContext
 from mon_agent_server.tools.vision import create_vision_tools
 
@@ -144,7 +144,9 @@ class CameraCaptureToolTest(unittest.IsolatedAsyncioTestCase):
             await tool_by_name(tools, "capture_camera").run("tool-camera", {})
 
     def test_camera_tool_requires_runtime_permission(self):
-        self.assertFalse(RuntimePermissionMixin.is_safe_tool("capture_camera"))
+        tools = create_mon_agent_tools(Path.cwd(), MonToolContext(), "user_chat")
+        request = tool_by_name(tools, "capture_camera").permission_request({})
+        self.assertEqual(request["permission"], "capture_camera")
 
 
 class CameraCaptureRouteTest(unittest.TestCase):

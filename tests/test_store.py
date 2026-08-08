@@ -4,6 +4,23 @@ from mon_agent_server.store import SessionStore
 
 
 class StoreTest(unittest.TestCase):
+    def test_ephemeral_internal_message_does_not_replace_conversation_focus(self):
+        store = SessionStore()
+        session = store.create_session("")
+        store.append_user_message(session["id"], "我们来下指导棋", [])
+        before_messages = store.list_messages(session["id"])
+        before_context = store.context_messages(session["id"])
+
+        transient = store.append_internal_user_message(
+            session["id"],
+            "处理连接器事件",
+            persist_context=False,
+        )
+
+        self.assertTrue(transient["info"]["hidden"])
+        self.assertEqual(store.list_messages(session["id"]), before_messages)
+        self.assertEqual(store.context_messages(session["id"]), before_context)
+
     def test_delete_session_removes_all_in_memory_data(self):
         store = SessionStore()
         session = store.create_session("")
@@ -94,7 +111,7 @@ class StoreTest(unittest.TestCase):
         self.assertTrue(older["hasMore"])
         self.assertEqual(older["nextCursor"], messages[1]["info"]["id"])
 
-    def test_ui_hydration_does_not_create_model_context(self):
+    def test_legacy_hydration_recovers_only_conversation_text(self):
         store = SessionStore()
         session = store.create_session("")
         store.hydrate_messages(
@@ -105,13 +122,28 @@ class StoreTest(unittest.TestCase):
                     "parts": [
                         {"id": "part_1", "messageID": "msg_1", "sessionID": session["id"], "type": "text", "text": "第一条"}
                     ],
-                }
+                },
+                {
+                    "info": {"id": "msg_runtime", "role": "assistant", "kind": "runtime", "time": {"created": 2}},
+                    "parts": [
+                        {"id": "part_runtime", "messageID": "msg_runtime", "sessionID": session["id"], "type": "text", "text": "正在调用工具"}
+                    ],
+                },
+                {
+                    "info": {"id": "msg_reply", "role": "assistant", "phase": "final", "time": {"created": 3}},
+                    "parts": [
+                        {"id": "part_reply", "messageID": "msg_reply", "sessionID": session["id"], "type": "text", "text": "我记住了"}
+                    ],
+                },
             ],
         )
 
         stored = store.require_session(session["id"])
         self.assertEqual(stored["info"]["title"], "第一条")
-        self.assertEqual(store.context_messages(session["id"]), [])
+        self.assertEqual(
+            [(item["role"], item["content"][0]["text"]) for item in store.context_messages(session["id"])],
+            [("user", "第一条"), ("assistant", "我记住了")],
+        )
 
     def test_structured_agent_messages_are_canonical_after_hydration(self):
         store = SessionStore()

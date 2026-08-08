@@ -84,6 +84,7 @@ class RuntimeLifecycleMixin:
             raise RuntimeError("智能体正在处理当前任务，不能删除会话。")
         with self._lock:
             self._pending_user_prompts.pop(session_id, None)
+            self._pending_proactive_prompts.pop(session_id, None)
             self._agents.pop(session_id, None)
             self._cancelled_sessions.discard(session_id)
             self._agent_controls.pop(session_id, None)
@@ -176,7 +177,7 @@ class RuntimeLifecycleMixin:
     def prompt_async(self, session_id: str, parts: list[dict[str, Any]], auth_token: str | None) -> None:
         with self._lock:
             if session_id in self._running:
-                if self._running_kinds.get(session_id) == "aggregation":
+                if self._running_kinds.get(session_id) in {"aggregation", "proactive"}:
                     queue = self._pending_user_prompts.setdefault(session_id, [])
                     if len(queue) >= self.pending_user_prompt_limit:
                         raise RuntimeError(f"等待处理的用户消息已达到上限 {self.pending_user_prompt_limit}。")
@@ -187,6 +188,59 @@ class RuntimeLifecycleMixin:
             self._running[session_id] = future
             self._running_kinds[session_id] = "user"
             future.add_done_callback(lambda completed: self._finish_submission(session_id, completed))
+
+    def proactive_prompt_async(
+        self,
+        session_id: str,
+        parts: list[dict[str, Any]],
+        auth_token: str | None,
+        *,
+        assistant_id: int | str,
+        operation_id: str,
+        connector_event_id: int | str,
+    ) -> None:
+        with self._lock:
+            if session_id in self._running:
+                queue = self._pending_proactive_prompts.setdefault(session_id, [])
+                if any(str(item[2]) == str(assistant_id) for item in queue):
+                    return
+                if len(queue) >= self.pending_user_prompt_limit:
+                    raise RuntimeError(f"等待处理的主动事件已达到上限 {self.pending_user_prompt_limit}。")
+                queue.append((parts, auth_token, assistant_id, operation_id, connector_event_id))
+                return
+            future = self._host.submit(self._run_proactive_prompt(
+                session_id, parts, auth_token, assistant_id, operation_id, connector_event_id
+            ))
+            self._running[session_id] = future
+            self._running_kinds[session_id] = "proactive"
+            future.add_done_callback(lambda completed: self._finish_submission(session_id, completed))
+
+    async def _run_proactive_prompt(
+        self,
+        session_id: str,
+        parts: list[dict[str, Any]],
+        auth_token: str | None,
+        assistant_id: int | str,
+        operation_id: str,
+        connector_event_id: int | str,
+    ) -> None:
+        if auth_token:
+            event = await asyncio.to_thread(
+                self.core_client.get_connector_event_status,
+                auth_token,
+                connector_event_id,
+            )
+            if event.get("status") != "pending":
+                return
+        await self._run_prompt(
+            session_id,
+            parts,
+            auth_token,
+            internal_batch_id=operation_id,
+            active_assistant_id=assistant_id,
+            runtime_profile="self_awake",
+            active_skill_ids=("external-connectors",),
+        )
 
     def compact_async(self, session_id: str, custom_instructions: str | None, auth_token: str | None) -> None:
         instructions = str(custom_instructions or "").strip()
@@ -211,6 +265,7 @@ class RuntimeLifecycleMixin:
         finally:
             should_schedule = False
             pending_user: tuple[list[dict[str, Any]], str | None] | None = None
+            pending_proactive: tuple[list[dict[str, Any]], str | None, int | str, str, int | str] | None = None
             with self._lock:
                 if self._running.get(session_id) is completed:
                     self._running.pop(session_id, None)
@@ -224,9 +279,24 @@ class RuntimeLifecycleMixin:
                         if not queued:
                             self._pending_user_prompts.pop(session_id, None)
                     else:
-                        should_schedule = True
+                        proactive_queue = self._pending_proactive_prompts.get(session_id) or []
+                        if proactive_queue:
+                            pending_proactive = proactive_queue.pop(0)
+                            if not proactive_queue:
+                                self._pending_proactive_prompts.pop(session_id, None)
+                        else:
+                            should_schedule = True
             if pending_user is not None:
                 self.prompt_async(session_id, pending_user[0], pending_user[1])
+            elif pending_proactive is not None:
+                self.proactive_prompt_async(
+                    session_id,
+                    pending_proactive[0],
+                    pending_proactive[1],
+                    assistant_id=pending_proactive[2],
+                    operation_id=pending_proactive[3],
+                    connector_event_id=pending_proactive[4],
+                )
             elif should_schedule:
                 self._schedule_ready_aggregation(session_id)
 

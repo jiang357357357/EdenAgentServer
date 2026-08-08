@@ -17,6 +17,7 @@ from mon_agent_core import (
     AgentOptions,
     AgentResult,
     AgentSnapshot,
+    AssistantMessageEventStream,
     AgentThread,
     TERMINAL_AGENT_STATUSES,
     fork_messages,
@@ -92,6 +93,8 @@ class RuntimeCharacterMixin:
         environment: dict[str, Any] | None,
         skill_owner_key: str | None,
         handoff_from: dict[str, Any] | None = None,
+        runtime_profile: str = "user_chat",
+        active_skill_ids: tuple[str, ...] = (),
     ) -> tuple[dict[str, Any] | None, str, dict[str, Any] | None]:
         files = prompt_files(parts)
         character = (runtime_config.core or {}).get("character") if runtime_config.core else None
@@ -177,6 +180,7 @@ class RuntimeCharacterMixin:
             session_id=session_id,
             core_client=self.core_client,
             core_token=auth_token,
+            connector_manager=self.connector_manager,
             permissions=self.permissions,
             questions=self.questions,
             screen_captures=self.screen_captures,
@@ -185,6 +189,7 @@ class RuntimeCharacterMixin:
             vision_ai_entity=(runtime_config.core or {}).get("visionAIEntity") if runtime_config.core else None,
             environment=environment,
             character=character,
+            assistant=(runtime_config.core or {}).get("assistant") if runtime_config.core else None,
             current_character_action=current_character_action,
             emit_event=self.events.emit,
             set_character_action=lambda state: self.store.set_character_action(session_id, state),
@@ -230,8 +235,8 @@ class RuntimeCharacterMixin:
         skill_runtime = create_skill_runtime(
             self.workspace_root,
             tool_context,
-            profile="user_chat",
-            active_skill_ids=(),
+            profile=runtime_profile,
+            active_skill_ids=active_skill_ids,
             owner_key=skill_owner_key,
             tool_filter=(
                 None
@@ -304,7 +309,7 @@ class RuntimeCharacterMixin:
             active_character_id = active_character.get("id") if isinstance(active_character, dict) else None
             prompt = build_agent_system_prompt(
                 active_core,
-                source="user_chat",
+                source="self_awake" if runtime_profile == "self_awake" else "user_chat",
                 current_character_action=self.store.get_character_action(session_id, active_character_id),
                 recent_character_actions=(
                     self.store.get_character_action_history(session_id, active_character_id)
@@ -456,20 +461,85 @@ class RuntimeCharacterMixin:
             turn_id=run_state.run_id,
         )
         self.emit_runtime_thinking(session_id, run_state, "正在发送给 Python AgentCore，并等待模型回复。")
+
+        model_label = runtime_config.label or str(runtime_config.model.get("id") or "unknown")
+
+        async def stream_with_request_timeout(
+            model: dict[str, Any], context: dict[str, Any], options: dict[str, Any]
+        ) -> AssistantMessageEventStream:
+            target = AssistantMessageEventStream()
+
+            async def relay() -> None:
+                try:
+                    async with asyncio.timeout(self.model_request_timeout_seconds):
+                        source = await stream_openai_compatible(model, context, options)
+                        async for event in source:
+                            target.push(event)
+                except TimeoutError:
+                    logger.error(
+                        "主智能体单次模型请求超时: session={} model={} timeout={}s",
+                        session_id,
+                        model_label,
+                        self.model_request_timeout_seconds,
+                    )
+                    target.push(
+                        {
+                            "type": "error",
+                            "error": {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": ""}],
+                                "api": model.get("api", "openai-completions"),
+                                "provider": model.get("provider", "unknown"),
+                                "model": model.get("id", "unknown"),
+                                "stopReason": "error",
+                                "errorMessage": (
+                                    f"模型请求超时：{model_label} 的单次请求在 "
+                                    f"{self.model_request_timeout_seconds} 秒内没有完成响应。"
+                                ),
+                                "timestamp": now_ms(),
+                            },
+                        }
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    target.push(
+                        {
+                            "type": "error",
+                            "error": {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": ""}],
+                                "api": model.get("api", "openai-completions"),
+                                "provider": model.get("provider", "unknown"),
+                                "model": model.get("id", "unknown"),
+                                "stopReason": "error",
+                                "errorMessage": str(error),
+                                "timestamp": now_ms(),
+                            },
+                        }
+                    )
+
+            target.attach_producer(asyncio.create_task(relay()))
+            return target
+
+        agent.stream_fn = stream_with_request_timeout
         try:
-            async with asyncio.timeout(self.model_request_timeout_seconds):
+            async with asyncio.timeout(self.turn_timeout_seconds):
                 await agent.prompt({"role": "user", "timestamp": now_ms(), "content": content})
         except TimeoutError as error:
-            model_label = runtime_config.label or str(runtime_config.model.get("id") or "unknown")
+            agent.abort()
             logger.error(
-                "主智能体模型请求超时: session={} model={} timeout={}s",
+                "主智能体整轮任务超时: session={} model={} timeout={}s",
                 session_id,
                 model_label,
-                self.model_request_timeout_seconds,
+                self.turn_timeout_seconds,
             )
             raise RuntimeError(
-                f"模型请求超时：{model_label} 在 {self.model_request_timeout_seconds} 秒内没有完成响应。"
+                f"整轮任务超时：{model_label} 在 {self.turn_timeout_seconds} 秒内没有完成任务。"
             ) from error
+        except BaseException:
+            agent.abort()
+            raise
         self._raise_if_cancelled(session_id)
         if run_state.error_message:
             raise RuntimeError(run_state.error_message)

@@ -8,7 +8,8 @@ from mon_agent_core import AgentTool
 
 from .context import MonToolContext
 from .core_access import core_call, require_core_access
-from .result import text_result
+from .datetime_utils import format_local_datetime
+from .result import text_result, tool_failure
 
 
 _SECRET_PATTERN = re.compile(
@@ -19,7 +20,7 @@ _SECRET_PATTERN = re.compile(
 
 def _require_root_writer(context: MonToolContext) -> None:
     if context.agent_path != "/root":
-        raise RuntimeError("子智能体只能检索长期记忆；写入、修改和遗忘必须由父智能体执行。")
+        raise tool_failure("blocked", "子智能体只能检索长期记忆；写入、修改和遗忘必须由父智能体执行。")
 
 
 def _safe_content(value: Any) -> str:
@@ -32,7 +33,18 @@ def _safe_content(value: Any) -> str:
 
 
 def _memory_line(memory: dict[str, Any]) -> str:
-    return f"#{memory.get('id')} [{memory.get('kind') or 'fact'}] {memory.get('content') or ''}"
+    created_raw = memory.get("created_at")
+    updated_raw = memory.get("updated_at")
+    created_text = format_local_datetime(created_raw)
+    updated_text = format_local_datetime(updated_raw)
+    lines = [
+        f"#{memory.get('id')} [{memory.get('kind') or 'fact'}]",
+        f"   写入时间（本地）: {created_text}",
+    ]
+    if updated_raw and updated_text != created_text:
+        lines.append(f"   更新时间（本地）: {updated_text}")
+    lines.append(f"   内容: {memory.get('content') or ''}")
+    return "\n".join(lines)
 
 
 def _agent_character_id(context: MonToolContext, params: dict[str, Any]) -> int | str | None:

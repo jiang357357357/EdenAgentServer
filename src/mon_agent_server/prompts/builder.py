@@ -283,6 +283,7 @@ def build_agent_tool_section(
             "工具是你观察和完成任务的方式，不是你对外表达的身份。",
             "你可以使用工具读取、搜索和修改当前工作区文件。",
             "需要实时或外部网页信息时使用 web：先 search，必要时用 open 阅读来源、用 find 定位页面内容；重要事实应对应工具返回的实际 URL。",
+            "凡是回答服务器、连接器、游戏、进程、文件或其他会变化对象的当前状态，必须先在本轮调用对应观察工具，并只依据本轮返回值作答；工具不可用时明确说明无法确认，不得用旧对话、记忆或推测冒充实时状态。",
             vision_instruction,
             "你可以使用 get_calendar_context 查询节日、农历和近期特殊日期；可以使用 get_weather 查询实时天气。",
             "当用户询问天气、温度、降水或出行影响时优先使用 get_weather；询问节日、农历、今天是什么日子时优先使用 get_calendar_context。",
@@ -331,7 +332,10 @@ def build_agent_system_prompt(
     if assistant_context:
         sections.extend(["# 助手配置", assistant_context])
     memories = [
-        str(item.get("content") or "").strip()
+        (
+            f"[写入时间 {item.get('created_at') or '未知'}"
+            + f"] {str(item.get('content') or '').strip()}"
+        )
         for item in (relevant_memories or [])
         if isinstance(item, dict) and str(item.get("content") or "").strip()
     ]
@@ -417,6 +421,7 @@ def build_self_awake_task_prompt(context: dict[str, Any] | None = None) -> str:
     event = context.get("event") if isinstance(context.get("event"), dict) else {}
     memo_due = str(event.get("reason") or context.get("trigger") or "").strip().lower() == "memo_due"
     due_memos_checked = context.get("due_memos_checked") is True
+    connector_event = str(event.get("reason") or context.get("trigger") or "").strip().lower() == "connector_event"
     return "\n\n".join(
         [
             "本轮事件来源：系统自醒。",
@@ -432,6 +437,11 @@ def build_self_awake_task_prompt(context: dict[str, Any] | None = None) -> str:
                 "本轮是 memo_due 精准唤醒：必须联系用户，并明确说出到期任务标题与内容，不得改成泛化的系统自检通知。调用 contact_user 时使用 source_type=memo，source_id 使用主提醒 id。发送成功后的状态回写由运行时统一处理；不要调用 mark_memo_triggered、complete_memo、archive_memo 或 snooze_memo。"
                 if memo_due
                 else "本轮不是 memo_due 精准唤醒，按普通自醒规则处理。"
+            ),
+            (
+                "本轮由外部连接器事件即时唤醒。conversation_history 是该外部线程在开局时绑定的聊天会话近期历史；把其中用户要求、关系语境和你此前的处理作为本轮连续上下文，但棋局事实以最新连接器事件为准。必须调用 claim_connector_events 领取当前助手的事件；逐项根据事实执行必要动作。每项处理成功后使用 finish_connector_events 确认完成；动作失败或暂时无法判断时以 retry=true 释放，不能静默丢弃。Lichess 对局事件具有时效性，优先于日记和普通观察。"
+                if connector_event
+                else "本轮不是连接器事件唤醒。"
             ),
             "把建议的下次醒来时间写入最终 JSON 的 next_wake，由 MonOs 统一调度；当前后台轮次不要调用 set_self_awake_timer。",
             "observations 写 2 到 5 条事实；diary 写角色自己的工作日记，可以分段、有角色语气和细微情绪，但必须基于 observations 和工具结果。",

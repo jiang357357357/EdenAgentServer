@@ -42,10 +42,21 @@ def runtime_config_from_model(
     )
 
 
-async def resolve_self_awake_runtime_config(app: AppState, token: str | None) -> SelfAwakeRuntimeConfig:
+async def resolve_self_awake_runtime_config(
+    app: AppState,
+    token: str | None,
+    assistant_id: int | str | None = None,
+) -> SelfAwakeRuntimeConfig:
     if token:
         try:
-            core = await asyncio.to_thread(app.core_client.resolve_runtime_config, token)
+            if assistant_id not in (None, ""):
+                core = await asyncio.to_thread(
+                    app.core_client.resolve_runtime_config_for_assistant,
+                    token,
+                    assistant_id,
+                )
+            else:
+                core = await asyncio.to_thread(app.core_client.resolve_runtime_config, token)
             if core:
                 return runtime_config_from_model(*core_model(core), core)
         except Exception as error:

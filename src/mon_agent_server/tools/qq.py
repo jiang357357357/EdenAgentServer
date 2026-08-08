@@ -9,7 +9,7 @@ from ..core import CoreClient
 from .context import MonToolContext
 from .core_access import core_call, require_core_access
 from .datetime_utils import format_local_datetime
-from .result import text_result
+from .result import text_result, tool_failure
 
 
 def qq_bot_line(bot: dict[str, Any]) -> str:
@@ -33,6 +33,14 @@ def qq_target_line(item: dict[str, Any], target_type: str) -> str:
     label = str(item.get("permission_label") or item.get("access_reason") or "")
     approved = "已批准" if item.get("approved") else "未批准"
     return f"[{target_type}] {name} ({qq_number}) - {approved}{' / ' + label if label else ''}"
+
+
+def qq_message_line(item: dict[str, Any]) -> str:
+    role = "角色" if str(item.get("role") or "") == "assistant" else "用户"
+    sender = str(item.get("sender") or role).strip()
+    created_at = format_local_datetime(item.get("created_at"))
+    content = str(item.get("content") or "").strip() or "[空消息]"
+    return f"[{created_at}] {role} · {sender}: {content}"
 
 
 def qq_management_data(raw: Any) -> dict[str, Any]:
@@ -76,21 +84,21 @@ async def qq_resolve_send_target(core: CoreClient, token: str, params: dict[str,
     management, raw_management = await qq_get_management(core, token, bot_id if bot_id not in (None, "") else None)
     resolved_bot_id = bot_id or qq_management_bot_id(management)
     if resolved_bot_id in (None, ""):
-        raise RuntimeError("未设置默认 QQBot，请先在 QQBot 管理页设置默认机器人，或显式提供 bot_id。")
+        raise tool_failure("not_configured", "未设置默认 QQBot，请先在 QQBot 管理页设置默认机器人，或显式提供 bot_id。")
 
     explicit_target_type = str(params.get("target_type") or "").strip()
     explicit_target_number = str(params.get("target_qq_number") or "").strip()
     if explicit_target_number:
         return int(resolved_bot_id), explicit_target_type or "user", explicit_target_number, None, raw_management
     if explicit_target_type and explicit_target_type != "user":
-        raise RuntimeError(f"发送到 {explicit_target_type} 时必须显式提供 target_qq_number。")
+        raise tool_failure("invalid_arguments", f"发送到 {explicit_target_type} 时必须显式提供 target_qq_number。")
 
     default_target = qq_default_send_target(management)
     if not default_target:
-        raise RuntimeError("未指定 QQ 发送目标，也未设置默认 QQBot 超级管理员。请在 QQBot 权限里把一个好友设为超级管理员，或显式提供 target_qq_number。")
+        raise tool_failure("not_configured", "未指定 QQ 发送目标，也未设置默认 QQBot 超级管理员。请在 QQBot 权限里把一个好友设为超级管理员，或显式提供 target_qq_number。")
     target_number = str(default_target.get("target_qq_number") or "").strip()
     if not target_number:
-        raise RuntimeError("默认 QQBot 超级管理员缺少 QQ 号，无法发送。")
+        raise tool_failure("not_configured", "默认 QQBot 超级管理员缺少 QQ 号，无法发送。")
     return int(resolved_bot_id), str(default_target.get("target_type") or "user"), target_number, default_target, raw_management
 
 
@@ -98,7 +106,7 @@ async def send_qq_message(context: MonToolContext, params: dict[str, Any]) -> di
     core, token = require_core_access(context)
     content = str(params.get("content") or "").strip()
     if not content:
-        raise RuntimeError("发送 QQ 消息需要 content。")
+        raise tool_failure("invalid_arguments", "发送 QQ 消息需要 content。")
     bot_id, target_type, target_qq_number, default_target, raw_management = await qq_resolve_send_target(core, token, params)
     payload = {
         "target_type": target_type,
@@ -161,7 +169,7 @@ def create_qq_tools(context: MonToolContext) -> list[AgentTool]:
         data, raw = await qq_get_management(core, token, params.get("bot_id"))
         bot_id = qq_management_bot_id(data)
         if bot_id in (None, ""):
-            raise RuntimeError("未设置默认 QQBot，请先在 QQBot 管理页设置默认机器人，或显式提供 bot_id。")
+            raise tool_failure("not_configured", "未设置默认 QQBot，请先在 QQBot 管理页设置默认机器人，或显式提供 bot_id。")
         permissions = data.get("permissions") if isinstance(data, dict) else {}
         include_unapproved = bool(params.get("include_unapproved"))
         contacts = permissions.get("allowed_contacts") if isinstance(permissions, dict) else []
@@ -181,6 +189,40 @@ def create_qq_tools(context: MonToolContext) -> list[AgentTool]:
         return text_result(
             f"QQBot #{bot_id} 可发送目标：\n\n好友：\n{contact_text}\n\n群聊：\n{group_text}{default_text}",
             {"contacts": contacts, "groups": groups, "raw": raw},
+        )
+
+    async def read_qq_messages_execute(_tool_call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
+        core, token = require_core_access(context)
+        bot_id, target_type, target_qq_number, default_target, _raw_management = await qq_resolve_send_target(core, token, params)
+        limit = max(1, min(int(params.get("limit") or 10), 100))
+        query: dict[str, Any] = {
+            "target_type": target_type,
+            "target_qq_number": target_qq_number,
+            "limit": limit,
+        }
+        if params.get("before_id") not in (None, ""):
+            query["before_id"] = int(params["before_id"])
+        raw = await asyncio.to_thread(core_call, core.list_qq_messages, token, bot_id, query)
+        data = raw.get("data") if isinstance(raw, dict) else raw
+        data = data if isinstance(data, dict) else {}
+        messages = data.get("messages") if isinstance(data.get("messages"), list) else []
+        chronological = list(reversed(messages))
+        target_label = "群聊" if target_type == "group" else "私聊"
+        history = "\n".join(qq_message_line(item) for item in chronological) or "暂无消息记录。"
+        next_before_id = data.get("next_before_id")
+        paging = f"\n\n更早消息游标: {next_before_id}" if next_before_id not in (None, "") else ""
+        return text_result(
+            f"QQ {target_label}历史 · Bot #{bot_id} · {target_qq_number}\n\n{history}{paging}",
+            {
+                "bot_id": bot_id,
+                "target_type": target_type,
+                "target_qq_number": target_qq_number,
+                "used_default_target": bool(default_target),
+                "messages": messages,
+                "has_more": bool(data.get("has_more")),
+                "next_before_id": next_before_id,
+                "synchronization": data.get("synchronization") if isinstance(data.get("synchronization"), dict) else {},
+            },
         )
 
     async def send_qq_message_execute(_tool_call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
@@ -212,6 +254,22 @@ def create_qq_tools(context: MonToolContext) -> list[AgentTool]:
                 },
             },
             qq_bot_targets_execute,
+        ),
+        AgentTool(
+            "read_qq_messages",
+            "读取 QQ 消息历史",
+            "读取角色通过 QQBot 与指定好友或群聊的真实消息历史。省略 bot 和目标时读取默认 QQBot 与超级管理员的私聊；结果按时间顺序展示，并可用 before_id 继续读取更早消息。",
+            {
+                "type": "object",
+                "properties": {
+                    "bot_id": {"type": "number", "description": "Core 中的 QQBot 数据库 ID；不填时使用默认 QQBot。"},
+                    "target_type": {"type": "string", "enum": ["user", "group"], "description": "目标类型；与目标都不填时使用默认超级管理员私聊。"},
+                    "target_qq_number": {"type": "string", "description": "好友 QQ 号或群号；不填时使用默认超级管理员。"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "读取条数，默认 10，最多 100。"},
+                    "before_id": {"type": "integer", "description": "上一页返回的更早消息游标。"},
+                },
+            },
+            read_qq_messages_execute,
         ),
         AgentTool(
             "send_qq_message",

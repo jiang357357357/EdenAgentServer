@@ -758,6 +758,7 @@ class RuntimeCoordinationMixin:
                 session_id=thread.snapshot.root_session_id,
                 core_client=self.core_client,
                 core_token=auth_token,
+                connector_manager=self.connector_manager,
                 permissions=self.permissions,
                 questions=self.questions,
                 screen_captures=self.screen_captures,
@@ -1031,7 +1032,7 @@ class RuntimeCoordinationMixin:
         properties = {
             key: value
             for key, value in event.items()
-            if key in {"toolCallId", "toolName", "args", "isError", "attempt", "maxAttempts", "delayMs", "reason"}
+            if key in {"toolCallId", "toolName", "args", "isError", "error", "attempt", "maxAttempts", "delayMs", "reason"}
         }
         self.events.emit(
             {

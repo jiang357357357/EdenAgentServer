@@ -85,6 +85,8 @@ def self_awake_before_tool_call(context_data: dict[str, Any] | None):
         "get_calendar_context",
         "get_weather",
         "analyze_image",
+        "analyze_screen",
+        "capture_camera",
         "create_memo",
         "create_reminder",
         "list_memos",
@@ -98,11 +100,18 @@ def self_awake_before_tool_call(context_data: dict[str, Any] | None):
         "external_email_status",
         "qq_bot_list",
         "qq_bot_targets",
+        "read_qq_messages",
         "send_qq_message",
         "send_external_email",
         "contact_user",
         "create_skill",
         "list_skills",
+        "list_connectors",
+        "register_connector",
+        "set_connector_state",
+        "claim_connector_events",
+        "finish_connector_events",
+        "execute_connector_action",
     }
     file_tools = {"read", "ls", "grep", "find"}
 

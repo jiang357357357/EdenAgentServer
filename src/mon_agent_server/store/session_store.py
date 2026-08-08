@@ -312,9 +312,14 @@ class SessionStore:
                 merged_by_id.values(),
                 key=lambda item: item.get("info", {}).get("time", {}).get("created", 0),
             )
-            # Display messages are only a UI projection. They must never be
-            # converted back into model context.
-            session["modelEvents"] = deepcopy(model_events or [])
+            canonical_events = deepcopy(model_events or [])
+            # Sessions created before the canonical event stream was added may
+            # still have a complete Core message projection but no modelEvents.
+            # Recover only conversational text. Runtime/reasoning/tool/hidden
+            # projections remain UI-only and are deliberately excluded.
+            if not canonical_events:
+                canonical_events = self._recover_conversation_events(session["messages"])
+            session["modelEvents"] = canonical_events
             latest = max((item.get("info", {}).get("time", {}).get("created", 0) for item in session["messages"]), default=0)
             if latest:
                 session["info"]["time"]["updated"] = max(session["info"]["time"]["updated"], latest)
@@ -322,6 +327,41 @@ class SessionStore:
                 title = title_from_messages(session["messages"])
                 if title:
                     session["info"]["title"] = title
+
+    @staticmethod
+    def _recover_conversation_events(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        recovered: list[dict[str, Any]] = []
+        for message in messages:
+            info = message.get("info") or {}
+            if info.get("hidden") or info.get("internal") or info.get("kind") == "runtime":
+                continue
+            role = str(info.get("role") or "")
+            if role not in {"user", "assistant"}:
+                continue
+            # Tool-call assistant projections are intermediate model messages,
+            # not character replies. Only final/legacy assistant text is safe
+            # to recover without the original canonical tool-result pairing.
+            if role == "assistant" and info.get("phase") in {"tool", "streaming"}:
+                continue
+            text = message_text(message)
+            if not text:
+                continue
+            model_message: dict[str, Any] = {
+                "role": role,
+                "timestamp": int((info.get("time") or {}).get("created") or 0),
+                "content": [{"type": "text", "text": text}],
+            }
+            speaker = info.get("speaker")
+            if role == "assistant" and isinstance(speaker, dict):
+                model_message["contextSpeaker"] = deepcopy(speaker)
+            recovered.append(
+                ContextManager.event_for_message(
+                    model_message,
+                    sequence=len(recovered) + 1,
+                    turn_id=str(info.get("runID") or "") or None,
+                ).dump()
+            )
+        return recovered
 
     def upsert_message(self, session_id: str, info: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -414,7 +454,13 @@ class SessionStore:
             self._touch(session)
         return message
 
-    def append_internal_user_message(self, session_id: str, text: str) -> dict[str, Any]:
+    def append_internal_user_message(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        persist_context: bool = True,
+    ) -> dict[str, Any]:
         """Append a model-visible user message that is hidden from chat history."""
 
         current = now_ms()
@@ -443,14 +489,15 @@ class SessionStore:
                 }
             ],
         }
-        with self._lock:
-            session = self.require_session(session_id)
-            session["messages"].append(message)
-            sequence = len(session["modelEvents"]) + 1
-            session["modelEvents"].append(
-                ContextManager.event_for_message(model_message, sequence=sequence).dump()
-            )
-            self._touch(session)
+        if persist_context:
+            with self._lock:
+                session = self.require_session(session_id)
+                session["messages"].append(message)
+                sequence = len(session["modelEvents"]) + 1
+                session["modelEvents"].append(
+                    ContextManager.event_for_message(model_message, sequence=sequence).dump()
+                )
+                self._touch(session)
         return deepcopy(message)
 
     def append_compaction_message(

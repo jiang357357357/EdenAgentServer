@@ -8,7 +8,7 @@ from mon_agent_core import AgentTool
 from ..ids import now_ms
 from .context import MonToolContext
 from .core_access import core_call, require_core_access
-from .result import text_result
+from .result import text_result, tool_failure
 
 HOLD_ACTION = "保持当前"
 MOTION_CODES = {
@@ -150,7 +150,7 @@ async def _load_character_action_data(context: MonToolContext) -> tuple[dict[str
         assistant = await asyncio.to_thread(core_call, core.get_current_assistant, token)
         character = assistant.get("character") if isinstance(assistant, dict) and isinstance(assistant.get("character"), dict) else None
     if not character or not character.get("id"):
-        raise RuntimeError("当前助手没有绑定可读取的角色。")
+        raise tool_failure("capability_unavailable", "当前助手没有绑定可读取的角色。")
 
     actions = _as_list(character.get("visual_actions"))
     if context.core_client and context.core_token:
@@ -214,7 +214,7 @@ def create_character_action_tools(context: MonToolContext) -> list[AgentTool]:
 
     async def switch_character_action_execute(_tool_call_id: str, params: dict[str, Any], _signal: Any = None, _on_update: Any = None) -> dict[str, Any]:
         if not context.emit_event:
-            raise RuntimeError("当前运行环境不能向前端发送角色动作事件。")
+            raise tool_failure("capability_unavailable", "当前运行环境不能向前端发送角色动作事件。")
         character, actions = await _load_character_action_data(context)
         selector = str(params.get("立绘动作") or "").strip()
         if not selector:
@@ -234,7 +234,7 @@ def create_character_action_tools(context: MonToolContext) -> list[AgentTool]:
             action = next((item for item in actions if _match_action(item, selector)), None)
         if not action:
             available = "、".join(filter(None, (_action_label(item) for item in actions))) or "暂无"
-            raise RuntimeError(f"没有找到立绘动作“{selector}”。可用立绘动作：{available}；或选择“{HOLD_ACTION}”。")
+            raise tool_failure("not_found", f"没有找到立绘动作“{selector}”。可用立绘动作：{available}；或选择“{HOLD_ACTION}”。")
         if not image_url:
             image_url = _action_image_url(action, str(character.get("visual_preference") or "static"))
         current_action = current.get("action") if isinstance(current, dict) else None
