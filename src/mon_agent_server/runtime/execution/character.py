@@ -4,7 +4,6 @@ import asyncio
 import base64
 from collections.abc import Callable
 from concurrent.futures import Future
-import json
 import os
 import threading
 import time
@@ -20,7 +19,10 @@ from mon_agent_core import (
     AssistantMessageEventStream,
     AgentThread,
     TERMINAL_AGENT_STATUSES,
+    count_json_tokens,
+    count_text_tokens,
     fork_messages,
+    tokenizer_name,
 )
 from mon_agent_core.harness.compaction import (
     compact as compact_context,
@@ -37,8 +39,15 @@ from mon_agent_server.core.serializers import session_from_map
 from mon_agent_server.events import EventBus
 from mon_agent_server.ids import create_id, now_ms
 from mon_agent_server.logging import get_logger
+from mon_agent_server.llm.tools import tool_payload
 from mon_agent_server.model_stream import core_model, env_model, stream_openai_compatible
-from mon_agent_server.prompts import attachment_context, build_agent_system_prompt
+from mon_agent_server.prompts import (
+    attachment_context,
+    build_agent_system_prompt,
+    build_agent_turn_context,
+    build_assistant_context_section,
+    build_character_identity_section,
+)
 from mon_agent_server.skills import create_skill_runtime, owner_storage_key
 from mon_agent_server.store import SessionStore, SubagentThreadRepository
 from mon_agent_server.store.serializers import is_hidden_message, message_text
@@ -167,6 +176,27 @@ class RuntimeCharacterMixin:
                 raise RuntimeError("Core 用户资料缺少 id。")
             return self.skill_installer.create_generated(owner_id, auth_token, "local", payload)
 
+        def update_skill(payload: dict[str, Any]) -> dict[str, Any]:
+            if not auth_token or self.skill_installer is None:
+                raise RuntimeError("更新技能需要有效登录态和技能安装服务。")
+            profile = self.core_client.get_user_profile(auth_token)
+            owner_id = profile.get("id")
+            if owner_id in (None, ""):
+                raise RuntimeError("Core 用户资料缺少 id。")
+            action = str(payload.get("action") or "").strip()
+            if action == "preview":
+                return self.skill_installer.inspect_generated_update(
+                    owner_id, auth_token, "local", payload
+                )
+            if action == "apply":
+                preview_id = str(payload.get("preview_id") or "").strip()
+                if not preview_id:
+                    raise ValueError("action=apply 时必须提供 preview_id")
+                return self.skill_installer.apply_generated_update(
+                    owner_id, auth_token, "local", preview_id
+                )
+            raise ValueError("action 必须是 preview 或 apply")
+
         def list_skills(payload: dict[str, Any]) -> list[dict[str, Any]]:
             if not auth_token or self.skill_installer is None:
                 raise RuntimeError("查看技能需要有效登录态和技能安装服务。")
@@ -175,6 +205,14 @@ class RuntimeCharacterMixin:
             if owner_id in (None, ""):
                 raise RuntimeError("Core 用户资料缺少 id。")
             return self.skill_installer.list_for_model(owner_id, auth_token, "local", payload)
+
+        def request_workspace_switch(path: str) -> dict[str, Any]:
+            target = str(Path(path).expanduser().resolve())
+            if target == str(self.workspace_root):
+                return {"path": target, "changed": False, "status": "already_active"}
+            with self._lock:
+                self._pending_workspace_switch = target
+            return {"path": target, "changed": True, "status": "pending"}
 
         tool_context = MonToolContext(
             session_id=session_id,
@@ -197,8 +235,10 @@ class RuntimeCharacterMixin:
             get_current_files=lambda: files,
             append_assistant_part=append_assistant_part,
             switch_session_assistant=switch_session_assistant,
+            request_workspace_switch=request_workspace_switch,
             list_skills=list_skills,
             create_skill=create_skill,
+            update_skill=update_skill,
             agent_path="/root",
             permission_mode=(
                 self.permissions.mode_for_session(session_id)
@@ -271,7 +311,7 @@ class RuntimeCharacterMixin:
                 continuation["relevantMemories"] = relevant_memories
             except Exception:
                 logger.exception("长期记忆召回失败，当前回合将不注入记忆: session={}", session_id)
-        tools = skill_runtime.active_tools()
+        tools = sorted(skill_runtime.active_tools(), key=lambda tool: tool.name)
         attachment_details = attachment_context(files, runtime_config.supports_images)
         if not runtime_config.supports_images:
             automatic_vision_context = await self._analyze_non_multimodal_images(
@@ -301,6 +341,14 @@ class RuntimeCharacterMixin:
                 "请基于历史中最近一条用户消息直接回应，不要声称用户重复了请求。\n"
                 "</assistant_handoff>"
             )
+        turn_context = build_agent_turn_context(
+            environment=environment,
+            current_character_action=current_character_action,
+            recent_character_actions=recent_character_actions,
+            relevant_memories=relevant_memories,
+        )
+        if turn_context:
+            task_prompt = "\n\n".join(filter(None, [task_prompt, turn_context]))
 
         def system_prompt_for(active_skill_ids: tuple[str, ...]) -> str:
             active_config = continuation["config"]
@@ -322,6 +370,7 @@ class RuntimeCharacterMixin:
                 skill_resource_prompt=skill_runtime.prompt_section(),
                 delegation_mode=active_config.delegation_policy.mode,
                 relevant_memories=continuation["relevantMemories"],
+                include_turn_context=False,
             )
             previous_speaker = continuation.get("handoffFrom")
             if isinstance(previous_speaker, dict):
@@ -331,6 +380,45 @@ class RuntimeCharacterMixin:
                     "不要替原助手告别或转交。"
                 )
             return prompt
+
+        def record_prompt_breakdown(
+            current_system_prompt: str,
+            current_tools: list[Any],
+            current_config: RuntimeModelConfig,
+        ) -> None:
+            active_core = current_config.core
+            active_character = (active_core or {}).get("character") if active_core else None
+            character_sections = [
+                build_character_identity_section(
+                    active_character,
+                    include_visual_context=runtime_profile != "self_awake",
+                ),
+                build_assistant_context_section(active_core),
+            ]
+            character_prompt = "\n\n".join(
+                section for section in character_sections if section
+            )
+            current_skill_prompt = skill_runtime.prompt_section()
+            model_id = str(current_config.model.get("id") or "").strip()
+            character_tokens = count_text_tokens(character_prompt, model_id)
+            skill_tokens = count_text_tokens(current_skill_prompt, model_id)
+            system_total_tokens = count_text_tokens(current_system_prompt, model_id)
+            tool_tokens = count_json_tokens(
+                tool_payload(current_tools), model_id
+            )
+            session_info = self.store.require_session(session_id)["info"]
+            token_breakdown = dict(session_info.get("tokenBreakdown") or {})
+            token_breakdown.update(
+                {
+                    "characterRaw": character_tokens,
+                    "skillsRaw": skill_tokens,
+                    "systemRaw": max(0, system_total_tokens - character_tokens - skill_tokens),
+                    "toolsRaw": tool_tokens,
+                    "tokenizer": tokenizer_name(model_id),
+                    "tokenizerModel": model_id,
+                }
+            )
+            session_info["tokenBreakdown"] = token_breakdown
 
         existing_context_messages = self.store.context_messages(session_id)
         user_created_at = user_message["info"]["time"]["created"]
@@ -357,6 +445,11 @@ class RuntimeCharacterMixin:
             user_created_at,
             auth_token,
         )
+        record_prompt_breakdown(
+            system_prompt_for(skill_runtime.active_skill_ids),
+            tools,
+            runtime_config,
+        )
 
         async def prepare_root_next_turn(turn: dict[str, Any], _signal: Any) -> dict[str, Any] | None:
             skill_update = skill_runtime.prepare_next_turn(turn, system_prompt_for)
@@ -367,15 +460,18 @@ class RuntimeCharacterMixin:
             )
             if not isinstance(current_context, dict):
                 return skill_update
-            # 时间是易变的运行时事实。每次工具循环继续请求模型前都重建提示词，
-            # 同时覆盖技能加载或上下文压缩后携带的旧时间。
+            # 固定系统提示词与工具顺序，保持同一会话的缓存前缀稳定。
+            active_system_prompt = system_prompt_for(skill_runtime.active_skill_ids)
+            active_tools = sorted(skill_runtime.active_tools(), key=lambda tool: tool.name)
+            active_config = continuation["config"]
+            record_prompt_breakdown(active_system_prompt, active_tools, active_config)
             current_context = {
                 **current_context,
-                "systemPrompt": system_prompt_for(skill_runtime.active_skill_ids),
-                "tools": skill_runtime.active_tools(),
+                "systemPrompt": active_system_prompt,
+                "tools": active_tools,
                 "activeSpeaker": run_state.speaker,
+                "promptCacheKey": session_id,
             }
-            active_config = continuation["config"]
             skill_update = {
                 **(skill_update or {}),
                 "context": current_context,
@@ -395,8 +491,8 @@ class RuntimeCharacterMixin:
                 # the very next model request in the same agent run.
                 current_context = {
                     **current_context,
-                    "systemPrompt": system_prompt_for(skill_runtime.active_skill_ids),
-                    "tools": skill_runtime.active_tools(),
+                    "systemPrompt": active_system_prompt,
+                    "tools": active_tools,
                 }
                 skill_update = {
                     **(skill_update or {}),
@@ -433,6 +529,7 @@ class RuntimeCharacterMixin:
                     "tools": tools,
                     "messages": agent_messages,
                     "activeSpeaker": run_state.speaker,
+                    "promptCacheKey": session_id,
                 },
                 get_api_key=lambda _provider: continuation["config"].api_key,
                 before_tool_call=self._before_tool_call(

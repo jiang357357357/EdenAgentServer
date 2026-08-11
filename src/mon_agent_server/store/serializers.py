@@ -30,14 +30,3 @@ def is_hidden_message(message: dict[str, Any]) -> bool:
     return bool(message.get("info", {}).get("hidden"))
 
 
-def title_from_messages(messages: list[dict[str, Any]]) -> str | None:
-    for message in messages:
-        if is_hidden_message(message):
-            continue
-        if message.get("info", {}).get("role") != "user":
-            continue
-        text = message_text(message)
-        if text:
-            return f"{text[:24]}..." if len(text) > 24 else text
-    return None
-

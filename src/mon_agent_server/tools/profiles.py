@@ -38,11 +38,13 @@ SELF_AWAKE_ALLOWED_TOOLS = {
     "finish_connector_events",
     "execute_connector_action",
     "query_openttd",
+    "openttd_newgrf",
     "read",
     "ls",
     "grep",
     "find",
     "create_skill",
+    "update_skill",
     "list_skills",
 }
 

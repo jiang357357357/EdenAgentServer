@@ -64,6 +64,34 @@ class ContextManagerTests(unittest.TestCase):
         self.assertIn("...[truncated 10 chars]", messages[0]["content"])
         self.assertEqual(source["payload"]["content"], original)
 
+    def test_long_tool_result_preserves_tail_and_continuation_metadata(self):
+        continuation = "[Showing lines 1-2000 of 3000. Use offset=2001 to continue.]"
+        original = "x" * 18_784 + "\n\n" + continuation
+        events = [
+            event(
+                1,
+                "assistant_message",
+                {"role": "assistant", "content": [{"type": "toolCall", "id": "read-1", "name": "read"}]},
+            ),
+            event(
+                2,
+                "tool_result",
+                {
+                    "role": "toolResult",
+                    "toolCallId": "read-1",
+                    "content": [{"type": "text", "text": original}],
+                    "structuredContent": {"truncated": True, "next_offset": 2001},
+                },
+            ),
+        ]
+
+        result = ContextManager.compile(events)[-1]
+        rendered = result["content"][0]["text"]
+
+        self.assertIn("tail preserved", rendered)
+        self.assertTrue(rendered.endswith(continuation))
+        self.assertEqual(result["structuredContent"]["next_offset"], 2001)
+
     def test_failed_assistant_messages_are_removed_from_existing_history(self):
         events = [
             event(1, "user_message", {"role": "user", "content": "第一次请求"}),
@@ -86,7 +114,10 @@ class ContextManagerTests(unittest.TestCase):
         self.assertEqual(messages[-1]["content"], "重新请求")
 
     def test_prunes_large_old_tool_results_but_keeps_recent_two_user_turns(self):
-        large = "x" * 20_000
+        # Repeated single characters compress into comparatively few BPE tokens.
+        # Use realistic, varied tool output so this test exercises the token
+        # thresholds rather than depending on the removed chars/4 heuristic.
+        large = " ".join(f"value_{index}" for index in range(5_000))
         events = [
             event(1, "user_message", {"role": "user", "content": "第一轮"}),
             event(2, "assistant_message", {"role": "assistant", "content": [{"type": "toolCall", "id": "old_1", "name": "grep"}]}),

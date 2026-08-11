@@ -13,14 +13,20 @@ def usage_from_openai(usage: dict[str, Any] | None) -> dict[str, Any]:
     completion_tokens = int(usage.get("completion_tokens") or 0)
     prompt_details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
     cached_tokens = int(prompt_details.get("cached_tokens") or usage.get("cached_tokens") or 0)
-    input_tokens = prompt_tokens + cached_tokens
+    # OpenAI reports cached tokens as a subset of prompt_tokens. A few compatible
+    # providers still report only the cache miss in prompt_tokens; that shape is
+    # identifiable when cached_tokens is larger than prompt_tokens.
+    cache_is_included = cached_tokens <= prompt_tokens
+    input_tokens = prompt_tokens if cache_is_included else prompt_tokens + cached_tokens
+    cache_miss_tokens = max(0, prompt_tokens - cached_tokens) if cache_is_included else prompt_tokens
+    total_tokens = int(usage.get("total_tokens") or 0) or input_tokens + completion_tokens
     return {
         "input": input_tokens,
         "output": completion_tokens,
         "cacheRead": cached_tokens,
-        "cacheMiss": prompt_tokens,
+        "cacheMiss": cache_miss_tokens,
         "cacheWrite": 0,
-        "totalTokens": input_tokens + completion_tokens,
+        "totalTokens": total_tokens,
         "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0},
     }
 

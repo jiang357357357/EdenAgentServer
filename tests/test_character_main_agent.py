@@ -295,10 +295,9 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("冷静、克制", captured["systemPrompt"])
         self.assertIn("web-research", captured["systemPrompt"])
         self.assertIn("multi-agent", captured["systemPrompt"])
-        self.assertIn("当前委派模式：auto", captured["systemPrompt"])
-        self.assertIn("researcher", captured["systemPrompt"])
-        self.assertIn("根据任务范围、不确定性、上下文成本和并行收益", captured["systemPrompt"])
-        self.assertIn("负责验证、整合和最终表达", captured["systemPrompt"])
+        self.assertNotIn("当前委派模式", captured["systemPrompt"])
+        self.assertNotIn("# 父子智能体委派策略", captured["systemPrompt"])
+        self.assertIn("把边界清晰、可独立完成的任务交给合适的子智能体", captured["systemPrompt"])
         self.assertNotIn("不要轮询或调用 wait_agent", captured["systemPrompt"])
         self.assertNotIn("角色回复子智能体", captured["systemPrompt"])
         self.assertFalse(any(event["type"].startswith("subagent.") for event in events.events))
@@ -380,8 +379,9 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 execution=None, previous_replies=[], environment=None, skill_owner_key=None,
             )
 
-        self.assertIn("当前委派模式：explicit", captured["prompt"])
-        self.assertIn("明确要求委派", captured["prompt"])
+        self.assertNotIn("当前委派模式", captured["prompt"])
+        self.assertNotIn("# 父子智能体委派策略", captured["prompt"])
+        self.assertIn("multi-agent", captured["prompt"])
         runtime.close()
 
     async def test_character_loads_web_research_in_the_same_agent_run(self) -> None:
@@ -402,10 +402,12 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
         )
         observed_tools: list[set[str]] = []
         observed_prompts: list[str] = []
+        observed_messages: list[list[dict]] = []
 
         async def fake_stream(_model, context, _options):
             observed_tools.append({tool.name for tool in context["tools"]})
             observed_prompts.append(context["systemPrompt"])
+            observed_messages.append(to_openai_messages(context))
             if len(observed_tools) == 1:
                 return tool_call_message("load_skill", {"skills": ["web-research"]})
             return stream_message("已经可以开始网页研究。")
@@ -431,11 +433,13 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("web", observed_tools[0])
         self.assertIn("web", observed_tools[1])
         self.assertEqual(observed_tools[0], observed_tools[1])
-        self.assertNotIn("当前已加载技能", observed_prompts[0])
+        self.assertIn('<skill name="character-performance"', observed_prompts[0])
+        self.assertNotIn('<skill name="web-research"', observed_prompts[0])
         self.assertIn("当前已加载技能", observed_prompts[1])
         self.assertIn('<skill name="web-research"', observed_prompts[1])
-        self.assertIn("当前本地时间：", observed_prompts[0])
-        self.assertIn("当前本地时间：", observed_prompts[1])
+        self.assertNotIn("当前本地时间：", observed_prompts[0])
+        self.assertNotIn("当前本地时间：", observed_prompts[1])
+        self.assertIn("当前本地时间：", str(observed_messages[0]))
         runtime.close()
 
     async def test_character_compacts_during_tool_loop_and_continues_same_run(self) -> None:

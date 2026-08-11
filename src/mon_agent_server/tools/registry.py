@@ -27,6 +27,7 @@ from .subagents import create_subagent_tools
 from .timer import create_timer_tools
 from .vision import create_vision_tools
 from .web import create_web_tools
+from .workspace_switch import create_workspace_switch_tools
 from .contracts import CONNECTOR_TOOL_NAMES, finalize_tool
 
 
@@ -57,6 +58,7 @@ def create_mon_agent_tools(
     tools.extend(create_notify_tools(context))
     tools.extend(create_vision_tools(root, context))
     tools.extend(create_subagent_tools(context))
+    tools.extend(create_workspace_switch_tools(context))
     def outside_write_allowed() -> bool:
         if context.permissions is not None:
             return context.permissions.mode_for_session(context.session_id) == "takeover"

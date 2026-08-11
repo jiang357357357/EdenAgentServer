@@ -16,6 +16,7 @@ dependencies = [
     "tzdata>=2025.2; platform_system == 'Windows'",
     "httpx>=0.28,<1",
     "python-chess>=1.999,<2",
+    "jsonschema>=4.23,<5",
 ]
 
 [tool.uv]
@@ -36,5 +37,6 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
+"mon_agent_server.connectors" = ["manifests/*.json"]
 "mon_agent_server.connectors.openttd_bridge" = ["game/*.nut", "ai/*.nut"]
 "mon_agent_server.skills" = ["builtin/*/SKILL.md"]

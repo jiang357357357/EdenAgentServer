@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from mon_agent_server.tools.connectors import create_connector_tools
@@ -71,13 +72,49 @@ class ConnectorToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await by_name(first, "list_connectors").run("call-1", {}))["details"]["connectors"][0]["id"], 2)
         self.assertEqual((await by_name(second, "list_connectors").run("call-2", {}))["details"]["connectors"][0]["id"], 2)
 
-    async def test_connector_action_schema_declares_lichess_payload(self):
+    async def test_list_connectors_returns_bounded_model_summary(self):
+        core = FakeCore()
+        core.connectors.append({
+            "id": 8,
+            "connector_key": "openttd",
+            "identity_key": "local",
+            "desired_state": "connected",
+            "runtime_state": "reconnecting",
+            "last_error": "Admin Port connection refused",
+            "settings": {"credential": "must-not-reach-model"},
+            "thread_sessions": [{"id": index, "dump": "x" * 100} for index in range(50)],
+        })
+        tool = by_name(
+            create_connector_tools(MonToolContext(core_client=core, core_token="token", assistant={"id": 3})),
+            "list_connectors",
+        )
+
+        result = await tool.run("call-list", {})
+        serialized = json.dumps(result, ensure_ascii=False)
+
+        self.assertIn("reconnecting", result["content"][0]["text"])
+        self.assertIn("Admin Port connection refused", result["content"][0]["text"])
+        self.assertNotIn("thread_sessions", serialized)
+        self.assertNotIn("must-not-reach-model", serialized)
+        self.assertEqual(result["structuredContent"]["count"], 1)
+        contract = result["structuredContent"]["connectors"][0]["contract"]
+        self.assertTrue(contract["hot_reload"])
+        self.assertTrue(contract["worker_isolated"])
+        self.assertIn("gameplay_plan", contract["action_schemas"])
+
+    async def test_connector_action_schema_is_generated_from_installed_manifests(self):
         tool = by_name(create_connector_tools(MonToolContext()), "execute_connector_action")
         payload = tool.parameters["properties"]["payload"]
+        actions = tool.parameters["properties"]["action"]["enum"]
+        self.assertIn("accept_challenge", actions)
+        self.assertIn("gameplay_plan", actions)
         self.assertIn("challenge_id", payload["properties"])
         self.assertNotIn("challengeId", payload["properties"])
         self.assertIn("generic", payload["properties"]["reason"]["enum"])
-        self.assertFalse(payload["additionalProperties"])
+        # The generic outer tool can carry fields from newly installed
+        # manifests; the selected connector's exact schema is enforced before
+        # RPC dispatch.
+        self.assertTrue(payload["additionalProperties"])
 
     async def test_connector_action_reports_missing_snake_case_field(self):
         core = FakeCore()
@@ -100,11 +137,23 @@ class ConnectorToolTest(unittest.IsolatedAsyncioTestCase):
         tools = create_connector_tools(MonToolContext(
             core_client=core, core_token="token", assistant={"id": 3}, connector_manager=manager,
         ))
-        with self.assertRaisesRegex(RuntimeError, "Lichess 原因代码"):
+        with self.assertRaisesRegex(RuntimeError, "payload.reason.*generic"):
             await by_name(tools, "execute_connector_action").run("call-1", {
                 "connector_id": 2,
                 "action": "decline_challenge",
                 "payload": {"challenge_id": "c1", "reason": "not now"},
+            })
+
+    async def test_register_rejects_connector_without_an_installed_manifest(self):
+        core = FakeCore()
+        tool = by_name(
+            create_connector_tools(MonToolContext(core_client=core, core_token="token", assistant={"id": 3})),
+            "register_connector",
+        )
+        with self.assertRaisesRegex(RuntimeError, "未安装连接器类型"):
+            await tool.run("call-register", {
+                "connector_key": "missing-connector",
+                "identity_key": "local",
             })
 
     async def test_openttd_query_is_structured_and_read_only(self):

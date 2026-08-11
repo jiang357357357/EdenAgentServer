@@ -85,10 +85,32 @@ class StoreTest(unittest.TestCase):
             [{"url": "data:text/plain,hello", "mime": "text/plain", "filename": "hello.txt"}],
         )
 
-        self.assertEqual(session["title"], "你好，MonAgent")
+        self.assertEqual(session["title"], "新会话")
+        self.assertEqual(session["titleSource"], "pending")
         self.assertEqual(message["info"]["role"], "user")
         self.assertEqual(len(message["parts"]), 2)
         self.assertEqual(store.list_messages(session["id"], 10)[0]["info"]["id"], message["info"]["id"])
+
+    def test_generated_title_does_not_override_a_user_title(self):
+        store = SessionStore()
+        session = store.create_session("")
+        self.assertTrue(store.claim_title_generation(session["id"]))
+        generated = store.set_session_title(session["id"], "生成标题", "generated")
+        self.assertEqual(generated["title"], "生成标题")
+        renamed = store.set_session_title(session["id"], "用户命名", "user")
+        self.assertEqual(renamed["titleSource"], "user")
+        preserved = store.set_session_title(session["id"], "不应覆盖", "generated")
+        self.assertEqual(preserved["title"], "用户命名")
+
+    def test_failed_generation_restores_pending_without_using_first_message(self):
+        store = SessionStore()
+        session = store.create_session("")
+        previous_source = store.claim_title_generation(session["id"])
+        self.assertEqual(previous_source, "pending")
+        store.release_title_generation(session["id"], previous_source)
+        restored = store.require_session(session["id"])["info"]
+        self.assertEqual(restored["title"], "新会话")
+        self.assertEqual(restored["titleSource"], "pending")
 
     def test_message_page_uses_the_first_item_as_the_older_page_cursor(self):
         store = SessionStore()
@@ -139,7 +161,8 @@ class StoreTest(unittest.TestCase):
         )
 
         stored = store.require_session(session["id"])
-        self.assertEqual(stored["info"]["title"], "第一条")
+        self.assertEqual(stored["info"]["title"], "新会话")
+        self.assertEqual(stored["info"]["titleSource"], "pending")
         self.assertEqual(
             [(item["role"], item["content"][0]["text"]) for item in store.context_messages(session["id"])],
             [("user", "第一条"), ("assistant", "我记住了")],

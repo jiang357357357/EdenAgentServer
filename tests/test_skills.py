@@ -57,6 +57,8 @@ class SkillCatalogTest(unittest.TestCase):
                 "multi-agent",
                 "assistant-switching",
                 "skill-creator",
+                "character-performance",
+                "memory-management",
             },
         )
 
@@ -103,6 +105,7 @@ class SkillCatalogTest(unittest.TestCase):
             "web", "create_memo", "analyze_screen", "send_qq_message",
             "switch_session_assistant", "remember_memory", "spawn_agent",
             "create_skill",
+            "update_skill",
             "list_skills",
         }:
             self.assertIn(name, names)
@@ -135,7 +138,7 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertIn("web", names)
         self.assertIn("write", names)
         self.assertEqual(names, _tool_names(initial_tools))
-        self.assertEqual(context["systemPrompt"], "active=memo-management")
+        self.assertEqual(context["systemPrompt"], "active=character-performance,memo-management")
         self.assertIsNone(runtime.prepare_next_turn({"context": context}, lambda _ids: "unused"))
 
     def test_workspace_development_exposes_apply_patch(self) -> None:
@@ -185,11 +188,11 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertIn("目标助手在独立运行中接手", prompt)
 
     def test_character_action_prompt_has_one_consistent_call_rule(self) -> None:
-        prompt = build_agent_tool_section(source="user_chat", active_skill_ids=())
+        prompt = build_agent_tool_section(source="user_chat", active_skill_ids=("character-performance",))
 
         self.assertIn("角色表现是回复的一部分", prompt)
         self.assertIn("主动在正文前调用 switch_character_action", prompt)
-        self.assertIn("正文不能同时选择“保持当前、无、无”", prompt)
+        self.assertIn("正文不能同时描述已经切换到另一种表现", prompt)
         self.assertIn("颜文字或动作描述不能代替工具调用", prompt)
         self.assertNotIn("普通回复不需要切换动作", prompt)
         self.assertNotIn("不需要调用工具", prompt)
@@ -233,6 +236,7 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertIn("可主动使用 capture_camera", runtime.prompt_section())
         self.assertIn("web", names)
         self.assertIn("create_skill", names)
+        self.assertIn("update_skill", names)
         self.assertIn("list_skills", names)
         self.assertIn("skill-creator", runtime.available_skill_ids)
 
@@ -260,7 +264,7 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertIn("<available_skills>", initial)
         self.assertIn("memo-management", initial)
         self.assertIn("workspace-development", initial)
-        self.assertIn("工作区外使用对应的 external 工具", initial)
+        self.assertIn("具体参数、权限和操作约束以工具定义及已加载技能为准", initial)
         self.assertIn("当前已加载技能", active)
         self.assertIn("create_reminder", active)
 
@@ -278,6 +282,23 @@ class SkillCatalogTest(unittest.TestCase):
 
 
 class SkillActivationLoopTest(unittest.IsolatedAsyncioTestCase):
+    async def test_tool_search_falls_back_when_namespace_has_no_matches(self) -> None:
+        runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
+        search = next(tool for tool in runtime.active_tools() if tool.name == "tool_search")
+
+        result = await search.run(
+            "search-openttd",
+            {"query": "OpenTTD game industries", "namespace": "communication"},
+        )
+
+        self.assertTrue(result["structuredContent"]["namespaceFallback"])
+        self.assertIn("connector", result["structuredContent"]["matchedNamespaces"])
+        self.assertIn(
+            "query_openttd",
+            {item["name"] for item in result["structuredContent"]["tools"]},
+        )
+        self.assertIn("已自动跨命名空间搜索", result["content"][0]["text"])
+
     async def test_list_skills_exposes_inventory_in_model_visible_text(self) -> None:
         runtime = create_skill_runtime(
             Path.cwd(),
@@ -300,6 +321,7 @@ class SkillActivationLoopTest(unittest.IsolatedAsyncioTestCase):
                         "sourceType": "generated",
                         "builtin": False,
                         "enabled": False,
+                        "contentHash": "a" * 64,
                     },
                 ]
             ),
@@ -315,6 +337,61 @@ class SkillActivationLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("code-smoke", content)
         self.assertIn("自编写", content)
         self.assertIn("已禁用", content)
+        self.assertIn("a" * 64, content)
+
+    async def test_update_skill_exposes_review_then_apply_contract(self) -> None:
+        calls: list[dict[str, Any]] = []
+
+        def update(params: dict[str, Any]) -> dict[str, Any]:
+            calls.append(dict(params))
+            if params["action"] == "preview":
+                return {
+                    "operation": "generated_update",
+                    "previewID": "skill_preview_test",
+                    "skillName": "code-smoke",
+                    "displayName": "代码测试",
+                    "baseContentHash": "a" * 64,
+                    "contentHash": "b" * 64,
+                    "changes": {
+                        "added": [],
+                        "modified": ["SKILL.md"],
+                        "deleted": [],
+                        "files": [],
+                        "diff": "--- a/SKILL.md\n+++ b/SKILL.md\n-old\n+new",
+                        "diffTruncated": False,
+                    },
+                }
+            return {
+                "operation": "generated_update",
+                "skillName": "code-smoke",
+                "displayName": "代码测试",
+                "contentHash": "b" * 64,
+            }
+
+        runtime = create_skill_runtime(
+            Path.cwd(), MonToolContext(update_skill=update), profile="user_chat"
+        )
+        tool = next(tool for tool in runtime.active_tools() if tool.name == "update_skill")
+
+        preview = await tool.execute(
+            "preview-skill",
+            {
+                "action": "preview",
+                "name": "code-smoke",
+                "scope": "project",
+                "expected_content_hash": "a" * 64,
+                "instructions": "new",
+            },
+        )
+        self.assertIn("尚未修改", preview["content"][0]["text"])
+        self.assertIn("skill_preview_test", preview["content"][0]["text"])
+        self.assertIn("+new", preview["content"][0]["text"])
+
+        applied = await tool.execute(
+            "apply-skill", {"action": "apply", "preview_id": "skill_preview_test"}
+        )
+        self.assertIn("已按预览更新", applied["content"][0]["text"])
+        self.assertEqual([item["action"] for item in calls], ["preview", "apply"])
 
     async def test_tools_remain_available_when_skill_runtime_is_recreated_next_turn(self) -> None:
         first_turn = create_skill_runtime(Path.cwd(), profile="user_chat")
@@ -328,7 +405,7 @@ class SkillActivationLoopTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("已加载技能：workspace-development", result["content"][0]["text"])
         self.assertNotIn("已启用这些技能对应的工具", result["content"][0]["text"])
-        self.assertEqual(second_turn.loaded_skill_ids, ())
+        self.assertEqual(second_turn.loaded_skill_ids, ("character-performance",))
         self.assertIn("write", _tool_names(second_turn.active_tools()))
         self.assertIn("bash", _tool_names(second_turn.active_tools()))
         self.assertIn("write_stdin", _tool_names(second_turn.active_tools()))

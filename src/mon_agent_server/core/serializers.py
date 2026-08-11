@@ -107,6 +107,12 @@ def session_from_map(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": item.get("external_session_id"),
         "title": item.get("title") or (payload or {}).get("title") or "新会话",
+        # A non-empty title without provenance comes from the legacy
+        # first-message naming scheme. It must not be treated as a user rename,
+        # otherwise the model-generated title pipeline can never replace it.
+        "titleSource": (payload or {}).get("titleSource") or (
+            "pending" if (item.get("title") or (payload or {}).get("title") or "新会话") == "新会话" else "legacy"
+        ),
         "mode": item.get("mode") or (payload or {}).get("mode") or "companion",
         "directorPolicy": item.get("director_policy") or (payload or {}).get("directorPolicy") or {},
         "participants": participants or (payload or {}).get("participants") or [],

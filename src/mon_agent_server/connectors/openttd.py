@@ -10,6 +10,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from .openttd_instance import OpenTTDInstance, default_instance_registry, load_active_instance
+
 
 PublishEvent = Callable[[dict[str, Any]], Awaitable[None]]
 ReportState = Callable[[str, str], Awaitable[None]]
@@ -97,6 +99,9 @@ class _Reader:
     def u64(self) -> int:
         return struct.unpack("<Q", self._take(8))[0]
 
+    def s64(self) -> int:
+        return struct.unpack("<q", self._take(8))[0]
+
     def boolean(self) -> bool:
         return bool(self.u8())
 
@@ -127,8 +132,10 @@ class OpenTTDConnector:
         self.publish = publish
         self.report_state = report_state
         settings = connector.get("settings") if isinstance(connector.get("settings"), dict) else {}
-        self.host = str(settings.get("host") or "127.0.0.1")
-        self.port = int(settings.get("admin_port") or 3977)
+        self.instance_registry = str(settings.get("instance_registry") or default_instance_registry())
+        self.instance: OpenTTDInstance | None = None
+        self.host = ""
+        self.port = 0
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._write_lock = asyncio.Lock()
@@ -140,6 +147,9 @@ class OpenTTDConnector:
         self._sequence = 0
         self._bridge_ready = False
         self._bridge_probe_id = ""
+        self._bridge_version: int | None = None
+        self._state_version = 0
+        self._state_waiters: list[asyncio.Future[int]] = []
         self._gameplay_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
 
     def _password(self) -> str:
@@ -170,6 +180,9 @@ class OpenTTDConnector:
         async with self._connect_lock:
             if self._writer is not None and not self._writer.is_closing():
                 return
+            self.instance = load_active_instance(self.instance_registry)
+            self.host = self.instance.host
+            self.port = self.instance.admin_port
             self._reader, self._writer = await asyncio.open_connection(self.host, self.port)
             join = _cstring(self._password()) + _cstring("MonAgent") + _cstring("1")
             await self._send(ADMIN_JOIN, join)
@@ -197,8 +210,14 @@ class OpenTTDConnector:
             if not authenticated:
                 continue
             event = self._decode(packet_type, payload)
-            if event is not None and self._is_actionable_event(event[0], event[1]):
-                await self._publish(event[0], event[1])
+            if event is not None:
+                if event[0] == "openttd.new_game":
+                    # A fresh game starts a fresh GameScript bridge; reset capability
+                    # state and re-probe so we never dispatch to a stale bridge.
+                    self._bridge_ready = False
+                    await self._probe_gameplay_bridge()
+                if self._is_actionable_event(event[0], event[1]):
+                    await self._publish(event[0], event[1])
 
     @staticmethod
     def _is_actionable_event(event_type: str, payload: dict[str, Any]) -> bool:
@@ -253,6 +272,32 @@ class OpenTTDConnector:
             _cstring(json.dumps(command, ensure_ascii=False, separators=(",", ":"))),
         )
 
+    def _signal_state_updated(self) -> None:
+        self._state_version += 1
+        version = self._state_version
+        for waiter in list(self._state_waiters):
+            if not waiter.done():
+                waiter.set_result(version)
+        self._state_waiters.clear()
+
+    async def _await_state_updated(self, timeout: float = 2.0) -> None:
+        """Wait until the admin port has delivered a fresh company-state update.
+
+        refresh_state only *sends* poll packets; the responses arrive
+        asynchronously through the read loop. Awaiting one update here prevents
+        callers from reading stale cached state right after a poll.
+        """
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[int] = loop.create_future()
+        self._state_waiters.append(waiter)
+        try:
+            await asyncio.wait_for(waiter, timeout=timeout)
+        except asyncio.TimeoutError:
+            return
+        finally:
+            if waiter in self._state_waiters:
+                self._state_waiters.remove(waiter)
+
     async def _poll_state(self) -> None:
         for update_type, target in (
             (UPDATE_DATE, 0),
@@ -276,6 +321,7 @@ class OpenTTDConnector:
                 "map_width": reader.u16(),
                 "map_height": reader.u16(),
             })
+            self._server["start_year"] = self._server["start_date"] // 365
             return "openttd.server_state", self._state_payload("welcome")
         if packet_type == SERVER_DATE:
             self._date = reader.u32()
@@ -295,6 +341,7 @@ class OpenTTDConnector:
                     "is_ai": reader.boolean(),
                 })
             company["quarters_bankrupt"] = reader.u8()
+            self._signal_state_updated()
             return "openttd.company", self._state_payload("company")
         if packet_type == SERVER_COMPANY_NEW:
             company_id = reader.u8()
@@ -308,15 +355,16 @@ class OpenTTDConnector:
             company_id = reader.u8()
             company = self._companies.setdefault(company_id, {"company_id": company_id})
             company["economy"] = {
-                "money": reader.u64(),
-                "loan": reader.u64(),
-                "income": reader.u64(),
+                "money": reader.s64(),
+                "loan": reader.s64(),
+                "income": reader.s64(),
                 "delivered_cargo": reader.u16(),
                 "quarters": [
-                    {"company_value": reader.u64(), "performance": reader.u16(), "delivered_cargo": reader.u16()}
+                    {"company_value": reader.s64(), "performance": reader.u16(), "delivered_cargo": reader.u16()}
                     for _ in range(2)
                 ],
             }
+            self._signal_state_updated()
             return "openttd.economy", self._state_payload("economy")
         if packet_type == SERVER_COMPANY_STATS:
             company_id = reader.u8()
@@ -325,6 +373,7 @@ class OpenTTDConnector:
                 "vehicles": dict(zip(("train", "lorry", "bus", "aircraft", "ship"), (reader.u16() for _ in range(5)))),
                 "stations": dict(zip(("train", "lorry", "bus", "aircraft", "ship"), (reader.u16() for _ in range(5)))),
             }
+            self._signal_state_updated()
             return "openttd.statistics", self._state_payload("statistics")
         if packet_type == SERVER_CHAT:
             return "openttd.chat", {
@@ -342,6 +391,11 @@ class OpenTTDConnector:
             if isinstance(message, dict):
                 if message.get("type") in {"bridge_ready", "command_result"}:
                     self._bridge_ready = True
+                if "bridge_version" in message:
+                    try:
+                        self._bridge_version = int(message.get("bridge_version"))
+                    except (TypeError, ValueError):
+                        pass
                 request_id = str(message.get("request_id") or "")
                 if request_id == self._bridge_probe_id:
                     self._bridge_probe_id = ""
@@ -364,7 +418,17 @@ class OpenTTDConnector:
     def _state_payload(self, cause: str) -> dict[str, Any]:
         return {
             "cause": cause,
+            "instance": {
+                "instance_id": self.instance.instance_id,
+                "host": self.instance.host,
+                "game_port": self.instance.game_port,
+                "admin_port": self.instance.admin_port,
+                "pid": self.instance.pid,
+                "mode": self.instance.mode,
+                "started_at": self.instance.started_at,
+            } if self.instance else None,
             "date": self._date,
+            "year": (self._date // 365) if self._date is not None else None,
             "server": dict(self._server),
             "companies": [dict(value) for _, value in sorted(self._companies.items())],
             "capabilities": {
@@ -372,6 +436,7 @@ class OpenTTDConnector:
                 "server_management": True,
                 "company_gameplay": self._bridge_ready,
                 "gameplay_bridge_ready": self._bridge_ready,
+                "bridge_version": self._bridge_version,
             },
         }
 
@@ -395,6 +460,7 @@ class OpenTTDConnector:
             raise RuntimeError("OpenTTD Admin Port 认证尚未完成，暂时不能执行动作。") from error
         if action == "refresh_state":
             await self._poll_state()
+            await self._await_state_updated()
         elif action == "pause_game":
             await self._send(ADMIN_RCON, _cstring("pause"))
         elif action == "resume_game":

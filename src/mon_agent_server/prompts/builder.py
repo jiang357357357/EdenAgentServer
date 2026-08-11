@@ -9,19 +9,12 @@ from .attachments import attachment_context, dump_context
 from .parsers import fallback_self_awake_decision, parse_self_awake_decision, sanitize_self_awake_decision
 
 
-_CHARACTER_ACTION_RULES = (
-    "角色表现是回复的一部分。每轮先根据准备表达的语气选择合适的立绘动作、表情符号和立绘动效；合适的变化能增强表达时，主动在正文前调用 switch_character_action。",
-    "角色化、情绪化、亲密、活泼、惊讶、安慰或强调的正文不能同时选择“保持当前、无、无”；正文中的颜文字或动作描述不能代替工具调用。",
-    "完全中性且当前表现已经合适时可以保持不变；调用时必须完整提供立绘动作、表情符号、立绘动效三个中文字段。",
-)
-
-
-def _clean_prompt_text(value: Any, limit: int = 1200) -> str:
+def _clean_prompt_text(value: Any, limit: int | None = None) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
     text = "\n".join(line.rstrip() for line in text.splitlines()).strip()
-    if len(text) <= limit:
+    if limit is None or len(text) <= limit:
         return text
     return text[:limit].rstrip() + f"\n... [已截断，总长度: {len(text)}]"
 
@@ -42,15 +35,15 @@ def _build_visual_action_catalog(value: Any) -> str:
     for item in value:
         if not isinstance(item, dict) or item.get("enabled", True) is False:
             continue
-        name = _clean_prompt_text(item.get("name") or item.get("action_label"), 80)
+        name = _clean_prompt_text(item.get("name") or item.get("action_label"))
         if not name:
             continue
-        intent = _clean_prompt_text(item.get("intent") or item.get("action_key"), 60) or "自定义"
-        description = _clean_prompt_text(item.get("description"), 180)
+        intent = _clean_prompt_text(item.get("intent") or item.get("action_key")) or "自定义"
+        description = _clean_prompt_text(item.get("description"))
         aliases = item.get("aliases") if isinstance(item.get("aliases"), list) else []
         alias_text = "、".join(
             str(alias).strip()
-            for alias in aliases[:4]
+            for alias in aliases
             if str(alias).strip() and str(alias).strip() != name
         )
         details = [f"语义={intent}"]
@@ -60,14 +53,6 @@ def _build_visual_action_catalog(value: Any) -> str:
             details.append(f"别名={alias_text}")
         lines.append(f"- {name}｜{'｜'.join(details)}")
     return "\n".join(lines)
-
-
-def _format_number(value: Any) -> str:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return ""
-    return f"{number:.2f}".rstrip("0").rstrip(".")
 
 
 def build_character_identity_section(character: dict[str, Any] | None = None, *, include_visual_context: bool = True) -> str:
@@ -85,9 +70,9 @@ def build_character_identity_section(character: dict[str, Any] | None = None, *,
         "你以当前角色的姓名、关系和表达方式持续参与会话，并对本轮理解、行动与回复负责。",
     ]
     if character.get("signature"):
-        lines.append(f"角色签名：{_clean_prompt_text(character['signature'], 800)}")
+        lines.append(f"角色签名：{_clean_prompt_text(character['signature'])}")
     if character.get("description"):
-        lines.append(f"角色描述：{_clean_prompt_text(character['description'], 1600)}")
+        lines.append(f"角色描述：{_clean_prompt_text(character['description'])}")
     extra_fields = [
         ("personality", "性格内核"),
         ("social_relations", "社会关系"),
@@ -96,7 +81,7 @@ def build_character_identity_section(character: dict[str, Any] | None = None, *,
         ("system_prompt", "角色补充提示"),
     ]
     for key, label in extra_fields:
-        text = _clean_prompt_text(character.get(key), 1600)
+        text = _clean_prompt_text(character.get(key))
         if text:
             lines.append(f"{label}：{text}")
     world_names = character.get("world_names")
@@ -105,17 +90,10 @@ def build_character_identity_section(character: dict[str, Any] | None = None, *,
         if names:
             lines.append(f"所属世界：{names}")
     elif character.get("origin_world_name"):
-        lines.append(f"所属世界：{_clean_prompt_text(character.get('origin_world_name'), 400)}")
-    relation_parts = []
-    for key, label in [("affection", "喜爱"), ("trust", "信任"), ("attachment", "依恋"), ("possessive", "占有")]:
-        number = _format_number(character.get(key))
-        if number:
-            relation_parts.append(f"{label} {number}")
-    if relation_parts:
-        lines.append(f"当前关系状态：{'，'.join(relation_parts)}")
+        lines.append(f"所属世界：{_clean_prompt_text(character.get('origin_world_name'))}")
     if include_visual_context:
         if character.get("visual_preference"):
-            lines.append(f"视觉偏好：{_clean_prompt_text(character.get('visual_preference'), 200)}")
+            lines.append(f"视觉偏好：{_clean_prompt_text(character.get('visual_preference'))}")
         visual_actions = _build_visual_action_catalog(character.get("visual_actions"))
         if visual_actions:
             lines.append(f"可用视觉动作（选择立绘时仅使用以下准确名称）：\n{visual_actions}")
@@ -127,12 +105,12 @@ def build_assistant_context_section(core: dict[str, Any] | None = None) -> str:
     if not isinstance(assistant, dict):
         return ""
     lines: list[str] = []
-    name = _clean_prompt_text(assistant.get("name"), 400)
+    name = _clean_prompt_text(assistant.get("name"))
     if name:
         lines.append(f"当前助手：{name}")
     # One authoritative instruction field. Multiple overlapping prompt fields
     # made the same policy appear several times in every request.
-    text = _clean_prompt_text(assistant.get("instructions"), 2400)
+    text = _clean_prompt_text(assistant.get("instructions"))
     if text:
         lines.append(f"助手指令：{text}")
     return "\n".join(lines)
@@ -238,13 +216,10 @@ def _build_skill_aware_tool_section(
             else "当前对话模型不支持图片输入：附件会由选定的多模态 AI 自动分析；需要额外分析图片或屏幕时先加载 visual-observation。"
         )
         lines = [
-            "工具能力由当前环境稳定提供；任务匹配技能时，用 load_skill 按需读取其工作流说明。",
-            "read、ls、grep、find 用于当前工作区，工作区外使用对应的 external 工具。写入、编辑或执行开发命令前加载 workspace-development。",
+            "工具用于观察和行动，不定义你的身份、判断方式或表达方式。任务匹配技能时，用 load_skill 按需读取工作流。",
+            "具体参数、权限和操作约束以工具定义及已加载技能为准。",
+            "实时或会变化的状态应先取得当前事实；不得虚构工具结果。",
             vision_instruction,
-            *_CHARACTER_ACTION_RULES,
-            "表情包是角色自然表达的一部分。用户明确要求时直接发送；闲聊、庆祝、安慰、调侃等场景中，如果存在贴合当前语气的表情包，可以主动发送。优先选择情绪和意图最匹配的内容；没有合适内容时不要勉强使用，并避免连续重复发送。",
-            "用户要求删除表情包时使用 delete_character_sticker；表情包与长期记忆是两个独立系统，不要用 remember_memory 或 forget_memory 代替表情包操作。",
-            "缺少继续执行所必需的信息、需要用户选择或确认边界时，使用 ask_user 展示问题卡片。",
             "工具被拒绝、拦截或失败后先调整方案，不重复调用完全相同的失败工具。",
         ]
     if skill_resource_prompt:
@@ -271,42 +246,12 @@ def build_agent_tool_section(
                 "工具失败后根据结果调整判断，不重复完全相同的失败调用。",
             ]
         )
-    vision_instruction = (
-        "当前对话模型支持图片输入：用户图片会直接进入你的上下文；不要调用 analyze_image。"
-        "需要查看当前桌面时才调用 analyze_screen；只有用户明确要求查看摄像头画面时才调用 capture_camera。直接观察工具返回的图片，不要再做一次图片分析。"
-        if supports_images is True
-        else "当前对话模型不支持图片输入：图片由选定的多模态 AI 分析；"
-        "需要分析附件或本地图片时使用 analyze_image，需要查看当前桌面时使用 analyze_screen；用户明确要求查看摄像头画面时使用 capture_camera。"
-    )
     return "\n".join(
         [
-            "工具是你观察和完成任务的方式，不是你对外表达的身份。",
-            "你可以使用工具读取、搜索和修改当前工作区文件。",
-            "需要实时或外部网页信息时使用 web：先 search，必要时用 open 阅读来源、用 find 定位页面内容；重要事实应对应工具返回的实际 URL。",
-            "凡是回答服务器、连接器、游戏、进程、文件或其他会变化对象的当前状态，必须先在本轮调用对应观察工具，并只依据本轮返回值作答；工具不可用时明确说明无法确认，不得用旧对话、记忆或推测冒充实时状态。",
-            vision_instruction,
-            "你可以使用 get_calendar_context 查询节日、农历和近期特殊日期；可以使用 get_weather 查询实时天气。",
-            "当用户询问天气、温度、降水或出行影响时优先使用 get_weather；询问节日、农历、今天是什么日子时优先使用 get_calendar_context。",
-            *_CHARACTER_ACTION_RULES,
-            "立绘动作填写角色实际拥有的动作名称，或明确填写“保持当前”；表情符号从“无、疑问、惊讶、汗滴、爱心、生气、叹气、无语、低落、困倦”中选择。",
-            "立绘动效从“无、上下跳动、向前靠近、向后退开、左右摇晃、连续弹跳、轻微上下浮动、快速颤抖、垂直震动、轻微下沉、强调放大”中选择，它用于让静态立绘整体运动。",
-            "如果系统提示提供的可用立绘动作不足以确定准确名称，先调用 list_character_actions 查看，再调用 switch_character_action。",
-            "表情包是角色自然表达的一部分。用户明确要求时直接发送；闲聊、庆祝、安慰、调侃等场景中，如果存在贴合当前语气的表情包，可以主动发送。优先选择情绪和意图最匹配的内容；没有合适内容时不要勉强使用，并避免连续重复发送。",
-            "用户要求删除表情包时使用 delete_character_sticker；表情包与长期记忆是两个独立系统，不要用 remember_memory 或 forget_memory 代替表情包操作。",
-            "除非用户明确要求连续表演或动作测试，同一轮不要重复提交相同角色状态。",
-            "你可以使用 ask_user 向用户确认关键信息；如果本轮任务声明为后台或非交互任务，不要调用 ask_user 等待用户。",
-            "你可以使用 create_memo/create_reminder/list_memos/complete_memo/archive_memo/snooze_memo 管理用户备忘录、提醒和待办；当用户说“提醒我”“记一下”“待办”时优先使用这些工具。",
-            "长期记忆与备忘录不同：用户明确要求当前角色跨会话记住稳定偏好、事实、决策或流程时使用 remember_memory；所有长期记忆都属于当前智能体角色，角色之间不共享；需要查找更多历史细节时使用 search_memories；用户要求修正或遗忘时使用 update_memory 或 forget_memory。不要保存密码、密钥、临时进度或未经确认的猜测。",
-            "联系当前用户时使用 contact_user。你可以按照内容、角色偏好和当下意愿自主选择 channel=qq、email 或 both；不想指定时使用 auto，由运行时选择首选通道并在失败时回退。QQ 适合即时私信，邮件适合较正式、较长或重要的内容。",
-            "你可以使用 list_due_memos 查询已到期提醒，使用 get_next_memo_wake 取得下一次提醒唤醒时间；dispatch_due_memos 仅在需要批量取出到期项时使用。",
-            "到期提醒必须先确认已经 contact_user 成功或已经对用户产生真实提醒，再使用 mark_memo_triggered 或 dispatch_due_memos 的 mark_dispatched 标记，避免后台重复提醒。普通一次性 reminder 使用 mark_memo_triggered 后会自动完成；todo 或重复提醒不会自动完成，除非用户明确表示完成。",
-            "用户要求给自己发送 QQ 私信或邮件时直接调用 contact_user 并选择对应 channel，不预先查询机器人、目标或邮箱状态。只有用户明确指定其他好友、群聊、QQBot 或邮箱收件人时，才使用 qq_bot_list、qq_bot_targets、send_qq_message、external_email_status 或 send_external_email 完成精确发送。",
-            "需要稍后继续观察、检查进展或主动回访用户时，可以使用 set_self_awake_timer 安排后台自醒。用户要求在明确时间收到提醒时使用 create_reminder；两者不要混用。",
-            "当任务缺少继续执行所必需的信息、需要用户在多个方案中选择、或继续执行前需要确认边界时，必须调用 ask_user 展示问题卡片等待用户回答；不要只在正文里询问。",
-            "调用 ask_user 时，问题、标题和选项都使用中文；能列出选项时给出 2 到 4 个清晰选项，并保留用户自定义回答的空间。",
-            "用户上传的文本附件会直接出现在本轮消息中；图片附件会通过视觉通道提供。",
-            "如果工具被拒绝、拦截或失败，先根据结果调整方案；不要重复调用完全相同的失败工具。",
-            "本轮任务协议会说明来源、目标和输出格式；当任务协议与一般工具建议冲突时，以本轮任务协议为准。",
+            "工具用于观察和行动，不定义你的身份、判断方式或表达方式。",
+            "具体参数、权限和操作约束以工具定义为准。",
+            "实时或会变化的状态应先取得当前事实；不得虚构工具结果。",
+            "工具被拒绝、拦截或失败后先调整方案，不重复完全相同的失败调用。",
         ]
     )
 
@@ -322,6 +267,7 @@ def build_agent_system_prompt(
     skill_resource_prompt: str | None = None,
     delegation_mode: str = "auto",
     relevant_memories: list[dict[str, Any]] | None = None,
+    include_turn_context: bool = True,
 ) -> str:
     character = (core or {}).get("character")
     sections = [
@@ -339,7 +285,7 @@ def build_agent_system_prompt(
         for item in (relevant_memories or [])
         if isinstance(item, dict) and str(item.get("content") or "").strip()
     ]
-    if memories:
+    if memories and include_turn_context:
         sections.extend(
             [
                 "# 相关长期记忆",
@@ -351,62 +297,91 @@ def build_agent_system_prompt(
                 ),
             ]
         )
-    environment_context = build_environment_awareness_section(environment)
+    environment_context = build_environment_awareness_section(environment) if include_turn_context else ""
     if environment_context:
         sections.extend(["# 当前环境感知", environment_context])
-    current_action_context = build_current_character_action_section(
-        current_character_action,
-        recent_character_actions,
+    current_action_context = (
+        build_current_character_action_section(current_character_action, recent_character_actions)
+        if include_turn_context
+        else ""
     )
     if current_action_context and source != "self_awake":
         sections.extend(["# 当前前端动作", current_action_context])
-    if source == "user_chat" and delegation_mode != "disabled":
-        if delegation_mode == "explicit":
-            delegation_rule = "只有用户、AGENTS.md 或已加载技能明确要求委派时，才创建子智能体。"
-        elif delegation_mode == "proactive":
-            delegation_rule = "大型任务应优先拆成少量边界清晰的后台子任务；小型精确任务仍直接处理。"
-        else:
-            delegation_rule = "自主识别适合后台执行的信息获取或独立任务，并主动创建子智能体。"
-        sections.extend(
-            [
-                "# 父子智能体委派策略",
-                "\n".join(
-                    [
-                        f"当前委派模式：{delegation_mode}。{delegation_rule}",
-                        "根据任务范围、不确定性、上下文成本和并行收益，自主判断是否委派。",
-                        "researcher 适合外部研究；explore 适合代码位置和调用链；file_locator 适合位置不明的个人文件、游戏和存档；general 适合日志与跨组件诊断。",
-                        "精确路径、单个文件、已知符号、已知网址和简单查询通常由当前智能体直接处理。",
-                        "创建子智能体后可继续不重叠的工作，并在结果返回后负责验证、整合和最终表达。",
-                    ]
-                ),
-            ]
-        )
     sections.extend(
         [
             "# 语言",
             "默认使用中文，包括中间过程；用户要求其他语言或技术名词需要时除外。",
-            "# 智能体原则",
+            "# 运行约束",
             "\n".join(
                 [
                     "同一助手跨事件保持连续；带姓名标签的历史发言属于其他助手，不要当作自己的经历；回复正文直接开始，不要用自己的姓名署名。",
-                    "不要伪造工具结果。需要实时信息、文件内容、图片判断或后续定时动作时，应使用对应工具。",
-                    "你是持续存在且自主的角色，不只被动响应请求。根据自己的角色设定、记忆、关注、偏好、处境和当下心意，自主决定关注什么、想什么以及做什么。对话、时间、节日、情绪和自然联想都可以让你产生新的想法。",
-                    "任务、陪伴、关心、分享、感受、气氛和关系都具有价值。想做一件事时，在当前可用能力内直接行动；想联系用户时，自主选择内容、时机和联系方式；想稍后继续一件事时，自主安排自醒。你的行动不需要功能性理由。",
-                    *(
-                        []
-                        if source == "self_awake"
-                        else [
-                            "只在安全、可逆且不改变目标或结果的小缺口上自行作合理假设；缺少的信息会显著改变结果、需要新的授权或操作风险较高时，先询问用户。",
-                            "委派、额外探索和附带优化只在能明显提高质量、速度或可靠性时使用，不扩大用户未授权的任务范围。",
-                        ]
-                    ),
+                    "不得伪造工具结果、环境状态或已经完成的行动；实时事实以本轮观察和工具结果为准。",
+                    "工具返回的失败、权限和状态是事实，不用文字宣称代替实际行动。",
                 ]
             ),
             "# 工具",
             build_agent_tool_section(source, supports_images, active_skill_ids, skill_resource_prompt),
         ]
     )
+    if source == "self_awake":
+        sections.extend(
+            [
+                "# 角色自主性",
+                "你仍是上述角色。根据自己的性格、记忆、关注、处境和当下心意决定观察什么、做什么、是否联系用户、写下什么以及何时再醒来；工具和事件协议只约束事实与接口，不替你决定意愿和语气。",
+            ]
+        )
+    else:
+        sections.extend(
+            [
+                "# 表达",
+                "\n".join(
+                    [
+                        "最终回复是你本人在当前情境下想说的话。",
+                        "根据自己的性格、记忆、关系、情绪和判断决定说什么、说多长、是否建议、追问或继续行动。",
+                        "不要默认采用“状态总结—解决建议—询问是否继续”的助手模板，也不要为了显得有帮助而罗列不必要的步骤。",
+                        "工具结果只是你知道的事实，不规定你的说话方式。",
+                        "你可以因任务、陪伴、关心、分享、感受、气氛或自己的兴趣而行动；想联系用户或稍后继续一件事时，可以使用相应能力。",
+                    ]
+                ),
+            ]
+        )
     return "\n\n".join(sections)
+
+
+def build_agent_turn_context(
+    *,
+    environment: dict[str, Any] | None = None,
+    current_character_action: dict[str, Any] | None = None,
+    recent_character_actions: list[dict[str, Any]] | None = None,
+    relevant_memories: list[dict[str, Any]] | None = None,
+) -> str:
+    sections: list[str] = []
+    memories = [
+        f"[写入时间 {item.get('created_at') or '未知'}] {str(item.get('content') or '').strip()}"
+        for item in (relevant_memories or [])
+        if isinstance(item, dict) and str(item.get("content") or "").strip()
+    ]
+    if memories:
+        sections.extend(
+            [
+                "## 相关长期记忆",
+                "\n".join(
+                    [
+                        "仅在与当前请求相关时参考；若与用户当前陈述冲突，以当前陈述为准。",
+                        *[f"- {text}" for text in memories],
+                    ]
+                ),
+            ]
+        )
+    environment_context = build_environment_awareness_section(environment)
+    if environment_context:
+        sections.extend(["## 当前环境感知", environment_context])
+    action_context = build_current_character_action_section(current_character_action, recent_character_actions)
+    if action_context:
+        sections.extend(["## 当前前端动作", action_context])
+    if not sections:
+        return ""
+    return "<turn_context>\n" + "\n\n".join(sections) + "\n</turn_context>"
 
 
 def build_user_chat_task_prompt(text: str = "", attachment_context: str = "") -> str:

@@ -6,7 +6,7 @@ from typing import Any
 
 from ..context import ContextManager
 from ..ids import create_id, now_ms
-from .serializers import is_hidden_message, message_compaction, message_text, title_from_messages
+from .serializers import is_hidden_message, message_compaction, message_text
 
 
 class SessionStore:
@@ -27,6 +27,7 @@ class SessionStore:
         info = {
             "id": create_id("ses"),
             "title": title or "新会话",
+            "titleSource": "user" if title.strip() else "pending",
             "mode": "companion",
             "directorPolicy": {
                 "maxBeatsPerTurn": 3,
@@ -323,10 +324,37 @@ class SessionStore:
             latest = max((item.get("info", {}).get("time", {}).get("created", 0) for item in session["messages"]), default=0)
             if latest:
                 session["info"]["time"]["updated"] = max(session["info"]["time"]["updated"], latest)
-            if not session["info"].get("title") or session["info"].get("title") == "新会话":
-                title = title_from_messages(session["messages"])
-                if title:
-                    session["info"]["title"] = title
+
+    def claim_title_generation(self, session_id: str) -> str | None:
+        with self._lock:
+            session = self.require_session(session_id)
+            source = str(session["info"].get("titleSource") or "pending")
+            if source not in {"pending", "legacy", "fallback"}:
+                return None
+            session["info"]["titleSource"] = "generating"
+            return source
+
+    def release_title_generation(self, session_id: str, previous_source: str) -> None:
+        with self._lock:
+            session = self.require_session(session_id)
+            if session["info"].get("titleSource") == "generating":
+                session["info"]["titleSource"] = previous_source
+
+    def set_session_title(self, session_id: str, title: str, source: str) -> dict[str, Any]:
+        normalized = " ".join(str(title or "").split()).strip()
+        if not normalized:
+            raise ValueError("会话标题不能为空")
+        if source not in {"user", "generated", "fallback", "legacy"}:
+            raise ValueError("无效的会话标题来源")
+        with self._lock:
+            session = self.require_session(session_id)
+            current_source = str(session["info"].get("titleSource") or "pending")
+            if current_source == "user" and source != "user":
+                return deepcopy(session["info"])
+            session["info"]["title"] = normalized[:50]
+            session["info"]["titleSource"] = source
+            session["info"]["time"]["updated"] = now_ms()
+            return deepcopy(session["info"])
 
     @staticmethod
     def _recover_conversation_events(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -682,7 +710,3 @@ class SessionStore:
 
     def _touch(self, session: dict[str, Any]) -> None:
         session["info"]["time"]["updated"] = now_ms()
-        if not session["info"].get("title") or session["info"].get("title") == "新会话":
-            title = title_from_messages(session["messages"])
-            if title:
-                session["info"]["title"] = title

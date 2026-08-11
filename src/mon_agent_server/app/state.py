@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
+from pathlib import Path
+import threading
 from typing import Any
 
 from ..brokers import CameraCaptureBroker, PermissionBroker, QuestionBroker, ScreenCaptureBroker
@@ -46,6 +48,7 @@ class AppState:
             camera_captures=self.camera_captures,
             skill_installer=self.skill_installer,
             connector_manager=self.connector_manager,
+            on_workspace_switch_requested=self._apply_requested_workspace_switch,
         )
         try:
             self.connector_manager.reconcile_user(self.core_client.connector_runtime_service_identity())
@@ -63,6 +66,17 @@ class AppState:
     skill_installer: SkillInstallationService = field(init=False)
     skill_watcher: SkillDirectoryWatcher = field(init=False)
     runtime: MonAgentRuntime = field(init=False)
+
+    def _apply_requested_workspace_switch(self, workspace: str) -> None:
+        # Future callbacks run on the runtime host thread. Rebuilding that host
+        # from its own thread would deadlock while closing it, so hand the
+        # lifecycle mutation to a short-lived daemon thread.
+        threading.Thread(
+            target=self.switch_workspace,
+            args=(workspace,),
+            name="mon-agent-workspace-switch",
+            daemon=True,
+        ).start()
 
     def _handle_connector_event(
         self,
@@ -155,6 +169,7 @@ class AppState:
         self.runtime.load_persisted_subagents(session_id)
         self.connector_manager.reconcile_user(token)
         self.hydrated_session_ids.add(session_id)
+        self.runtime.backfill_session_title_async(session_id, token)
 
     def ensure_hydrated(self, token: str, session_id: str) -> None:
         if session_id not in self.hydrated_session_ids:
@@ -167,6 +182,35 @@ class AppState:
 
     def forget_hydrated(self, session_id: str) -> None:
         self.hydrated_session_ids.discard(session_id)
+
+    def switch_workspace(self, workspace: str) -> Path:
+        target = Path(workspace).expanduser().resolve()
+        if not target.is_dir():
+            raise ValueError("所选项目文件夹不存在")
+        if getattr(self.runtime, "_running", {}):
+            raise ValueError("智能体正在执行任务，请等待当前任务结束后再切换项目文件夹")
+        self.skill_watcher.close()
+        self.runtime.close()
+        self.config.workspace_root = target
+        self.skill_installer = SkillInstallationService(target, self.core_client)
+        self.skill_watcher = SkillDirectoryWatcher(target, self.events.emit)
+        self.skill_watcher.start()
+        self.runtime = MonAgentRuntime(
+            target,
+            self.store,
+            self.events,
+            self.permissions,
+            self.questions,
+            self.core_client,
+            self.screen_captures,
+            environment_context(self.config.environment),
+            camera_captures=self.camera_captures,
+            skill_installer=self.skill_installer,
+            connector_manager=self.connector_manager,
+            on_workspace_switch_requested=self._apply_requested_workspace_switch,
+        )
+        self.events.emit({"type": "workspace.changed", "properties": {"path": str(target), "name": target.name}})
+        return target
 
     def close(self) -> None:
         self.skill_watcher.close()
@@ -197,4 +241,9 @@ def is_agent_api_route(pathname: str) -> bool:
         or pathname == "/tools/status"
         or pathname == "/skills"
         or pathname.startswith("/skills/")
+        or pathname == "/connectors"
+        or pathname.startswith("/connectors/")
+        or pathname == "/files"
+        or pathname == "/files/content"
+        or pathname == "/workspace"
     )

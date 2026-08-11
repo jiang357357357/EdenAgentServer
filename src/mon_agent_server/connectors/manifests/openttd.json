@@ -1,0 +1,190 @@
+{
+  "schemaVersion": 1,
+  "key": "openttd",
+  "name": "本地 OpenTTD",
+  "description": "连接本地 OpenTTD Admin Port 与 MonAgentBridge，观察游戏并执行结构化玩法操作。",
+  "icon": "gamepad",
+  "version": "6",
+  "adapter": "mon_agent_server.connectors.openttd:OpenTTDConnector",
+  "executeRequiresStream": true,
+  "watch": ["openttd.py", "openttd_instance.py"],
+  "events": {
+    "chat": {
+      "title": "接收游戏聊天",
+      "description": "监听 OpenTTD 服务器中的聊天消息。"
+    },
+    "new_game": {
+      "title": "新游戏事件",
+      "description": "接收新游戏开始与地图重载事件。"
+    },
+    "company_removed": {
+      "title": "公司状态事件",
+      "description": "接收公司移除等关键公司生命周期事件。"
+    },
+    "gamescript": {
+      "title": "桥接脚本事件",
+      "description": "接收 MonAgentBridge 返回的命令结果与游戏状态。"
+    }
+  },
+  "queries": {
+    "get_state": {
+      "type": "object",
+      "title": "查询游戏状态",
+      "description": "读取服务器、公司、经济统计与当前实例状态。",
+      "x-monagent-invocation": {"tool": "query_openttd", "query": "get_state"},
+      "properties": {},
+      "additionalProperties": false
+    },
+    "inspect_tile": {
+      "type": "object",
+      "title": "检查地图格",
+      "description": "读取指定地图坐标的地形与占用信息。",
+      "x-monagent-invocation": {"tool": "query_openttd", "query": "inspect_tile"},
+      "properties": {
+        "x": {"type": "integer", "minimum": 0, "description": "地图 X 坐标。"},
+        "y": {"type": "integer", "minimum": 0, "description": "地图 Y 坐标。"}
+      },
+      "required": ["x", "y"],
+      "additionalProperties": false
+    },
+    "find_towns": {
+      "type": "object",
+      "title": "查找城镇",
+      "description": "按位置查找附近城镇。",
+      "x-monagent-invocation": {"tool": "query_openttd", "query": "find_towns"},
+      "properties": {
+        "x": {"type": "integer", "minimum": 0, "description": "中心 X 坐标。"},
+        "y": {"type": "integer", "minimum": 0, "description": "中心 Y 坐标。"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "最多返回数量。"}
+      },
+      "additionalProperties": false
+    },
+    "find_industries": {
+      "type": "object",
+      "title": "查找产业",
+      "description": "按位置与货物关系查找产业。",
+      "x-monagent-invocation": {"tool": "query_openttd", "query": "find_industries"},
+      "properties": {
+        "x": {"type": "integer", "minimum": 0, "description": "中心 X 坐标。"},
+        "y": {"type": "integer", "minimum": 0, "description": "中心 Y 坐标。"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "最多返回数量。"}
+      },
+      "additionalProperties": false
+    },
+    "get_company_assets": {
+      "type": "object",
+      "title": "查询公司资产",
+      "description": "读取公司的车辆、车站与基础设施摘要。",
+      "x-monagent-invocation": {"tool": "query_openttd", "query": "get_company_assets"},
+      "properties": {
+        "company_id": {"type": "integer", "minimum": 0, "description": "公司 ID。"}
+      },
+      "required": ["company_id"],
+      "additionalProperties": false
+    },
+    "list_road_engines": {
+      "type": "object",
+      "title": "查询公路车型",
+      "description": "读取指定公司当前可购买的公路车辆。",
+      "x-monagent-invocation": {"tool": "query_openttd", "query": "list_road_engines"},
+      "properties": {
+        "company_id": {"type": "integer", "minimum": 0, "description": "公司 ID。"}
+      },
+      "required": ["company_id"],
+      "additionalProperties": false
+    },
+    "find_road_route_site": {
+      "type": "object",
+      "title": "规划公路站点",
+      "description": "在目标区域查找适合公路线路与站点的地图格。",
+      "x-monagent-invocation": {"tool": "query_openttd", "query": "find_road_route_site"},
+      "properties": {
+        "x": {"type": "integer", "minimum": 0, "description": "中心 X 坐标。"},
+        "y": {"type": "integer", "minimum": 0, "description": "中心 Y 坐标。"},
+        "length": {"type": "integer", "minimum": 6, "maximum": 40, "description": "候选线路长度。"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "actions": {
+    "refresh_state": {
+      "type": "object",
+      "title": "刷新服务器状态",
+      "description": "立即读取 Admin Port 的完整服务器与公司状态。",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "pause_game": {
+      "type": "object",
+      "title": "暂停游戏",
+      "description": "暂停当前 OpenTTD 游戏。",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "resume_game": {
+      "type": "object",
+      "title": "继续游戏",
+      "description": "继续运行当前 OpenTTD 游戏。",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "save_game": {
+      "type": "object",
+      "title": "保存游戏",
+      "description": "保存当前游戏，可指定存档名。",
+      "properties": {
+        "save_name": {"type": "string", "minLength": 1, "description": "存档名。"}
+      },
+      "additionalProperties": false
+    },
+    "send_chat": {
+      "type": "object",
+      "title": "发送游戏聊天",
+      "description": "向当前 OpenTTD 服务器发送聊天消息。",
+      "properties": {
+        "text": {"type": "string", "minLength": 1, "description": "消息内容。"}
+      },
+      "required": ["text"],
+      "additionalProperties": false
+    },
+    "gameplay_command": {
+      "type": "object",
+      "title": "执行游戏操作",
+      "description": "经 MonAgentBridge 执行一条结构化建造或车辆命令。",
+      "properties": {
+        "command": {
+          "type": "object",
+          "description": "结构化玩法命令。",
+          "properties": {
+            "action": {"type": "string", "minLength": 1, "description": "命令名称。"}
+          },
+          "required": ["action"]
+        }
+      },
+      "required": ["command"],
+      "additionalProperties": false
+    },
+    "gameplay_plan": {
+      "type": "object",
+      "title": "执行玩法计划",
+      "description": "按顺序执行一组结构化玩法命令，并只触发一次工具授权。",
+      "properties": {
+        "commands": {
+          "type": "array",
+          "description": "按顺序执行的玩法命令。",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "properties": {
+              "action": {"type": "string", "minLength": 1, "description": "命令名称。"}
+            },
+            "required": ["action"]
+          }
+        }
+      },
+      "required": ["commands"],
+      "additionalProperties": false
+    }
+  }
+}

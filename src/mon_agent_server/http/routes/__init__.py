@@ -1,4 +1,6 @@
 from .camera_capture import handle_camera_capture
+from .connectors import handle_connectors
+from .files import handle_files
 from .memos import handle_memos
 from .model import handle_model
 from .permissions import handle_permissions
@@ -9,6 +11,7 @@ from .sessions import handle_sessions
 from .speech import handle_speech
 from .skills import handle_skills
 from .tools import handle_tools
+from .workspace import handle_workspace
 
 API_ROUTE_HANDLERS = (
     handle_sessions,
@@ -16,8 +19,11 @@ API_ROUTE_HANDLERS = (
     handle_permissions,
     handle_questions,
     handle_camera_capture,
+    handle_connectors,
+    handle_files,
     handle_screen_capture,
     handle_tools,
+    handle_workspace,
     handle_skills,
     handle_model,
     handle_self_awake,

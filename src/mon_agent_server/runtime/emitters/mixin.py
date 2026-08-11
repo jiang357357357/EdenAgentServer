@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from mon_agent_core.harness.compaction import estimate_context_tokens
+from mon_agent_core.harness.compaction import estimate_context_tokens, estimate_tokens
 
 from ...core import CoreAuthenticationExpiredError
 from ...ids import create_id, now_ms
@@ -192,7 +192,9 @@ class RuntimeEmitterMixin:
             call_id = str(event.get("toolCallId"))
             tool_name = str(event.get("toolName") or run_state.tool_names.get(call_id) or "tool")
             started = run_state.tool_starts.get(call_id) or now_ms()
-            body = text_from_tool_result(event.get("partialResult") or {})
+            partial_result = event.get("partialResult") or {}
+            body = text_from_tool_result(partial_result)
+            details = partial_result.get("details") or partial_result.get("structuredContent") if isinstance(partial_result, dict) else None
             if run_state.assistant_message_id:
                 self.emit_tool_part(
                     session_id,
@@ -203,6 +205,7 @@ class RuntimeEmitterMixin:
                         "status": "running",
                         "input": run_state.tool_inputs.get(call_id),
                         "output": body,
+                        "details": details,
                         "time": {"start": started},
                     },
                 )
@@ -211,8 +214,11 @@ class RuntimeEmitterMixin:
             call_id = str(event.get("toolCallId"))
             tool_name = str(event.get("toolName"))
             started = run_state.tool_starts.get(call_id)
-            body = text_from_tool_result(event.get("result") or {})
+            result = event.get("result") or {}
+            body = text_from_tool_result(result)
             error_info = event.get("error") if isinstance(event.get("error"), dict) else {}
+            result_details = result.get("details") or result.get("structuredContent") if isinstance(result, dict) else None
+            details = error_info.get("details") if event.get("isError") else result_details
             run_state.finished_tool_calls.add(call_id)
             self.emit_runtime_thinking(session_id, run_state, f"工具 {tool_name} {'执行失败' if event.get('isError') else '执行完成'}。")
             if run_state.assistant_message_id:
@@ -223,10 +229,17 @@ class RuntimeEmitterMixin:
                         "error": str(error_info.get("message") or body or "工具执行失败。"),
                         "errorCode": str(error_info.get("code") or "execution_error"),
                         "retryable": bool(error_info.get("retryable", False)),
+                        "details": details,
                         "time": {"start": started, "end": now_ms()},
                     }
                     if event.get("isError")
-                    else {"status": "completed", "input": run_state.tool_inputs.get(call_id), "output": body, "time": {"start": started, "end": now_ms()}}
+                    else {
+                        "status": "completed",
+                        "input": run_state.tool_inputs.get(call_id),
+                        "output": body,
+                        "details": details,
+                        "time": {"start": started, "end": now_ms()},
+                    }
                 )
                 self.emit_tool_part(session_id, run_state.assistant_message_id, call_id, tool_name, state)
 
@@ -373,9 +386,41 @@ class RuntimeEmitterMixin:
 
     def emit_session(self, session_id: str) -> None:
         session = self.store.require_session(session_id)
-        session["info"]["contextTokens"] = int(
-            estimate_context_tokens(self.store.context_messages(session_id)).get("tokens") or 0
+        context_messages = self.store.context_messages(session_id)
+        breakdown = dict(session["info"].get("tokenBreakdown") or {})
+        tokenizer_model = str(breakdown.get("tokenizerModel") or "").strip() or None
+        context_estimate = estimate_context_tokens(context_messages, tokenizer_model)
+        measured_context_tokens = int(context_estimate.get("tokens") or 0)
+        local_history_tokens = sum(
+            estimate_tokens(message, tokenizer_model) for message in context_messages
         )
+        cache_read_tokens = 0
+        for message in reversed(context_messages):
+            usage = message.get("usage") if isinstance(message, dict) else None
+            if isinstance(usage, dict):
+                cache_read_tokens = int(usage.get("cacheRead") or 0)
+                break
+        character_tokens = int(breakdown.get("characterRaw") or breakdown.get("character") or 0)
+        tool_tokens = int(breakdown.get("toolsRaw") or breakdown.get("tools") or 0)
+        skill_tokens = int(breakdown.get("skillsRaw") or breakdown.get("skills") or 0)
+        system_tokens = int(breakdown.get("systemRaw") or breakdown.get("system") or 0)
+        local_total = character_tokens + tool_tokens + skill_tokens + system_tokens + local_history_tokens
+        if context_estimate.get("lastUsageIndex") is None:
+            context_tokens = local_total
+        else:
+            context_tokens = measured_context_tokens
+        history_tokens = local_history_tokens
+        breakdown.update(
+            {
+                "character": character_tokens,
+                "tools": tool_tokens,
+                "skills": skill_tokens,
+                "system": system_tokens,
+            }
+        )
+        breakdown.update({"history": history_tokens, "cacheRead": cache_read_tokens})
+        session["info"]["tokenBreakdown"] = breakdown
+        session["info"]["contextTokens"] = context_tokens
         self.events.emit({"type": "session.updated", "properties": {"sessionID": session_id, "info": session["info"]}})
 
     def emit_session_error(self, session_id: str, error: Any) -> None:

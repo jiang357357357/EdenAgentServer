@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import difflib
 import hashlib
 import json
 import re
@@ -27,6 +28,8 @@ MAX_FILES = 512
 MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_BYTES = 50 * 1024 * 1024
 PREVIEW_TTL_SECONDS = 15 * 60
+MAX_PREVIEW_DIFF_CHARS = 24_000
+MAX_TEXT_DIFF_BYTES = 256 * 1024
 GENERATED_RESOURCE_ROOTS = {"scripts", "references", "assets", "agents", "tools", "tests"}
 GENERATED_FORBIDDEN_NAMES = {
     "README.md",
@@ -51,6 +54,9 @@ class SkillPreview:
     created_at: float
     replace_installation_id: str = ""
     enabled: bool = True
+    operation: str = "install"
+    base_content_hash: str = ""
+    change_set: dict[str, Any] | None = None
 
 
 def owner_storage_key(owner_id: object) -> str:
@@ -133,6 +139,145 @@ def _write_generated_files(root: Path, raw_files: Any) -> list[str]:
     return written
 
 
+def _apply_generated_file_changes(root: Path, raw_files: Any) -> list[dict[str, str]]:
+    """Apply explicit upsert/delete operations without touching omitted files."""
+    if raw_files in (None, []):
+        return []
+    if not isinstance(raw_files, list):
+        raise ValueError("files 必须是技能资源文件变更数组")
+    applied: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw_file in raw_files:
+        if not isinstance(raw_file, dict):
+            raise ValueError("每个技能资源文件变更必须是对象")
+        relative = _generated_file_path(raw_file.get("path"))
+        key = relative.as_posix()
+        if key in seen:
+            raise ValueError(f"技能资源路径重复：{key}")
+        seen.add(key)
+        operation = str(raw_file.get("operation") or "upsert").strip().lower()
+        if operation not in {"upsert", "delete"}:
+            raise ValueError(f"技能资源 operation 只支持 upsert 或 delete：{key}")
+        destination = root / relative
+        if operation == "delete":
+            if not destination.is_file():
+                raise ValueError(f"要删除的技能资源不存在：{key}")
+            destination.unlink()
+            parent = destination.parent
+            while parent != root and not any(parent.iterdir()):
+                parent.rmdir()
+                parent = parent.parent
+            applied.append({"path": key, "operation": operation})
+            continue
+
+        encoding = str(raw_file.get("encoding") or "utf-8").strip().lower()
+        content = raw_file.get("content")
+        if not isinstance(content, str):
+            raise ValueError(f"upsert 技能资源必须提供字符串 content：{key}")
+        if encoding == "utf-8":
+            data = content.encode("utf-8")
+        elif encoding == "base64":
+            try:
+                data = base64.b64decode(content, validate=True)
+            except (ValueError, binascii.Error) as error:
+                raise ValueError(f"技能资源不是有效 Base64：{key}") from error
+        else:
+            raise ValueError(f"技能资源 encoding 只支持 utf-8 或 base64：{key}")
+        if len(data) > MAX_FILE_BYTES:
+            raise ValueError(f"技能文件超过 10MB：{key}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+        if "executable" in raw_file:
+            if bool(raw_file.get("executable")):
+                if relative.parts[0] != "scripts":
+                    raise ValueError(f"只有 scripts/ 下的文件可以标记 executable：{key}")
+                destination.chmod(0o755)
+            else:
+                destination.chmod(0o644)
+        applied.append({"path": key, "operation": operation})
+    return applied
+
+
+def _package_files(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"), key=lambda item: item.as_posix())
+        if path.is_file() and path.name != INSTALLATION_MANIFEST
+    }
+
+
+def _text_for_diff(data: bytes | None) -> str | None:
+    if data is None:
+        return ""
+    if len(data) > MAX_TEXT_DIFF_BYTES or b"\0" in data:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _package_change_set(before: Path, after: Path) -> dict[str, Any]:
+    previous = _package_files(before)
+    current = _package_files(after)
+    added = sorted(set(current) - set(previous))
+    deleted = sorted(set(previous) - set(current))
+    modified = sorted(path for path in set(previous) & set(current) if previous[path] != current[path])
+    entries: list[dict[str, Any]] = []
+    diff_parts: list[str] = []
+    diff_length = 0
+    diff_truncated = False
+
+    for path in sorted(set(added) | set(deleted) | set(modified)):
+        old_data = previous.get(path)
+        new_data = current.get(path)
+        status = "added" if path in added else "deleted" if path in deleted else "modified"
+        entries.append(
+            {
+                "path": path,
+                "status": status,
+                "oldHash": hashlib.sha256(old_data).hexdigest() if old_data is not None else None,
+                "newHash": hashlib.sha256(new_data).hexdigest() if new_data is not None else None,
+                "oldBytes": len(old_data) if old_data is not None else 0,
+                "newBytes": len(new_data) if new_data is not None else 0,
+            }
+        )
+        old_text = _text_for_diff(old_data)
+        new_text = _text_for_diff(new_data)
+        if old_text is None or new_text is None:
+            continue
+        rendered = "".join(
+            difflib.unified_diff(
+                old_text.splitlines(keepends=True),
+                new_text.splitlines(keepends=True),
+                fromfile=f"a/{path}",
+                tofile=f"b/{path}",
+            )
+        )
+        if not rendered:
+            continue
+        remaining = MAX_PREVIEW_DIFF_CHARS - diff_length
+        if remaining <= 0:
+            diff_truncated = True
+            continue
+        if len(rendered) > remaining:
+            diff_parts.append(rendered[:remaining])
+            diff_length += remaining
+            diff_truncated = True
+        else:
+            diff_parts.append(rendered)
+            diff_length += len(rendered)
+
+    return {
+        "added": added,
+        "modified": modified,
+        "deleted": deleted,
+        "files": entries,
+        "diff": "\n".join(part.rstrip() for part in diff_parts if part).strip(),
+        "diffTruncated": diff_truncated,
+    }
+
+
 def _short_skill_description(description: str) -> str:
     value = description.strip().replace("\n", " ")
     if len(value) < 25:
@@ -159,15 +304,29 @@ def _validate_agent_metadata(root: Path, skill_name: str) -> None:
         raise ValueError(f"agents/openai.yaml 的 default_prompt 必须明确提及 ${skill_name}")
 
 
+def _agent_default_prompt(root: Path) -> str:
+    target = root / "agents" / "openai.yaml"
+    if not target.is_file():
+        return ""
+    try:
+        data = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return ""
+    interface = data.get("interface") if isinstance(data, dict) else None
+    return str(interface.get("default_prompt") or "") if isinstance(interface, dict) else ""
+
+
 def _write_agent_metadata(
     root: Path,
     skill_name: str,
     display_name: str,
     description: str,
     default_prompt: str,
+    *,
+    force: bool = False,
 ) -> None:
     target = root / "agents" / "openai.yaml"
-    if target.exists():
+    if target.exists() and not force:
         _validate_agent_metadata(root, skill_name)
         return
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -438,6 +597,7 @@ class SkillInstallationService:
                 file_count=file_count,
                 total_bytes=total_bytes,
                 created_at=time.time(),
+                operation="generated_create",
             )
             with self._lock:
                 self._discard_expired_previews()
@@ -449,6 +609,179 @@ class SkillInstallationService:
             shutil.rmtree(checkout.parent, ignore_errors=True)
             raise
 
+    def inspect_generated_update(
+        self,
+        owner_id: object,
+        token: str,
+        device_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build a reviewable incremental update while preserving omitted files."""
+        owner_key = owner_storage_key(owner_id)
+        name = str(payload.get("name") or "").strip()
+        scope = str(payload.get("scope") or "user").strip()
+        expected_hash = str(payload.get("expected_content_hash") or "").strip()
+        if not SKILL_NAME_PATTERN.fullmatch(name):
+            raise ValueError("技能 name 只能包含小写字母、数字和单个连字符")
+        if scope not in {"user", "project"}:
+            raise ValueError("scope 必须是 user 或 project")
+        if not expected_hash:
+            raise ValueError("更新技能前必须提供 list_skills 返回的 expected_content_hash")
+        existing = next(
+            (
+                record
+                for record in self._list_records(token, device_id)
+                if record.get("skill_name") == name and record.get("scope") == scope
+            ),
+            None,
+        )
+        if existing is None:
+            raise ValueError("技能不存在；请使用 create_skill 创建")
+        if str(existing.get("source_type") or "") != "generated":
+            raise ValueError("只有自编写技能可以通过 update_skill 修改")
+        root = skill_roots(self.workspace_root, owner_key)[scope]
+        target = root / name
+        if not target.is_dir():
+            raise ValueError("技能本地目录不存在，无法更新")
+        current_hash = _content_hash(target)
+        if expected_hash != current_hash:
+            raise ValueError(
+                "技能内容已变化，请重新调用 list_skills 后再预览更新："
+                f"expected={expected_hash} current={current_hash}"
+            )
+
+        preview_id = f"skill_preview_{uuid.uuid4().hex}"
+        checkout = root / ".staging" / preview_id / "checkout"
+        checkout.parent.mkdir(parents=True, exist_ok=False)
+        try:
+            shutil.copytree(
+                target,
+                checkout,
+                ignore=shutil.ignore_patterns(INSTALLATION_MANIFEST, "__pycache__", "*.pyc"),
+            )
+            known_tools = {
+                tool.name
+                for profile in ("user_chat", "self_awake")
+                for tool in create_mon_agent_tools(self.workspace_root, MonToolContext(), profile)
+            }
+            current_definition, current_version = _definition_from_directory(target, known_tools)
+            display_name = (
+                str(payload.get("display_name") or "").strip()
+                if "display_name" in payload else current_definition.name
+            )
+            description = (
+                str(payload.get("description") or "").strip()
+                if "description" in payload else current_definition.description
+            )
+            instructions = (
+                str(payload.get("instructions") or "").strip()
+                if "instructions" in payload else "\n\n".join(current_definition.instructions).strip()
+            )
+            version = (
+                str(payload.get("version") or "").strip()
+                if "version" in payload else current_version
+            )
+            tools = (
+                _string_tuple(payload.get("tools"))
+                if "tools" in payload else current_definition.tool_names
+            )
+            profiles = (
+                _string_tuple(payload.get("profiles"))
+                if "profiles" in payload else current_definition.profiles
+            )
+            if not display_name:
+                raise ValueError("技能 display_name 不能为空")
+            if not description:
+                raise ValueError("技能 description 不能为空")
+            if not instructions:
+                raise ValueError("技能 instructions 不能为空")
+            if not version:
+                raise ValueError("技能 version 不能为空")
+
+            frontmatter = {
+                "name": name,
+                "description": description,
+                "metadata": {
+                    "monagent": {
+                        "display_name": display_name,
+                        "version": version,
+                        "tools": list(tools),
+                        "profiles": list(profiles),
+                    }
+                },
+            }
+            skill_text = f"---\n{yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False)}---\n\n{instructions}\n"
+            (checkout / "SKILL.md").write_text(skill_text, encoding="utf-8")
+
+            file_operations = _apply_generated_file_changes(checkout, payload.get("files"))
+            explicit_paths = {item["path"] for item in file_operations}
+            current_default_prompt = _agent_default_prompt(target)
+            metadata_changed = any(
+                key in payload for key in ("display_name", "description", "default_prompt")
+            )
+            if "agents/openai.yaml" not in explicit_paths:
+                _write_agent_metadata(
+                    checkout,
+                    name,
+                    display_name,
+                    description,
+                    (
+                        str(payload.get("default_prompt") or "").strip()
+                        if "default_prompt" in payload else current_default_prompt
+                    ),
+                    force=metadata_changed,
+                )
+            else:
+                _validate_agent_metadata(checkout, name)
+
+            file_count, total_bytes = _validate_tree(checkout)
+            definition, normalized_version = _definition_from_directory(checkout, known_tools)
+            if definition.id != name:
+                raise ValueError("更新不能修改技能 name")
+            change_set = _package_change_set(target, checkout)
+            if not change_set["files"]:
+                raise ValueError("更新没有产生任何内容变化")
+            preview = SkillPreview(
+                preview_id=preview_id,
+                owner_key=owner_key,
+                scope=scope,
+                source={"type": "generated", "uri": f"generated:{name}", "ref": "", "subpath": ""},
+                stage_dir=checkout,
+                definition=definition,
+                version=normalized_version,
+                content_hash=_content_hash(checkout),
+                file_count=file_count,
+                total_bytes=total_bytes,
+                created_at=time.time(),
+                replace_installation_id=str(existing.get("external_installation_id") or ""),
+                enabled=bool(existing.get("enabled", True)),
+                operation="generated_update",
+                base_content_hash=current_hash,
+                change_set=change_set,
+            )
+            with self._lock:
+                self._discard_expired_previews()
+                self._previews[preview_id] = preview
+            result = self._preview_payload(preview)
+            result["fileOperations"] = file_operations
+            return result
+        except Exception:
+            shutil.rmtree(checkout.parent, ignore_errors=True)
+            raise
+
+    def apply_generated_update(
+        self,
+        owner_id: object,
+        token: str,
+        device_id: str,
+        preview_id: str,
+    ) -> dict[str, Any]:
+        with self._lock:
+            preview = self._previews.get(preview_id)
+            if preview is None or preview.operation != "generated_update":
+                raise ValueError("技能更新预览不存在或已失效")
+        return self.install(owner_id, token, device_id, preview_id)
+
     def create_generated(
         self,
         owner_id: object,
@@ -456,7 +789,7 @@ class SkillInstallationService:
         device_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        """Validate and atomically create or update a model-authored skill."""
+        """Validate and atomically create a new model-authored skill."""
         preview_payload = self.inspect_generated(owner_id, payload)
         preview_id = str(preview_payload["previewID"])
         name = str(preview_payload["skillName"])
@@ -469,11 +802,13 @@ class SkillInstallationService:
             ),
             None,
         )
-        if existing:
+        target = skill_roots(self.workspace_root, owner_storage_key(owner_id))[scope] / name
+        if existing or target.exists():
             with self._lock:
-                preview = self._previews.get(preview_id)
-                if preview is not None:
-                    preview.replace_installation_id = str(existing.get("external_installation_id") or "")
+                abandoned = self._previews.pop(preview_id, None)
+            if abandoned is not None:
+                shutil.rmtree(abandoned.stage_dir.parent, ignore_errors=True)
+            raise ValueError("技能已存在；create_skill 仅用于新建，请使用 update_skill 更新")
         try:
             return self.install(owner_id, token, device_id, preview_id)
         except Exception:
@@ -494,7 +829,17 @@ class SkillInstallationService:
         target = root / preview.definition.id
         if target.exists() and not preview.replace_installation_id:
             shutil.rmtree(preview.stage_dir.parent, ignore_errors=True)
+            if preview.operation == "generated_create":
+                raise ValueError("技能已存在；create_skill 仅用于新建，请使用 update_skill 更新")
             raise ValueError("该技能已安装；请先卸载或使用更新流程")
+        if preview.base_content_hash:
+            current_hash = _content_hash(target) if target.is_dir() else ""
+            if current_hash != preview.base_content_hash:
+                shutil.rmtree(preview.stage_dir.parent, ignore_errors=True)
+                raise ValueError(
+                    "技能内容在预览后已变化，更新未安装；请重新调用 list_skills 和 update_skill 生成预览："
+                    f"expected={preview.base_content_hash} current={current_hash or 'missing'}"
+                )
         installation_id = preview.replace_installation_id or f"skill_{uuid.uuid4().hex}"
         manifest = {
             "schemaVersion": 1,
@@ -515,9 +860,17 @@ class SkillInstallationService:
             encoding="utf-8",
         )
         backup = target.with_name(f".{target.name}.updating-{uuid.uuid4().hex}")
+        backed_up = False
         if target.exists():
             target.rename(backup)
-        preview.stage_dir.rename(target)
+            backed_up = True
+        try:
+            preview.stage_dir.rename(target)
+        except Exception:
+            if backed_up and backup.exists() and not target.exists():
+                backup.rename(target)
+            shutil.rmtree(preview.stage_dir.parent, ignore_errors=True)
+            raise
         shutil.rmtree(preview.stage_dir.parent, ignore_errors=True)
         try:
             record = self.core_client.upsert_skill_installation(
@@ -545,7 +898,13 @@ class SkillInstallationService:
                 backup.rename(target)
             raise
         shutil.rmtree(backup, ignore_errors=True)
-        return self._record_payload(record, target)
+        result = self._record_payload(record, target)
+        result["operation"] = preview.operation
+        if preview.base_content_hash:
+            result["previousContentHash"] = preview.base_content_hash
+        if preview.change_set is not None:
+            result["changes"] = preview.change_set
+        return result
 
     def inspect_update(
         self,
@@ -649,6 +1008,7 @@ class SkillInstallationService:
             "scope",
             "sourceType",
             "version",
+            "contentHash",
             "enabled",
             "trustStatus",
             "builtin",
@@ -808,8 +1168,9 @@ class SkillInstallationService:
 
     @staticmethod
     def _preview_payload(preview: SkillPreview) -> dict[str, Any]:
-        return {
+        payload = {
             "previewID": preview.preview_id,
+            "operation": preview.operation,
             "skillName": preview.definition.id,
             "displayName": preview.definition.name,
             "description": preview.definition.description,
@@ -825,6 +1186,11 @@ class SkillInstallationService:
             "expiresAt": int((preview.created_at + PREVIEW_TTL_SECONDS) * 1000),
             "replaceInstallationID": preview.replace_installation_id or None,
         }
+        if preview.base_content_hash:
+            payload["baseContentHash"] = preview.base_content_hash
+        if preview.change_set is not None:
+            payload["changes"] = preview.change_set
+        return payload
 
     @staticmethod
     def _record_payload(record: dict[str, Any], path: Path) -> dict[str, Any]:
@@ -841,7 +1207,7 @@ class SkillInstallationService:
             "sourceRef": record.get("source_ref"),
             "sourceSubpath": source.get("subpath") or "",
             "version": record.get("installed_version"),
-            "contentHash": record.get("content_hash"),
+            "contentHash": _content_hash(path) if path.is_dir() else record.get("content_hash"),
             "fileCount": snapshot.get("fileCount"),
             "totalBytes": snapshot.get("totalBytes"),
             "enabled": bool(record.get("enabled")),

@@ -240,6 +240,30 @@ class QuestionBroker:
         )
         return True
 
+    def reject_all(self, session_id: str | None = None, reason: str = "cancelled") -> int:
+        with self._lock:
+            matching = [
+                (request_id, waiter)
+                for request_id, waiter in self._waiters.items()
+                if session_id is None or waiter.request.get("sessionID") == session_id
+            ]
+            for request_id, _waiter in matching:
+                self._waiters.pop(request_id, None)
+        for request_id, waiter in matching:
+            waiter.rejected = True
+            waiter.event.set()
+            self._events.emit(
+                {
+                    "type": "question.rejected",
+                    "properties": {
+                        "sessionID": waiter.request.get("sessionID"),
+                        "requestID": request_id,
+                        "reason": reason,
+                    },
+                }
+            )
+        return len(matching)
+
 
 @dataclass(slots=True)
 class _CaptureWaiter:

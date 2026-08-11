@@ -91,7 +91,8 @@ class RuntimeCompactionMixin:
             runtime_config = await self._resolve_runtime_config(auth_token, primary_participant.get("assistantID"))
             await self.sync_core_session(session_id, auth_token, runtime_config.core)
             messages = self.store.context_messages(session_id)
-            before_tokens = int(estimate_context_tokens(messages).get("tokens") or 0)
+            model_id = str(runtime_config.model.get("id") or "").strip() or None
+            before_tokens = int(estimate_context_tokens(messages, model_id).get("tokens") or 0)
             compacted_messages = await self.compact_agent_messages_if_needed(
                 session_id,
                 run_state,
@@ -102,7 +103,9 @@ class RuntimeCompactionMixin:
                 force=True,
                 custom_instructions=custom_instructions,
             )
-            after_tokens = int(estimate_context_tokens(compacted_messages).get("tokens") or 0)
+            after_tokens = int(
+                estimate_context_tokens(compacted_messages, model_id).get("tokens") or 0
+            )
             self.emit_runtime_thinking(
                 session_id,
                 run_state,
@@ -158,7 +161,8 @@ class RuntimeCompactionMixin:
             }
         if not force and not settings.get("enabled", True):
             return messages
-        estimate = estimate_context_tokens(messages)
+        model_id = str(runtime_config.model.get("id") or "").strip() or None
+        estimate = estimate_context_tokens(messages, model_id)
         context_tokens = int(estimate.get("tokens") or 0)
         context_window = runtime_context_window(runtime_config.model)
         if settings.get("keepRecentTokens") is None:
@@ -188,7 +192,7 @@ class RuntimeCompactionMixin:
             ),
         )
         entries = messages_to_compaction_entries(messages)
-        preparation = prepare_compaction(entries, settings)
+        preparation = prepare_compaction(entries, settings, model_id)
         if not preparation.ok:
             if force:
                 raise RuntimeError(f"上下文压缩准备失败：{preparation.error}")
@@ -236,7 +240,9 @@ class RuntimeCompactionMixin:
         # pre-compaction size and can immediately trigger another compaction.
         for compacted_message in compacted_messages:
             compacted_message.pop("usage", None)
-        tokens_after = int(estimate_context_tokens(compacted_messages).get("tokens") or 0)
+        tokens_after = int(
+            estimate_context_tokens(compacted_messages, model_id).get("tokens") or 0
+        )
         self.store.replace_context_messages(session_id, compacted_messages)
         hidden_message = self.store.append_compaction_message(
             session_id,

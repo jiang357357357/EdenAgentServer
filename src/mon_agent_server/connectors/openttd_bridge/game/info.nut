@@ -2,7 +2,7 @@ class MonAgentBridgeInfo extends GSInfo {
     function GetAuthor()      { return "MonAgent"; }
     function GetName()        { return "MonAgentBridge"; }
     function GetDescription() { return "Structured Admin Port bridge for MonAgent gameplay commands."; }
-    function GetVersion()     { return 1; }
+    function GetVersion()     { return 6; }
     function MinVersionToLoad(){ return 1; }
     function GetDate()        { return "2026-08-07"; }
     function CreateInstance() { return "MonAgentBridge"; }

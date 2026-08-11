@@ -11,7 +11,7 @@ SAFE_TOOL_NAMES = frozenset({
     "external_ls", "external_read", "external_find", "external_grep",
     "search_memories", "web", "get_self_awake_state", "list_self_awake_diaries",
     "read_self_awake_diary", "external_email_status", "qq_bot_list", "qq_bot_targets",
-    "read_qq_messages", "loaded_tools", "write_stdin", "list_assistants", "list_connectors",
+    "read_qq_messages", "loaded_tools", "write_stdin", "get_diff", "list_assistants", "list_connectors",
     "query_openttd", "ask_user", "analyze_image", "analyze_screen",
     "get_calendar_context", "get_weather", "list_character_actions", "switch_character_action",
     "list_character_stickers", "send_character_sticker", "list_memos", "list_due_memos",
@@ -22,19 +22,26 @@ SAFE_TOOL_NAMES = frozenset({
 VISUAL_TOOL_NAMES = frozenset({"analyze_screen", "capture_camera", "analyze_image"})
 CONNECTOR_TOOL_NAMES = frozenset({
     "list_connectors", "register_connector", "set_connector_state", "claim_connector_events",
-    "finish_connector_events", "query_openttd", "execute_connector_action",
+    "finish_connector_events", "query_openttd", "execute_connector_action", "openttd_newgrf",
 })
-CODING_TOOL_NAMES = frozenset({"read", "bash", "write_stdin", "edit", "write", "apply_patch", "grep", "find", "ls"})
+CODING_TOOL_NAMES = frozenset({"read", "bash", "write_stdin", "edit", "write", "apply_patch", "grep", "find", "ls", "get_diff"})
 
 # Match Codex's distinction between registration and model exposure. These are
 # the small, general-purpose tools worth paying schema tokens for on every turn.
 DIRECT_TOOL_NAMES = frozenset({
     "load_skill", "tool_search", "ask_user",
     "web",
-    "read", "ls", "grep", "find", "write", "edit", "apply_patch", "bash", "write_stdin",
+    "read", "ls", "grep", "find", "get_diff", "write", "edit", "apply_patch", "bash", "write_stdin",
     "list_character_actions", "switch_character_action",
     "remember_memory", "search_memories", "update_memory", "forget_memory",
+    # A character's work diary is a first-party conversational resource, not a
+    # niche integration. Keep its compact discovery/read pair visible so a
+    # natural question such as "你能读到自己的工作日记吗" does not fall back to
+    # filesystem or long-term-memory searches merely because the model did not
+    # first discover the self-awake skill.
+    "list_self_awake_diaries", "read_self_awake_diary",
     "list_assistants", "switch_session_assistant",
+    "switch_workspace",
     "spawn_agent", "send_message", "followup_task", "list_agents", "interrupt_agent",
 })
 

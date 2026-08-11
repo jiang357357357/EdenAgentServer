@@ -2,6 +2,8 @@ import unittest
 from http import HTTPStatus
 
 from mon_agent_server.app import is_agent_api_route
+from mon_agent_server.connectors.catalog import ConnectorContractError
+from mon_agent_server.http.routes.connectors import handle_connectors
 from mon_agent_server.http.routes.model import _model_option
 from mon_agent_server.http.routes.self_awake import handle_self_awake
 from mon_agent_server.http.routes.sessions import handle_sessions
@@ -12,6 +14,61 @@ from mon_agent_server.runtime.config.models import RuntimeModelConfig
 
 
 class RouteTest(unittest.TestCase):
+    def test_connector_catalog_route_returns_installed_manifest_catalog(self):
+        class Catalog:
+            @staticmethod
+            def public_catalog():
+                return ([{"key": "fixture", "capabilities": []}], [])
+
+        class ConnectorManager:
+            catalog = Catalog()
+
+        class App:
+            connector_manager = ConnectorManager()
+
+        class Handler:
+            headers = {"Authorization": "Bearer core-token"}
+            app = App()
+
+            def json_response(self, data, status=200):
+                self.response = (data, status)
+
+        handler = Handler()
+        handled = handle_connectors(handler, "/connectors/catalog", {}, "GET")
+
+        self.assertTrue(handled)
+        self.assertEqual(handler.response, ({"connectors": [{"key": "fixture", "capabilities": []}], "errors": []}, 200))
+
+    def test_connector_registration_rejects_missing_manifest_before_core_write(self):
+        class Catalog:
+            @staticmethod
+            def load(_key):
+                raise ConnectorContractError("未安装连接器类型：missing。")
+
+        class ConnectorManager:
+            catalog = Catalog()
+
+        class App:
+            connector_manager = ConnectorManager()
+
+        class Handler:
+            headers = {"Authorization": "Bearer core-token"}
+            app = App()
+
+            @staticmethod
+            def read_json_body():
+                return {"connector_key": "missing", "identity_key": "local"}
+
+            def json_response(self, data, status=200):
+                self.response = (data, status)
+
+        handler = Handler()
+        handled = handle_connectors(handler, "/connectors", {}, "POST")
+
+        self.assertTrue(handled)
+        self.assertEqual(handler.response[1], HTTPStatus.BAD_REQUEST)
+        self.assertEqual(handler.response[0]["code"], "connector_not_installed")
+
     def test_delete_session_removes_core_and_local_state(self):
         calls = []
 
@@ -201,6 +258,9 @@ class RouteTest(unittest.TestCase):
         self.assertTrue(is_agent_api_route("/memos/1/complete"))
         self.assertTrue(is_agent_api_route("/screen-capture/cap_1/reply"))
         self.assertTrue(is_agent_api_route("/skills/sample-skill/inspect-update"))
+        self.assertTrue(is_agent_api_route("/connectors"))
+        self.assertTrue(is_agent_api_route("/connectors/catalog"))
+        self.assertTrue(is_agent_api_route("/connectors/3"))
         self.assertFalse(is_agent_api_route("/assets/index.js"))
 
     def test_strip_api_prefix(self):

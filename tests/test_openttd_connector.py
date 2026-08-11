@@ -1,6 +1,8 @@
 import asyncio
+import json
 import os
 import struct
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -18,6 +20,7 @@ from mon_agent_server.connectors.openttd import (
     _packet,
     openttd_password_environment,
 )
+from mon_agent_server.connectors.openttd_instance import load_active_instance
 
 
 async def _noop(*_args):
@@ -28,7 +31,35 @@ def _string(value: str) -> bytes:
     return value.encode() + b"\0"
 
 
+def _instance_registry(directory: str, admin_port: int) -> str:
+    path = os.path.join(directory, "active-instance.json")
+    with open(path, "w", encoding="utf-8") as output:
+        json.dump({
+            "instance_id": "test-instance",
+            "host": "127.0.0.1",
+            "game_port": admin_port + 1,
+            "admin_port": admin_port,
+            "pid": os.getpid(),
+            "mode": "test",
+            "started_at": "2026-08-08T00:00:00+00:00",
+        }, output)
+    return path
+
+
 class OpenTTDConnectorTest(unittest.IsolatedAsyncioTestCase):
+    def test_instance_registry_is_the_connection_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = _instance_registry(directory, 43123)
+            instance = load_active_instance(path)
+            self.assertEqual(instance.instance_id, "test-instance")
+            self.assertEqual(instance.admin_port, 43123)
+            self.assertEqual(instance.pid, os.getpid())
+
+    def test_missing_instance_registry_is_not_replaced_by_a_fixed_port(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RuntimeError, "没有活动"):
+                load_active_instance(os.path.join(directory, "missing.json"))
+
     def test_password_environment_is_scoped_by_identity(self):
         self.assertEqual(openttd_password_environment("Local Main"), "MON_CONNECTOR_OPENTTD_LOCAL_MAIN")
 
@@ -79,18 +110,19 @@ class OpenTTDConnectorTest(unittest.IsolatedAsyncioTestCase):
 
         server = await asyncio.start_server(handle, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
-        connector = OpenTTDConnector(
-            {"identity_key": "local", "settings": {"host": "127.0.0.1", "admin_port": port}},
-            _noop,
-            _noop,
-        )
-        with patch.dict(os.environ, {"MON_CONNECTOR_OPENTTD_LOCAL": "secret"}):
-            runner = asyncio.create_task(connector.run())
-            await connector.execute("refresh_state", {})
-            await connector.execute("send_chat", {"text": "你好"})
-            runner.cancel()
-            await asyncio.gather(runner, return_exceptions=True)
-            await connector.close()
+        with tempfile.TemporaryDirectory() as directory:
+            connector = OpenTTDConnector(
+                {"identity_key": "local", "settings": {"instance_registry": _instance_registry(directory, port)}},
+                _noop,
+                _noop,
+            )
+            with patch.dict(os.environ, {"MON_CONNECTOR_OPENTTD_LOCAL": "secret"}):
+                runner = asyncio.create_task(connector.run())
+                await connector.execute("refresh_state", {})
+                await connector.execute("send_chat", {"text": "你好"})
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
+                await connector.close()
         await asyncio.sleep(0)
         server.close()
         await server.wait_closed()
@@ -146,18 +178,19 @@ class OpenTTDConnectorTest(unittest.IsolatedAsyncioTestCase):
 
         server = await asyncio.start_server(handle, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
-        connector = OpenTTDConnector(
-            {"identity_key": "local", "settings": {"host": "127.0.0.1", "admin_port": port}}, _noop, _noop,
-        )
-        with patch.dict(os.environ, {"MON_CONNECTOR_OPENTTD_LOCAL": "secret"}):
-            runner = asyncio.create_task(connector.run())
-            result = await connector.execute("gameplay_command", {"command": {"action": "ping"}})
-            self.assertTrue(result["ok"])
-            self.assertTrue(connector._state_payload("test")["capabilities"]["company_gameplay"])
-            self.assertTrue(connector.runtime_snapshot()["capabilities"]["gameplay_bridge_ready"])
-            runner.cancel()
-            await asyncio.gather(runner, return_exceptions=True)
-            await connector.close()
+        with tempfile.TemporaryDirectory() as directory:
+            connector = OpenTTDConnector(
+                {"identity_key": "local", "settings": {"instance_registry": _instance_registry(directory, port)}}, _noop, _noop,
+            )
+            with patch.dict(os.environ, {"MON_CONNECTOR_OPENTTD_LOCAL": "secret"}):
+                runner = asyncio.create_task(connector.run())
+                result = await connector.execute("gameplay_command", {"command": {"action": "ping"}})
+                self.assertTrue(result["ok"])
+                self.assertTrue(connector._state_payload("test")["capabilities"]["company_gameplay"])
+                self.assertTrue(connector.runtime_snapshot()["capabilities"]["gameplay_bridge_ready"])
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
+                await connector.close()
         server.close()
         await server.wait_closed()
 

@@ -91,6 +91,26 @@ def handle_sessions(handler: Any, path: str, query: dict[str, list[str]], method
         return True
 
     session_match = re.match(r"^/session/([^/]+)$", path)
+    if session_match and method in {"PATCH", "PUT"}:
+        session_id = urllib.parse.unquote(session_match.group(1))
+        token = require_core_token(handler.headers)
+        body = handler.read_json_body()
+        title = str(body.get("title") or "").strip()
+        if not title:
+            handler.json_response({"error": "会话标题不能为空。"}, status=400)
+            return True
+        handler.app.ensure_hydrated(token, session_id)
+        info = handler.app.store.set_session_title(session_id, title, "user")
+        persisted_session = {
+            **info,
+            "modelEvents": handler.app.store.model_events(session_id),
+            "characterRuntime": handler.app.store.get_character_action(session_id),
+        }
+        handler.app.core_client.sync_agent_session(token, persisted_session)
+        handler.app.events.emit({"type": "session.updated", "properties": {"sessionID": session_id, "info": info}})
+        handler.json_response(info)
+        return True
+
     if session_match and method == "DELETE":
         session_id = urllib.parse.unquote(session_match.group(1))
         token = require_core_token(handler.headers)

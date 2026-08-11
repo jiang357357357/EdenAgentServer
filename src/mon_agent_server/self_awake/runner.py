@@ -328,6 +328,23 @@ async def run_self_awake_agent(
             raise RuntimeError("自醒创建技能需要有效登录态。")
         return app.skill_installer.create_generated(skill_owner_id, token, "local", payload)
 
+    def update_skill(payload: dict[str, Any]) -> dict[str, Any]:
+        if not token or skill_owner_id in (None, ""):
+            raise RuntimeError("自醒更新技能需要有效登录态。")
+        action = str(payload.get("action") or "").strip()
+        if action == "preview":
+            return app.skill_installer.inspect_generated_update(
+                skill_owner_id, token, "local", payload
+            )
+        if action == "apply":
+            preview_id = str(payload.get("preview_id") or "").strip()
+            if not preview_id:
+                raise ValueError("action=apply 时必须提供 preview_id")
+            return app.skill_installer.apply_generated_update(
+                skill_owner_id, token, "local", preview_id
+            )
+        raise ValueError("action 必须是 preview 或 apply")
+
     def list_skills(payload: dict[str, Any]) -> list[dict[str, Any]]:
         if not token or skill_owner_id in (None, ""):
             raise RuntimeError("自醒查看技能需要有效登录态。")
@@ -351,6 +368,7 @@ async def run_self_awake_agent(
             operation_id=self_awake_operation_id(request) or None,
             list_skills=list_skills,
             create_skill=create_skill,
+            update_skill=update_skill,
         ),
         profile="self_awake",
         owner_key=skill_owner_key,
@@ -518,6 +536,13 @@ async def run_self_awake(request: dict[str, Any], app: AppState, token: str | No
     )
     decision["assistant_id"] = runtime_assistant.get("id")
     decision["character_id"] = runtime_character.get("id")
+    decision["author"] = {
+        "assistant_id": runtime_assistant.get("id"),
+        "assistant_name": runtime_assistant.get("name") or runtime_character.get("name") or "助手",
+        "character_id": runtime_character.get("id"),
+        "character_name": runtime_character.get("name") or runtime_assistant.get("name") or "助手",
+        "avatar_url": runtime_character.get("avatar_url") or "",
+    }
     render_self_awake_decision(app, decision, runtime_config, now_ms() - started, character, decision["usage"])
     return decision
 
@@ -560,6 +585,13 @@ def run_self_awake_sync_with_watchdog(
         }
         decision["assistant_id"] = request.get("assistant_id")
         decision["character_id"] = character.get("id")
+        decision["author"] = {
+            "assistant_id": request.get("assistant_id"),
+            "assistant_name": character.get("name") or "助手",
+            "character_id": character.get("id"),
+            "character_name": character.get("name") or "助手",
+            "avatar_url": character.get("avatar_url") or "",
+        }
         return decision
     if "error" in outcome:
         raise outcome["error"]

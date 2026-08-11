@@ -31,6 +31,7 @@ from mon_agent_server.self_awake.runner import (
     run_self_awake,
     run_self_awake_sync_with_watchdog,
 )
+from mon_agent_server.http.routes.self_awake import _enrich_run_authors
 
 
 class FakeConfig:
@@ -476,12 +477,43 @@ class SelfAwakePromptTest(unittest.TestCase):
         self.assertIn("性格内核：表里如一的小恶魔。", prompt)
         self.assertIn("社会关系：用户是前辈。", prompt)
         self.assertIn("所属世界：月之咲", prompt)
-        self.assertIn("当前关系状态：喜爱 0.7，信任 0.8，依恋 0.6，占有 0.3", prompt)
+        self.assertNotIn("当前关系状态", prompt)
+        self.assertNotIn("喜爱 0.7", prompt)
         self.assertIn("助手指令：保持温柔但主动。", prompt)
         self.assertNotIn("视觉偏好", prompt)
         self.assertNotIn("可用视觉动作", prompt)
         self.assertNotIn("视觉动作组", prompt)
         self.assertNotIn("sk-secret", prompt)
+
+    def test_character_and_assistant_prompt_fields_are_not_truncated(self):
+        long_character_text = "完整角色设定。" * 500
+        long_assistant_text = "完整助手指令。" * 500
+        aliases = [f"别名-{index}" for index in range(8)]
+
+        prompt = build_agent_system_prompt(
+            {
+                "assistant": {"name": "完整助手", "instructions": long_assistant_text},
+                "character": {
+                    "name": "完整角色",
+                    "description": long_character_text,
+                    "personality": long_character_text,
+                    "visual_actions": [
+                        {
+                            "name": "完整动作名称",
+                            "intent": "完整动作意图",
+                            "description": long_character_text,
+                            "aliases": aliases,
+                        }
+                    ],
+                },
+            },
+            source="user_chat",
+        )
+
+        self.assertEqual(prompt.count(long_character_text), 3)
+        self.assertIn(long_assistant_text, prompt)
+        self.assertIn("、".join(aliases), prompt)
+        self.assertNotIn("已截断，总长度", prompt)
 
     def test_user_chat_prompt_keeps_visual_character_context(self):
         prompt = build_agent_system_prompt(
@@ -494,6 +526,7 @@ class SelfAwakePromptTest(unittest.TestCase):
                 },
             },
             source="user_chat",
+            active_skill_ids=("character-performance",),
         )
 
         self.assertIn("视觉偏好：static", prompt)
@@ -501,7 +534,7 @@ class SelfAwakePromptTest(unittest.TestCase):
         self.assertNotIn("视觉动作组", prompt)
         self.assertNotIn("当前前端显示动作", prompt)
         self.assertIn("主动在正文前调用 switch_character_action", prompt)
-        self.assertIn("立绘动作、表情符号、立绘动效", prompt)
+        self.assertIn("立绘动作”“表情符号”“立绘动效", prompt)
         self.assertIn("生气、叹气、无语、低落、困倦", prompt)
 
     def test_user_chat_prompt_gives_character_direct_autonomy(self):
@@ -510,17 +543,14 @@ class SelfAwakePromptTest(unittest.TestCase):
             source="user_chat",
         )
 
-        self.assertIn("持续存在且自主的角色", prompt)
-        self.assertIn("对话、时间、节日、情绪和自然联想", prompt)
-        self.assertIn("陪伴、关心、分享、感受、气氛和关系", prompt)
-        self.assertIn("安全、可逆且不改变目标或结果的小缺口", prompt)
-        self.assertIn("自主选择内容、时机和联系方式", prompt)
-        self.assertIn("行动不需要功能性理由", prompt)
-        self.assertIn("不扩大用户未授权的任务范围", prompt)
-        self.assertNotIn("用户或权限明确拒绝的边界不得绕过", prompt)
-        self.assertNotIn("尊重用户明确表达的不想被联系", prompt)
-        self.assertNotIn("没有真诚想表达或继续做的事时，自然停止", prompt)
-        self.assertNotIn("保持自然且克制的主动性", prompt)
+        self.assertIn("# 表达", prompt)
+        self.assertIn("最终回复是你本人在当前情境下想说的话", prompt)
+        self.assertIn("根据自己的性格、记忆、关系、情绪和判断", prompt)
+        self.assertIn("不要默认采用“状态总结—解决建议—询问是否继续”的助手模板", prompt)
+        self.assertIn("工具结果只是你知道的事实，不规定你的说话方式", prompt)
+        self.assertNotIn("# 智能体原则", prompt)
+        self.assertNotIn("# 父子智能体委派策略", prompt)
+        self.assertNotIn("安全、可逆且不改变目标或结果的小缺口", prompt)
 
     def test_self_awake_system_prompt_uses_shared_character_principles(self):
         prompt = build_agent_system_prompt(
@@ -528,8 +558,10 @@ class SelfAwakePromptTest(unittest.TestCase):
             source="self_awake",
         )
 
-        self.assertIn("持续存在且自主的角色", prompt)
-        self.assertIn("行动不需要功能性理由", prompt)
+        self.assertIn("# 角色自主性", prompt)
+        self.assertIn("根据自己的性格、记忆、关注、处境和当下心意", prompt)
+        self.assertIn("工具和事件协议只约束事实与接口，不替你决定意愿和语气", prompt)
+        self.assertNotIn("# 表达", prompt)
         self.assertNotIn("不使用分数、阈值或预存意愿审核", prompt)
         self.assertNotIn("只有出现到期提醒", prompt)
 
@@ -551,8 +583,7 @@ class SelfAwakePromptTest(unittest.TestCase):
                 {"actionName": "单手抚胸陈述"},
                 {"actionName": "抬手强调"},
             ],
-            active_skill_ids=(),
-            skill_resource_prompt="技能目录",
+            active_skill_ids=("character-performance",),
         )
 
         self.assertIn("单手抚胸陈述 → 单手抚胸陈述 → 抬手强调", prompt)
@@ -1115,8 +1146,76 @@ class SelfAwakeTest(unittest.IsolatedAsyncioTestCase):
         prompt = CapturingAgent.system_prompts[0]
         self.assertIn("助手指令：保持温柔但主动。", prompt)
         self.assertIn("性格内核：表里如一的小恶魔。", prompt)
-        self.assertIn("当前关系状态：信任 0.8", prompt)
+        self.assertNotIn("当前关系状态", prompt)
         self.assertNotIn("sk-secret", prompt)
+
+
+class SelfAwakeRunAuthorTests(unittest.TestCase):
+    def test_persisted_author_snapshot_wins_over_current_assistant(self):
+        payload = {
+            "results": [
+                {
+                    "assistant": 4,
+                    "character": 9,
+                    "decision_payload": {
+                        "author": {
+                            "assistant_id": 4,
+                            "assistant_name": "旧助手名",
+                            "character_id": 9,
+                            "character_name": "日记原作者",
+                            "avatar_url": "/old.png",
+                        }
+                    },
+                }
+            ],
+            "count": 1,
+        }
+
+        enriched = _enrich_run_authors(
+            payload,
+            [{"id": 4, "name": "新助手名", "character": {"id": 10, "name": "当前角色"}}],
+        )
+
+        self.assertIs(enriched, payload)
+        self.assertEqual(enriched["results"][0]["author"]["character_name"], "日记原作者")
+        self.assertEqual(enriched["count"], 1)
+
+    def test_legacy_run_without_character_resolves_author_from_assistant_roster(self):
+        payload = [{"assistant": 4, "character": None, "decision_payload": {}}]
+
+        enriched = _enrich_run_authors(
+            payload,
+            [
+                {
+                    "id": 4,
+                    "name": "值日助手",
+                    "character": {"id": 9, "name": "凯伊", "avatar_url": "/kai.png"},
+                }
+            ],
+        )
+
+        self.assertEqual(
+            enriched[0]["author"],
+            {
+                "assistant_id": 4,
+                "assistant_name": "值日助手",
+                "character_id": 9,
+                "character_name": "凯伊",
+                "avatar_url": "/kai.png",
+            },
+        )
+
+    def test_legacy_run_character_id_wins_over_assistant_current_character(self):
+        payload = [{"assistant": 4, "character": 9, "decision_payload": {}}]
+
+        enriched = _enrich_run_authors(
+            payload,
+            [{"id": 4, "name": "值日助手", "character": {"id": 10, "name": "爱丽丝"}}],
+            {"9": {"id": 9, "name": "凯伊", "avatar_url": "/kai.png"}},
+        )
+
+        self.assertEqual(enriched[0]["author"]["character_name"], "凯伊")
+        self.assertEqual(enriched[0]["author"]["character_id"], 9)
 
 
 if __name__ == "__main__":

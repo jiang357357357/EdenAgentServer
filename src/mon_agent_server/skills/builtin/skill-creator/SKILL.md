@@ -1,11 +1,11 @@
 ---
 name: skill-creator
-description: 创建或更新用户希望复用的 MonAgent 技能，完成后直接生效。
+description: 创建或安全增量更新用户希望复用的 MonAgent 技能。
 metadata:
   monagent:
     display_name: 技能创建
-    version: 1.0.0
-    tools: [list_skills, create_skill]
+    version: 2.0.0
+    tools: [list_skills, create_skill, update_skill]
     profiles: [user_chat, self_awake]
 ---
 
@@ -16,5 +16,8 @@ metadata:
 - SKILL.md 必须直接说明何时读取哪些 reference、何时运行哪些 script；不要创建 README、安装指南、更新日志等冗余文件。
 - 需要稳定的结构化能力时，可以在 tools/*.json 声明代码工具：schemaVersion=1，给出 name、description、object parameters、command，并在 testCommand 中提供安装期自测命令；工具脚本通过标准输入接收 JSON 参数，通过标准输出返回 JSON 或文本。
 - 代码工具名称使用小写下划线；command 只引用技能目录内文件。将该名称写入技能 tools 后，安装器会校验、自测并注册为运行时工具；执行时仍经过宿主权限策略。
-- 需求清楚后调用 create_skill 直接创建或更新技能；成功后简要说明名称、触发条件、工具、运行档案与范围。
+- 新技能需求清楚后调用 create_skill 创建；create_skill 只允许新建，绝不能用它覆盖同名技能。
+- 更新已有自编写技能时，先调用 list_skills 取得其最新 contentHash，再调用 update_skill(action=preview) 提交增量变更。files 只列出要变更的文件；只有 operation=delete 才表示删除，省略的旧文件必须保留。
+- 仔细核对 preview 返回的新增、修改、删除文件及正文差异。只有差异与任务完全一致时，才用同一个 preview_id 调用 update_skill(action=apply)；不能跳过预览，也不能自行伪造 preview_id。
+- 创建或更新成功后，简要说明名称、触发条件、工具、运行档案、范围及实际变更文件。
 - 不要写入数值人格、隐含用户画像、密钥或会话私密内容。

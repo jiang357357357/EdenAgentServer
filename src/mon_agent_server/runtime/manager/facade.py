@@ -106,6 +106,7 @@ class MonAgentRuntime(
         camera_captures: CameraCaptureBroker | None = None,
         skill_installer: Any | None = None,
         connector_manager: Any | None = None,
+        on_workspace_switch_requested: Callable[[str], None] | None = None,
     ) -> None:
         self.workspace_root = workspace_root.resolve()
         self.store = store
@@ -118,6 +119,8 @@ class MonAgentRuntime(
         self.environment = environment
         self.skill_installer = skill_installer
         self.connector_manager = connector_manager
+        self.on_workspace_switch_requested = on_workspace_switch_requested
+        self._pending_workspace_switch: str | None = None
         self.subagent_catalog = load_subagent_catalog(self.workspace_root)
         self.subagent_repository = SubagentThreadRepository.for_workspace(self.workspace_root)
         self.subagent_max_threads = _bounded_env_int(

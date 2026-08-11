@@ -38,6 +38,7 @@ from mon_agent_server.logging import get_logger
 from mon_agent_server.memory import extract_turn_memories
 from mon_agent_server.model_stream import core_model, env_model, stream_openai_compatible
 from mon_agent_server.prompts import attachment_context, build_agent_system_prompt
+from mon_agent_server.session_title import generate_session_title
 from mon_agent_server.skills import create_skill_runtime, owner_storage_key
 from mon_agent_server.store import SessionStore, SubagentThreadRepository
 from mon_agent_server.store.serializers import is_hidden_message, message_text
@@ -75,6 +76,60 @@ from mon_agent_server.runtime.manager.shared import (
 
 
 class RuntimePromptMixin:
+    async def _complete_initial_session_title(
+        self,
+        session_id: str,
+        auth_token: str | None,
+        runtime_config: RuntimeModelConfig,
+        user_text: str,
+        assistant_text: str,
+        previous_source: str,
+    ) -> None:
+        title = await generate_session_title(runtime_config, user_text, assistant_text)
+        if not title:
+            self.store.release_title_generation(session_id, previous_source)
+            return
+        info = self.store.set_session_title(session_id, title, "generated")
+        try:
+            await self.sync_core_session(session_id, auth_token, runtime_config.core)
+        except Exception:
+            logger.exception("生成标题后的 Core 会话同步失败: session={}", session_id)
+        self.events.emit({"type": "session.updated", "properties": {"sessionID": session_id, "info": info}})
+        self.emit_session(session_id)
+
+    def backfill_session_title_async(self, session_id: str, auth_token: str | None) -> None:
+        previous_source = self.store.claim_title_generation(session_id)
+        if not previous_source or previous_source == "pending":
+            if previous_source:
+                self.store.release_title_generation(session_id, previous_source)
+            return
+        context = self.store.context_messages(session_id)
+        user_message = next((item for item in context if item.get("role") == "user"), None)
+        assistant_message = next((item for item in context if item.get("role") == "assistant"), None)
+        user_text = content_text((user_message or {}).get("content") or [])
+        assistant_text = content_text((assistant_message or {}).get("content") or [])
+        if not user_text or not assistant_text:
+            self.store.release_title_generation(session_id, previous_source)
+            return
+        participant = next(iter(self.store.require_session(session_id)["info"].get("participants") or []), {})
+        assistant_id = participant.get("assistantID") if isinstance(participant, dict) else None
+
+        async def generate() -> None:
+            try:
+                runtime_config = await self._resolve_runtime_config(auth_token, assistant_id)
+                await self._complete_initial_session_title(
+                    session_id, auth_token, runtime_config, user_text, assistant_text, previous_source,
+                )
+            except Exception:
+                self.store.release_title_generation(session_id, previous_source)
+                logger.exception("历史会话标题回填失败: session={}", session_id)
+
+        try:
+            self._host.submit(generate())
+        except Exception:
+            self.store.release_title_generation(session_id, previous_source)
+            raise
+
     async def _run_prompt(
         self,
         session_id: str,
@@ -367,6 +422,26 @@ class RuntimePromptMixin:
                     user_message["info"]["id"],
                 )
             await self.sync_core_session(session_id, auth_token, director_config.core)
+            previous_title_source = (
+                self.store.claim_title_generation(session_id)
+                if not internal_batch_id and active_config and previous_replies
+                else None
+            )
+            if previous_title_source:
+                title_reply = "\n\n".join(
+                    str(item.get("reply") or "") for item in previous_replies if str(item.get("reply") or "").strip()
+                )
+                asyncio.create_task(
+                    self._complete_initial_session_title(
+                        session_id,
+                        auth_token,
+                        active_config,
+                        content_text(parts),
+                        title_reply,
+                        previous_title_source,
+                    ),
+                    name=f"session-title:{session_id}",
+                )
             if auth_token and active_config and previous_replies:
                 extraction_reply = "\n\n".join(
                     str(item.get("reply") or "") for item in previous_replies if str(item.get("reply") or "").strip()

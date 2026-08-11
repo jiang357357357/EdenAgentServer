@@ -30,6 +30,9 @@ def _openai_stream_payload(model: dict[str, Any], context: dict[str, Any], optio
         "stream": True,
         "stream_options": {"include_usage": True},
     }
+    prompt_cache_key = context.get("promptCacheKey") or context.get("prompt_cache_key")
+    if prompt_cache_key and str(model.get("provider") or "") in {"openai", "opencode-go"}:
+        payload["prompt_cache_key"] = str(prompt_cache_key)
     if options.get("maxTokens"):
         payload["max_tokens"] = options.get("maxTokens")
     reasoning = str(options.get("reasoning") or "off").strip().lower()

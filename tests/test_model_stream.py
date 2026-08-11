@@ -12,6 +12,7 @@ import httpx
 
 from mon_agent_server.model_stream import _usage_from_openai, call_openai_compatible, stream_openai_compatible, to_openai_messages
 from mon_agent_server.llm.responses import responses_stream_payload
+from mon_agent_server.llm.openai_compatible import _openai_stream_payload
 from mon_agent_server.llm.messages import to_responses_input
 
 
@@ -96,6 +97,14 @@ def make_open_sse(fake_urlopen):
 
 
 class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
+    def test_session_cache_key_is_forwarded_to_supported_payloads(self):
+        context = {"messages": [], "tools": [], "promptCacheKey": "ses_cache"}
+        chat = _openai_stream_payload({"id": "test", "provider": "opencode-go"}, context)
+        responses = responses_stream_payload({"id": "test"}, context, {})
+
+        self.assertEqual(chat["prompt_cache_key"], "ses_cache")
+        self.assertEqual(responses["prompt_cache_key"], "ses_cache")
+
     def test_usage_counts_cached_prompt_tokens_as_input(self):
         usage = _usage_from_openai(
             {
@@ -110,6 +119,21 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(usage["cacheRead"], 5143)
         self.assertEqual(usage["cacheMiss"], 1309)
         self.assertEqual(usage["totalTokens"], 7175)
+
+    def test_usage_does_not_add_cached_tokens_twice_when_prompt_includes_them(self):
+        usage = _usage_from_openai(
+            {
+                "prompt_tokens": 100,
+                "completion_tokens": 10,
+                "prompt_tokens_details": {"cached_tokens": 40},
+                "total_tokens": 110,
+            }
+        )
+
+        self.assertEqual(usage["input"], 100)
+        self.assertEqual(usage["cacheRead"], 40)
+        self.assertEqual(usage["cacheMiss"], 60)
+        self.assertEqual(usage["totalTokens"], 110)
 
     def test_openai_compatible_request_sets_user_agent(self):
         captured = {}

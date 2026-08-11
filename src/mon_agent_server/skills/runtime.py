@@ -155,6 +155,13 @@ class MonAgentSkillRuntime:
             namespace = str(params.get("namespace") or "").strip() or None
             source = str(params.get("source") or "").strip() or None
             matches = registry.search(query, limit=limit, namespace=namespace, source=source)
+            namespace_fallback = False
+            if namespace and not matches:
+                # Discovery should not require the model to guess an internal
+                # namespace perfectly. Keep source filtering, but retry once
+                # across namespaces and report that the fallback occurred.
+                matches = registry.search(query, limit=limit, source=source)
+                namespace_fallback = bool(matches)
             registry.reveal(tool.name for tool in matches)
             revealed = []
             for match in matches:
@@ -178,15 +185,33 @@ class MonAgentSkillRuntime:
             if not entries:
                 return text_result(
                     f"没有找到与“{query}”匹配的延迟工具。",
-                    {"query": query, "tools": [], "namespace": namespace, "source": source},
+                    {
+                        "query": query,
+                        "tools": [],
+                        "namespace": namespace,
+                        "source": source,
+                        "namespaceFallback": False,
+                        "matchedNamespaces": [],
+                    },
                 )
             summary = "\n\n".join(
                 f"{index}. {item['name']}：{item['description']}"
                 for index, item in enumerate(entries, start=1)
             )
+            fallback_notice = (
+                f"指定命名空间 {namespace} 无匹配，已自动跨命名空间搜索。\n"
+                if namespace_fallback else ""
+            )
             return text_result(
-                f"已加载 {len(entries)} 个匹配工具；下一轮可以直接调用。\n\n{summary}",
-                {"query": query, "tools": entries, "namespace": namespace, "source": source},
+                f"{fallback_notice}已加载 {len(entries)} 个匹配工具；下一轮可以直接调用。\n\n{summary}",
+                {
+                    "query": query,
+                    "tools": entries,
+                    "namespace": namespace,
+                    "source": source,
+                    "namespaceFallback": namespace_fallback,
+                    "matchedNamespaces": sorted({str(item["namespace"]) for item in entries}),
+                },
             )
 
         return finalize_tool(AgentTool(
@@ -204,7 +229,7 @@ class MonAgentSkillRuntime:
                     "limit": {"type": "integer", "minimum": 1, "maximum": 20},
                     "namespace": {
                         "type": "string",
-                        "description": "可选；只搜索指定能力域，例如 connector、coding、communication、plugin。",
+                        "description": "可选；优先搜索指定能力域，例如 connector、coding、communication、plugin。无结果时自动跨命名空间重试。",
                     },
                     "source": {
                         "type": "string",
@@ -222,8 +247,10 @@ class MonAgentSkillRuntime:
                     "tools": {"type": "array", "items": {"type": "object"}},
                     "namespace": {"type": ["string", "null"]},
                     "source": {"type": ["string", "null"]},
+                    "namespaceFallback": {"type": "boolean"},
+                    "matchedNamespaces": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["query", "tools"],
+                "required": ["query", "tools", "namespaceFallback", "matchedNamespaces"],
                 "additionalProperties": False,
             },
         ), source="builtin")

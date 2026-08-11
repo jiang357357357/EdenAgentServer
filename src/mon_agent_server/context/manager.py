@@ -35,6 +35,7 @@ class ContextManager:
 
     MAX_TEXT_CHARS = 40_000
     MAX_TOOL_RESULT_CHARS = 12_000
+    TOOL_RESULT_TAIL_CHARS = 2_000
     TOOL_RESULT_PROTECTED_USER_TURNS = 2
     TOOL_RESULT_PROTECTED_TOKENS = 4_000
     TOOL_RESULT_PRUNE_MINIMUM_TOKENS = 2_000
@@ -125,17 +126,19 @@ class ContextManager:
 
     @classmethod
     def _truncate_message(cls, message: dict[str, Any]) -> dict[str, Any]:
-        limit = cls.MAX_TOOL_RESULT_CHARS if message.get("role") == "toolResult" else cls.MAX_TEXT_CHARS
+        is_tool_result = message.get("role") == "toolResult"
+        limit = cls.MAX_TOOL_RESULT_CHARS if is_tool_result else cls.MAX_TEXT_CHARS
+        tail_chars = cls.TOOL_RESULT_TAIL_CHARS if is_tool_result else 0
         content = message.get("content")
         if isinstance(content, str):
-            message["content"] = cls._truncate_text(content, limit)
+            message["content"] = cls._truncate_text(content, limit, tail_chars=tail_chars)
         elif isinstance(content, list):
             for block in content:
                 if not isinstance(block, dict):
                     continue
                 for key in ("text", "thinking"):
                     if isinstance(block.get(key), str):
-                        block[key] = cls._truncate_text(block[key], limit)
+                        block[key] = cls._truncate_text(block[key], limit, tail_chars=tail_chars)
                 if block.get("type") == "toolCall" and "arguments" in block:
                     raw = json.dumps(block["arguments"], ensure_ascii=False)
                     if len(raw) > limit:
@@ -143,7 +146,16 @@ class ContextManager:
         return message
 
     @staticmethod
-    def _truncate_text(text: str, limit: int) -> str:
+    def _truncate_text(text: str, limit: int, *, tail_chars: int = 0) -> str:
         if len(text) <= limit:
             return text
+        preserved_tail = min(max(0, tail_chars), max(0, limit // 2))
+        if preserved_tail:
+            head_chars = limit - preserved_tail
+            omitted = len(text) - head_chars - preserved_tail
+            return (
+                f"{text[:head_chars]}\n"
+                f"...[truncated {omitted} chars; tail preserved]...\n"
+                f"{text[-preserved_tail:]}"
+            )
         return f"{text[:limit]}\n...[truncated {len(text) - limit} chars]"

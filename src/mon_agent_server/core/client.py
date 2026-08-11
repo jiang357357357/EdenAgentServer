@@ -182,6 +182,10 @@ class CoreClient:
         )
         return raw if isinstance(raw, dict) else {}
 
+    def get_character(self, token: str, character_id: int | str) -> dict[str, Any]:
+        raw = self._request(f"/api/characters/{urllib.parse.quote(str(character_id))}/", token)
+        return raw if isinstance(raw, dict) else {}
+
     def list_character_visual_actions(self, token: str, character_id: int | str) -> list[dict[str, Any]]:
         return unwrap_results(self._request(f"/api/characters/{urllib.parse.quote(str(character_id))}/visual-actions/", token))
 

@@ -253,6 +253,9 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
         tools = create_mon_agent_tools(Path.cwd(), MonToolContext(), "user_chat")
         names = [tool.name for tool in tools]
         self.assertEqual(len(names), len(set(names)))
+        tools_by_name = {tool.name: tool for tool in tools}
+        self.assertEqual(tools_by_name["list_self_awake_diaries"].exposure, "direct")
+        self.assertEqual(tools_by_name["read_self_awake_diary"].exposure, "direct")
         for tool in tools:
             self.assertEqual(tool.parameters.get("type"), "object", tool.name)
             if tool.name not in {"read", "ls", "grep", "find", "write", "edit", "apply_patch", "bash", "write_stdin"}:

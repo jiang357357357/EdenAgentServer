@@ -140,7 +140,7 @@ class SkillInstallationServiceTest(unittest.TestCase):
                 {"sourceType": "local", "sourceUri": str(self.source), "scope": "project"},
             )
 
-    def test_generated_skill_is_created_immediately_and_can_be_updated(self) -> None:
+    def test_generated_skill_creation_rejects_overwrite_and_update_requires_preview(self) -> None:
         installed = self.service.create_generated(
             self.owner_id,
             "token",
@@ -160,23 +160,144 @@ class SkillInstallationServiceTest(unittest.TestCase):
         self.assertEqual(installed["sourceType"], "generated")
         target = skill_roots(self.workspace, self.owner_key)["project"] / "daily-brief"
         self.assertTrue((target / "SKILL.md").is_file())
+        original_text = (target / "SKILL.md").read_text(encoding="utf-8")
 
-        updated = self.service.create_generated(
+        with self.assertRaisesRegex(ValueError, "update_skill"):
+            self.service.create_generated(
+                self.owner_id,
+                "token",
+                "local",
+                {
+                    "name": "daily-brief",
+                    "display_name": "每日简报",
+                    "description": "Use when the user asks for a reusable daily web briefing.",
+                    "instructions": "这次调用不能覆盖已有技能。",
+                    "tools": ["web"],
+                    "scope": "project",
+                },
+            )
+        self.assertEqual((target / "SKILL.md").read_text(encoding="utf-8"), original_text)
+
+        preview = self.service.inspect_generated_update(
             self.owner_id,
             "token",
             "local",
             {
                 "name": "daily-brief",
-                "display_name": "每日简报",
-                "description": "Use when the user asks for a reusable daily web briefing.",
-                "instructions": "搜索最新来源，提炼五条重要信息并标明来源。",
-                "tools": ["web"],
                 "scope": "project",
+                "expected_content_hash": installed["contentHash"],
+                "instructions": "搜索最新来源，提炼五条重要信息并标明来源。",
                 "version": "1.1.0",
             },
         )
+        self.assertEqual(preview["operation"], "generated_update")
+        self.assertEqual(preview["baseContentHash"], installed["contentHash"])
+        self.assertIn("SKILL.md", preview["changes"]["modified"])
+        self.assertIn("提炼五条", preview["changes"]["diff"])
+        self.assertEqual((target / "SKILL.md").read_text(encoding="utf-8"), original_text)
+
+        updated = self.service.apply_generated_update(
+            self.owner_id, "token", "local", preview["previewID"]
+        )
         self.assertEqual(updated["id"], installed["id"])
+        self.assertEqual(updated["previousContentHash"], installed["contentHash"])
+        self.assertNotEqual(updated["contentHash"], installed["contentHash"])
         self.assertIn("提炼五条", (target / "SKILL.md").read_text(encoding="utf-8"))
+
+    def test_generated_update_preserves_omitted_files_and_only_deletes_explicit_paths(self) -> None:
+        installed = self.service.create_generated(
+            self.owner_id,
+            "token",
+            "local",
+            {
+                "name": "resource-safe",
+                "display_name": "资源安全更新",
+                "description": "Use to verify omitted skill resources are never deleted.",
+                "instructions": "读取附属资源后回答。",
+                "tools": ["read"],
+                "scope": "project",
+                "files": [
+                    {"path": "scripts/keep.py", "content": "print('keep')\n"},
+                    {"path": "references/remove.md", "content": "remove me\n"},
+                ],
+            },
+        )
+        target = skill_roots(self.workspace, self.owner_key)["project"] / "resource-safe"
+
+        preserve_preview = self.service.inspect_generated_update(
+            self.owner_id,
+            "token",
+            "local",
+            {
+                "name": "resource-safe",
+                "scope": "project",
+                "expected_content_hash": installed["contentHash"],
+                "instructions": "读取附属资源并给出简洁回答。",
+            },
+        )
+        preserved = self.service.apply_generated_update(
+            self.owner_id, "token", "local", preserve_preview["previewID"]
+        )
+        self.assertTrue((target / "scripts" / "keep.py").is_file())
+        self.assertTrue((target / "references" / "remove.md").is_file())
+
+        delete_preview = self.service.inspect_generated_update(
+            self.owner_id,
+            "token",
+            "local",
+            {
+                "name": "resource-safe",
+                "scope": "project",
+                "expected_content_hash": preserved["contentHash"],
+                "files": [{"path": "references/remove.md", "operation": "delete"}],
+            },
+        )
+        self.assertEqual(delete_preview["changes"]["deleted"], ["references/remove.md"])
+        self.assertTrue((target / "references" / "remove.md").is_file())
+        self.service.apply_generated_update(
+            self.owner_id, "token", "local", delete_preview["previewID"]
+        )
+        self.assertTrue((target / "scripts" / "keep.py").is_file())
+        self.assertFalse((target / "references" / "remove.md").exists())
+
+    def test_generated_update_refuses_to_overwrite_changes_made_after_preview(self) -> None:
+        installed = self.service.create_generated(
+            self.owner_id,
+            "token",
+            "local",
+            {
+                "name": "hash-guard",
+                "description": "Use to verify optimistic locking for generated skill updates.",
+                "instructions": "返回原始版本。",
+                "tools": ["read"],
+                "scope": "project",
+            },
+        )
+        target = skill_roots(self.workspace, self.owner_key)["project"] / "hash-guard"
+        preview = self.service.inspect_generated_update(
+            self.owner_id,
+            "token",
+            "local",
+            {
+                "name": "hash-guard",
+                "scope": "project",
+                "expected_content_hash": installed["contentHash"],
+                "instructions": "返回预览版本。",
+            },
+        )
+        skill_file = target / "SKILL.md"
+        skill_file.write_text(skill_file.read_text(encoding="utf-8") + "\n外部修改。\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "预览后已变化"):
+            self.service.apply_generated_update(
+                self.owner_id, "token", "local", preview["previewID"]
+            )
+        self.assertIn("外部修改", skill_file.read_text(encoding="utf-8"))
+        listed = self.service.list_for_model(
+            self.owner_id, "token", "local", {"kind": "generated"}
+        )
+        current = next(item for item in listed if item["skillName"] == "hash-guard")
+        self.assertNotEqual(current["contentHash"], installed["contentHash"])
 
     def test_generated_skill_can_be_created_inside_agent_event_loop(self) -> None:
         async def inspect() -> dict[str, Any]:
@@ -433,6 +554,7 @@ class SkillInstallationServiceTest(unittest.TestCase):
         self.assertEqual([item["skillName"] for item in generated_items], ["inventory-skill"])
         self.assertEqual(generated_items[0]["id"], generated["id"])
         self.assertEqual(generated_items[0]["sourceType"], "generated")
+        self.assertEqual(generated_items[0]["contentHash"], generated["contentHash"])
         self.assertNotIn("sourceUri", generated_items[0])
 
     def test_plain_pi_skill_loads_without_declaring_tools_or_permissions(self) -> None:

@@ -1,77 +1,103 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
+import os
+import shutil
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from mon_agent_core import AgentTool
 
+from ..connectors.catalog import ConnectorCatalog, ConnectorContractError, DEFAULT_CONNECTOR_CATALOG
 from .context import MonToolContext
 from .core_access import core_call, require_core_access
-from .result import text_result, tool_failure, truncate
+from .result import compact_text, text_result, tool_failure, truncate
 
 
-LICHESS_DECLINE_REASONS = (
-    "generic",
-    "later",
-    "tooFast",
-    "tooSlow",
-    "timeControl",
-    "rated",
-    "casual",
-    "standard",
-    "variant",
-    "noBot",
-    "onlyBot",
-)
-
-
-def _validate_connector_action(connector_key: str, action: str, payload: dict[str, Any]) -> None:
-    if connector_key == "openttd":
-        if action not in {"refresh_state", "pause_game", "resume_game", "save_game", "send_chat", "gameplay_command", "gameplay_plan"}:
-            raise tool_failure("unsupported_action",
-                f"OpenTTD 连接器不支持动作 {action or '(empty)'}；"
-                "支持刷新状态、服务器管理和经 MonAgentBridge 执行公司玩法命令。"
-            )
-        if action == "send_chat" and payload.get("text") in (None, ""):
-            raise tool_failure("invalid_arguments", "连接器动作 send_chat 缺少 payload 字段：text。")
-        if action == "gameplay_command":
-            command = payload.get("command")
-            if not isinstance(command, dict) or command.get("action") in (None, ""):
-                raise tool_failure("invalid_arguments", "连接器动作 gameplay_command 缺少 payload.command.action。")
-        if action == "gameplay_plan":
-            commands = payload.get("commands")
-            if not isinstance(commands, list) or not commands:
-                raise tool_failure("invalid_arguments", "连接器动作 gameplay_plan 缺少非空 payload.commands。")
-        return
-    if connector_key != "lichess":
-        raise tool_failure("connector_not_installed", f"未安装连接器类型：{connector_key}。")
-    requirements = {
-        "accept_challenge": ("challenge_id",),
-        "decline_challenge": ("challenge_id",),
-        "make_move": ("game_id", "move"),
-        "resign": ("game_id",),
-        "offer_draw": ("game_id",),
-        "send_chat": ("game_id", "text"),
+def _connector_summary(row: dict[str, Any]) -> dict[str, Any]:
+    """Return the bounded, model-facing connector management projection."""
+    runtime = row.get("runtime") if isinstance(row.get("runtime"), dict) else {}
+    raw_capabilities = runtime.get("capabilities") if isinstance(runtime.get("capabilities"), dict) else {}
+    capabilities = {
+        str(name): enabled
+        for name, enabled in list(raw_capabilities.items())[:24]
+        if isinstance(enabled, (str, int, float, bool)) or enabled is None
     }
-    required = requirements.get(action)
-    if required is None:
-        raise tool_failure("unsupported_action", f"不支持的连接器动作：{action or '(empty)'}。")
-    missing = [name for name in required if payload.get(name) in (None, "")]
-    if missing:
-        raise tool_failure("invalid_arguments",
-            f"连接器动作 {action} 缺少 payload 字段：{', '.join(missing)}。"
-            "字段名使用 snake_case；请按 execute_connector_action 的工具契约重新调用。"
-        )
-    if action == "decline_challenge":
-        reason = str(payload.get("reason") or "generic")
-        if reason not in LICHESS_DECLINE_REASONS:
-            raise tool_failure("invalid_arguments",
-                "decline_challenge 的 payload.reason 必须是 Lichess 原因代码："
-                + ", ".join(LICHESS_DECLINE_REASONS)
-                + "。"
-            )
+    raw_instance = runtime.get("instance") if isinstance(runtime.get("instance"), dict) else {}
+    instance = {
+        key: raw_instance[key]
+        for key in ("instance_id", "host", "game_port", "admin_port", "pid", "mode", "started_at")
+        if key in raw_instance and raw_instance[key] not in (None, "")
+    }
+    last_error = compact_text(
+        row.get("last_error") or row.get("error") or row.get("runtime_error") or "",
+        600,
+    )
+    summary: dict[str, Any] = {
+        "id": row.get("id"),
+        "connector_key": row.get("connector_key"),
+        "identity_key": row.get("identity_key"),
+        "display_name": row.get("display_name"),
+        "desired_state": row.get("desired_state"),
+        "runtime_state": row.get("runtime_state"),
+        "last_error": last_error,
+        "capabilities": capabilities,
+    }
+    if instance:
+        summary["instance"] = instance
+    worker = runtime.get("worker") if isinstance(runtime.get("worker"), dict) else {}
+    if worker:
+        summary["worker"] = {
+            key: worker[key]
+            for key in ("pid", "connector_key", "connector_version", "revision", "isolated")
+            if key in worker
+        }
+    return summary
+
+
+def _validate_connector_action(
+    catalog: ConnectorCatalog,
+    connector_key: str,
+    action: str,
+    payload: dict[str, Any],
+) -> None:
+    try:
+        catalog.validate_action(connector_key, action, payload)
+    except ConnectorContractError as error:
+        message = str(error)
+        code = "connector_not_installed" if "未安装连接器类型" in message else "unsupported_action" if "不支持动作" in message else "invalid_arguments"
+        raise tool_failure(code, message) from error
+
+
+def _installed_action_contracts(catalog: ConnectorCatalog) -> tuple[list[str], dict[str, Any]]:
+    """Build model hints from manifests without hard-coding connector types."""
+    action_names: set[str] = set()
+    merged_properties: dict[str, Any] = {}
+    for connector_key in catalog.keys():
+        try:
+            manifest = catalog.load(connector_key)
+        except ConnectorContractError:
+            continue
+        for action, schema in manifest.actions.items():
+            action_names.add(action)
+            properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+            for name, property_schema in properties.items():
+                existing = merged_properties.get(name)
+                if existing is None:
+                    merged_properties[name] = copy.deepcopy(property_schema)
+                    continue
+                if existing == property_schema:
+                    continue
+                choices = existing.get("anyOf") if isinstance(existing, dict) else None
+                if not isinstance(choices, list):
+                    choices = [existing]
+                if property_schema not in choices:
+                    choices.append(copy.deepcopy(property_schema))
+                merged_properties[name] = {"anyOf": choices}
+    return sorted(action_names), merged_properties
 
 
 def _visible_connector_result(label: str, result: dict[str, Any]) -> str:
@@ -87,6 +113,15 @@ def _current_assistant_id(context: MonToolContext) -> int | str:
 
 
 def create_connector_tools(context: MonToolContext) -> list[AgentTool]:
+    catalog = getattr(context.connector_manager, "catalog", None)
+    if not isinstance(catalog, ConnectorCatalog):
+        catalog = DEFAULT_CONNECTOR_CATALOG
+    action_names, action_properties = _installed_action_contracts(catalog)
+    installed_connector_keys = list(catalog.keys())
+    try:
+        openttd_queries = list(catalog.load("openttd").queries)
+    except ConnectorContractError:
+        openttd_queries = []
     active_event_leases: dict[int, str] = {}
     async def list_execute(_id: str, params: dict[str, Any], *_args: Any) -> dict[str, Any]:
         core, token = require_core_access(context)
@@ -99,16 +134,35 @@ def create_connector_tools(context: MonToolContext) -> list[AgentTool]:
                 snapshot = await asyncio.to_thread(context.connector_manager.runtime_snapshot, int(connector_id))
                 if snapshot:
                     row["runtime"] = snapshot
+        summaries = [_connector_summary(row) for row in rows]
+        for summary in summaries:
+            try:
+                manifest = catalog.load(str(summary.get("connector_key") or ""))
+            except ConnectorContractError:
+                continue
+            summary["contract"] = {
+                "version": manifest.version,
+                "actions": sorted(manifest.actions),
+                "action_schemas": copy.deepcopy(manifest.actions),
+                "queries": list(manifest.queries),
+                "revision": manifest.revision[:16],
+                "hot_reload": True,
+                "worker_isolated": True,
+            }
         lines = [
             f"#{row.get('id')} {row.get('connector_key')}:{row.get('identity_key')} "
             f"目标={row.get('desired_state')} 运行={row.get('runtime_state')}"
+            + (f" 最近错误={row.get('last_error')}" if row.get("last_error") else "")
             + (
-                f" 能力={json.dumps(row['runtime'].get('capabilities') or {}, ensure_ascii=False)}"
-                if isinstance(row.get("runtime"), dict) else ""
+                f" 能力={json.dumps(row.get('capabilities') or {}, ensure_ascii=False)}"
+                if row.get("capabilities") else ""
             )
-            for row in rows
+            for row in summaries
         ]
-        return text_result("连接器：\n" + ("\n".join(lines) if lines else "暂无。"), {"connectors": rows})
+        return text_result(
+            "连接器：\n" + ("\n".join(lines) if lines else "暂无。"),
+            {"count": len(summaries), "connectors": summaries},
+        )
 
     async def register_execute(_id: str, params: dict[str, Any], *_args: Any) -> dict[str, Any]:
         core, token = require_core_access(context)
@@ -121,6 +175,10 @@ def create_connector_tools(context: MonToolContext) -> list[AgentTool]:
         }
         if not payload["connector_key"] or not payload["identity_key"]:
             raise tool_failure("invalid_arguments", "注册连接器需要 connector_key 和 identity_key。")
+        try:
+            catalog.load(payload["connector_key"])
+        except ConnectorContractError as error:
+            raise tool_failure("connector_not_installed", str(error)) from error
         row = await asyncio.to_thread(core_call, core.register_connector, token, payload)
         if context.connector_manager is not None:
             await asyncio.to_thread(context.connector_manager.reconcile_user, token)
@@ -206,7 +264,7 @@ def create_connector_tools(context: MonToolContext) -> list[AgentTool]:
             raise tool_failure("permission_denied", "该连接器不属于当前用户。")
         action = str(params.get("action") or "").strip()
         payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-        _validate_connector_action(str(connector.get("connector_key") or ""), action, payload)
+        _validate_connector_action(catalog, str(connector.get("connector_key") or ""), action, payload)
         result = await asyncio.to_thread(context.connector_manager.execute, token, connector, action, payload)
         return text_result(_visible_connector_result(f"连接器动作 {action} 已执行，返回结果：", result), result)
 
@@ -221,7 +279,7 @@ def create_connector_tools(context: MonToolContext) -> list[AgentTool]:
         if connector is None or connector.get("connector_key") != "openttd":
             raise tool_failure("permission_denied", "该 OpenTTD 连接器不属于当前用户。")
         query = str(params.get("query") or "").strip()
-        if query not in {"get_state", "inspect_tile", "find_towns", "find_industries", "get_company_assets", "list_road_engines", "find_road_route_site"}:
+        if query not in set(openttd_queries):
             raise tool_failure("unsupported_action", f"不支持的 OpenTTD 观察查询：{query or '(empty)'}。")
         command: dict[str, Any] = {"action": query}
         for name in ("x", "y", "limit", "company_id", "length"):
@@ -231,17 +289,72 @@ def create_connector_tools(context: MonToolContext) -> list[AgentTool]:
             raise tool_failure("invalid_arguments", "inspect_tile 需要 x 和 y。")
         if query in {"get_company_assets", "list_road_engines"} and "company_id" not in command:
             raise tool_failure("invalid_arguments", f"{query} 需要 company_id。")
-        result = await asyncio.to_thread(
-            context.connector_manager.execute, token, connector, "gameplay_command", {"command": command},
-        )
+        if query == "get_state":
+            # Route to the admin-port state (companies with economy/statistics, server,
+            # instance) instead of the bridge's minimal get_state, so a single
+            # "看状态" call returns the rich state instead of only date + names.
+            result = await asyncio.to_thread(
+                context.connector_manager.execute, token, connector, "refresh_state", {},
+            )
+        else:
+            result = await asyncio.to_thread(
+                context.connector_manager.execute, token, connector, "gameplay_command", {"command": command},
+            )
         return text_result(_visible_connector_result(f"OpenTTD 查询 {query} 已完成，返回数据：", result), result)
+
+    def _openttd_data_root() -> Path:
+        return Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))) / "openttd"
+
+    def _scan_newgrf(root: Path) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for base in ("newgrf", os.path.join("content_download", "newgrf")):
+            folder = root / base
+            if not folder.is_dir():
+                continue
+            for entry in sorted(folder.iterdir()):
+                if entry.suffix.lower() != ".grf":
+                    continue
+                results.append({
+                    "file": entry.name,
+                    "size": entry.stat().st_size if entry.is_file() else 0,
+                    "source": base,
+                })
+        return results
+
+    async def newgrf_execute(_id: str, params: dict[str, Any], *_args: Any) -> dict[str, Any]:
+        action = str(params.get("action") or "").strip()
+        root = _openttd_data_root()
+        if action == "list":
+            installed = _scan_newgrf(root)
+            lines = [f"{row['source']} / {row['file']}（{row['size']} 字节）" for row in installed]
+            return text_result(
+                "已安装 NewGRF（OpenTTD 数据目录：" + str(root) + "）：\n"
+                + ("\n".join(lines) if lines else "暂无。"),
+                {"data_root": str(root), "newgrfs": installed},
+            )
+        if action == "place":
+            source = str(params.get("source") or "").strip()
+            if not source:
+                raise tool_failure("invalid_arguments", "openttd_newgrf place 需要 source（.grf 文件路径）。")
+            source_path = Path(source).expanduser()
+            if not source_path.is_file() or source_path.suffix.lower() != ".grf":
+                raise tool_failure("invalid_arguments", f"源不是有效的 .grf 文件：{source_path}")
+            target_dir = root / "newgrf"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / source_path.name
+            shutil.copy2(source_path, target)
+            return text_result(
+                f"已将 {source_path.name} 复制到 {target}。下次新建游戏时可在 NewGRF 设置里启用。",
+                {"source": str(source_path), "target": str(target), "size": target.stat().st_size},
+            )
+        raise tool_failure("unsupported_action", f"openttd_newgrf 不支持动作 {action or '(empty)'}。")
 
     tools = [
         AgentTool("list_connectors", "查看连接器", "查看当前用户共享的外部连接器及其目标、运行状态。", {"type": "object", "properties": {}}, list_execute),
         AgentTool(
             "register_connector", "注册连接器", "为当前用户注册一个共享的连接器身份；凭据只填写后端凭据引用，不填写密钥。",
             {"type": "object", "properties": {
-                "connector_key": {"type": "string"}, "identity_key": {"type": "string"},
+                "connector_key": {"type": "string", "enum": installed_connector_keys}, "identity_key": {"type": "string"},
                 "display_name": {"type": "string"},
                 "settings": {"type": "object"}, "connect": {"type": "boolean"},
             }, "required": ["connector_key", "identity_key"]}, register_execute,
@@ -262,7 +375,7 @@ def create_connector_tools(context: MonToolContext) -> list[AgentTool]:
             "query_openttd", "观察 OpenTTD", "只读查询 OpenTTD 的公司、地图格、附近城镇、产业和公司资产；不会改变游戏。",
             {"type": "object", "properties": {
                 "connector_id": {"type": "integer"},
-                "query": {"type": "string", "enum": ["get_state", "inspect_tile", "find_towns", "find_industries", "get_company_assets", "list_road_engines", "find_road_route_site"]},
+                "query": {"type": "string", "enum": openttd_queries},
                 "x": {"type": "integer", "minimum": 0}, "y": {"type": "integer", "minimum": 0},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100},
                 "company_id": {"type": "integer", "minimum": 0},
@@ -270,41 +383,22 @@ def create_connector_tools(context: MonToolContext) -> list[AgentTool]:
             }, "required": ["connector_id", "query"]}, query_openttd_execute,
         ),
         AgentTool(
-            "execute_connector_action", "执行连接器动作", "通过当前助手的 Lichess 或 OpenTTD 连接器执行一个动作。严格使用 payload 中声明的 snake_case 字段。",
+            "openttd_newgrf", "管理 OpenTTD NewGRF 内容", "列出本地已安装的 OpenTTD NewGRF，或将 .grf 文件放置到内容目录供新建游戏使用。",
+            {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["list", "place"], "description": "list 列出已装 NewGRF；place 将 .grf 复制到内容目录。"},
+                "source": {"type": "string", "description": "place 时的 .grf 源文件路径。"},
+            }, "required": ["action"]}, newgrf_execute,
+        ),
+        AgentTool(
+            "execute_connector_action", "执行连接器动作", "通过当前助手的已安装连接器执行动作。动作和 payload 的精确契约来自 list_connectors；字段名严格区分大小写。",
             {"type": "object", "properties": {
                 "connector_id": {"type": "integer"},
-                "action": {"type": "string", "enum": [
-                    "accept_challenge", "decline_challenge", "make_move", "resign", "offer_draw", "send_chat",
-                    "refresh_state", "pause_game", "resume_game", "save_game",
-                    "gameplay_command",
-                    "gameplay_plan",
-                ]},
+                "action": {"type": "string", "enum": action_names, "description": "动作名称来自已安装连接器清单。"},
                 "payload": {
                     "type": "object",
-                    "description": (
-                        "动作参数：accept_challenge={challenge_id}；"
-                        "decline_challenge={challenge_id, reason?}；"
-                        "make_move={game_id, move, offer_draw?}；"
-                        "send_chat 在 Lichess 使用 {game_id, text, room?}，在 OpenTTD 使用 {text}；"
-                        "resign/offer_draw={game_id}；"
-                        "OpenTTD refresh_state/pause_game/resume_game={}；save_game={save_name?}；"
-                        "gameplay_command={command:{action,...}}；"
-                        "gameplay_plan={commands:[{action,...},...]}，整套计划只触发一次工具授权并按顺序执行。"
-                        "OpenTTD 变更命令包括 build_road、build_road_station、build_road_depot、buy_road_vehicle 和 build_hq_near。"
-                    ),
-                    "properties": {
-                        "challenge_id": {"type": "string", "description": "接受或拒绝的 Lichess challenge ID。"},
-                        "game_id": {"type": "string", "description": "棋局 ID。"},
-                        "move": {"type": "string", "description": "UCI 格式走法，例如 e2e4。"},
-                        "offer_draw": {"type": "boolean", "description": "走棋时同时提和。"},
-                        "reason": {"type": "string", "enum": list(LICHESS_DECLINE_REASONS), "description": "拒绝挑战原因代码；默认 generic。"},
-                        "text": {"type": "string", "description": "发送到棋局聊天室的文本。"},
-                        "room": {"type": "string", "enum": ["player", "spectator"], "description": "聊天室；默认 player。"},
-                        "save_name": {"type": "string", "description": "OpenTTD 存档名，只使用字母、数字、点、下划线和连字符。"},
-                        "command": {"type": "object", "description": "发送给 MonAgentBridge 的结构化玩法命令。"},
-                        "commands": {"type": "array", "items": {"type": "object"}, "description": "按顺序执行的 OpenTTD 玩法命令。"},
-                    },
-                    "additionalProperties": False,
+                    "description": "必须匹配所选连接器与 action 在 list_connectors.contract.action_schemas 中的 JSON Schema。",
+                    "properties": action_properties,
+                    "additionalProperties": True,
                 },
             }, "required": ["connector_id", "action", "payload"]}, action_execute,
         ),

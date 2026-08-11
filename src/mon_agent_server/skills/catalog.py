@@ -47,6 +47,7 @@ SKILLS_BY_ID = {skill.id: skill for skill in SKILL_DEFINITIONS}
 BASE_TOOL_NAMES_BY_PROFILE: dict[str, tuple[str, ...]] = {
     "user_chat": (
         "ask_user",
+        "switch_workspace",
         "list_character_actions",
         "switch_character_action",
         "read",
@@ -75,7 +76,7 @@ BASE_TOOL_NAMES_BY_PROFILE: dict[str, tuple[str, ...]] = {
 }
 
 INITIAL_SKILLS_BY_PROFILE: dict[str, tuple[str, ...]] = {
-    "user_chat": (),
+    "user_chat": ("character-performance",),
     "self_awake": (
         "self-awake",
         "due-reminder-dispatch",

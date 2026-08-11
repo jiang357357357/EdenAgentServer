@@ -266,6 +266,7 @@ class RuntimeLifecycleMixin:
             should_schedule = False
             pending_user: tuple[list[dict[str, Any]], str | None] | None = None
             pending_proactive: tuple[list[dict[str, Any]], str | None, int | str, str, int | str] | None = None
+            workspace_switch: str | None = None
             with self._lock:
                 if self._running.get(session_id) is completed:
                     self._running.pop(session_id, None)
@@ -286,6 +287,15 @@ class RuntimeLifecycleMixin:
                                 self._pending_proactive_prompts.pop(session_id, None)
                         else:
                             should_schedule = True
+                    if (
+                        self._pending_workspace_switch
+                        and not self._running
+                        and pending_user is None
+                        and pending_proactive is None
+                    ):
+                        workspace_switch = self._pending_workspace_switch
+                        self._pending_workspace_switch = None
+                        should_schedule = False
             if pending_user is not None:
                 self.prompt_async(session_id, pending_user[0], pending_user[1])
             elif pending_proactive is not None:
@@ -299,6 +309,8 @@ class RuntimeLifecycleMixin:
                 )
             elif should_schedule:
                 self._schedule_ready_aggregation(session_id)
+            if workspace_switch and self.on_workspace_switch_requested:
+                self.on_workspace_switch_requested(workspace_switch)
 
     def close(self) -> None:
         self._host.close()

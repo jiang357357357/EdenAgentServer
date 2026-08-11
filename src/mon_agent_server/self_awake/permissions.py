@@ -105,6 +105,7 @@ def self_awake_before_tool_call(context_data: dict[str, Any] | None):
         "send_external_email",
         "contact_user",
         "create_skill",
+        "update_skill",
         "list_skills",
         "list_connectors",
         "register_connector",

@@ -22,6 +22,9 @@ def responses_stream_payload(model: dict[str, Any], context: dict[str, Any], opt
         "input": to_responses_input(context),
         "stream": True,
     }
+    prompt_cache_key = context.get("promptCacheKey") or context.get("prompt_cache_key")
+    if prompt_cache_key:
+        payload["prompt_cache_key"] = str(prompt_cache_key)
     instructions = context.get("systemPrompt") or context.get("system_prompt")
     if instructions:
         payload["instructions"] = instructions
@@ -50,7 +53,7 @@ def _responses_usage(raw: dict[str, Any] | None) -> dict[str, Any]:
     cached_tokens = int(input_details.get("cached_tokens") or 0)
     return usage_from_openai(
         {
-            "prompt_tokens": max(0, input_tokens - cached_tokens),
+            "prompt_tokens": input_tokens,
             "completion_tokens": output_tokens,
             "prompt_tokens_details": {"cached_tokens": cached_tokens},
         }

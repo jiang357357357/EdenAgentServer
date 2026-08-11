@@ -2,6 +2,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from mon_agent_core.harness.compaction import estimate_tokens
+
 from mon_agent_server.runtime import MonAgentRuntime
 from mon_agent_server.runtime.emitters import RuntimeEmitterMixin, runtime_error_summary
 from mon_agent_server.runtime.state import RunState
@@ -103,6 +105,49 @@ class RuntimePersistenceTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(runtime_error_summary(error), "模型连接失败：安全连接被远端提前断开。")
+
+    def test_token_breakdown_keeps_independently_tokenized_sections_unscaled(self):
+        store = SessionStore()
+        session = store.create_session("上下文统计")
+        session["tokenBreakdown"] = {
+            "characterRaw": 100,
+            "skillsRaw": 50,
+            "systemRaw": 25,
+            "toolsRaw": 200,
+        }
+        store.replace_context_messages(
+            session["id"],
+            [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "完成"}],
+                    "usage": {
+                        "input": 900,
+                        "output": 100,
+                        "cacheRead": 640,
+                        "cacheWrite": 0,
+                        "totalTokens": 1000,
+                    },
+                }
+            ],
+        )
+        emitter = EmitterHarness(store)
+
+        emitter.emit_session(session["id"])
+
+        info = store.require_session(session["id"])["info"]
+        self.assertEqual(info["contextTokens"], 1000)
+        self.assertEqual(
+            {key: info["tokenBreakdown"][key] for key in ("character", "skills", "system", "tools", "history")},
+            {
+                "character": 100,
+                "skills": 50,
+                "system": 25,
+                "tools": 200,
+                "history": estimate_tokens(store.context_messages(session["id"])[0]),
+            },
+        )
+        self.assertEqual(info["tokenBreakdown"]["cacheRead"], 640)
 
     def test_upstream_500_has_readable_runtime_summary(self):
         error = RuntimeError('模型请求失败: 500 Internal Server Error {"error":"failed"}')
