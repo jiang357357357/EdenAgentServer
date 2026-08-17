@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+import json
 import os
 import re
+import sys
 import threading
 import time
 from typing import Any
@@ -35,6 +37,60 @@ _SEARCH_CACHE_LOCK = threading.Lock()
 _WEB_RESOURCES: dict[str, dict[str, dict[str, Any]]] = {}
 _WEB_RESOURCES_LOCK = threading.Lock()
 _WEB_RESOURCE_LIMIT = 128
+
+
+async def _run_web_worker(action: str, params: dict[str, Any]) -> dict[str, Any]:
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "mon_agent_server.tools.web_worker",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    payload = json.dumps({"action": action, "params": params}, ensure_ascii=False).encode("utf-8")
+    try:
+        stdout, stderr = await process.communicate(payload)
+    except asyncio.CancelledError:
+        if process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=0.5)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+        raise
+    if process.returncode != 0:
+        message = stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(message or f"Web 工作进程异常退出：{process.returncode}")
+    try:
+        envelope = json.loads(stdout.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Web 工作进程返回了无效响应") from error
+    if not isinstance(envelope, dict) or not envelope.get("ok"):
+        message = envelope.get("error") if isinstance(envelope, dict) else None
+        raise RuntimeError(str(message or "Web 工作进程执行失败"))
+    result = envelope.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError("Web 工作进程没有返回结果")
+    return result
+
+
+async def _run_web_search_worker(params: dict[str, Any]) -> dict[str, Any]:
+    cache_key = (
+        str(params.get("query") or "").strip(),
+        int(params.get("max_results") or 5),
+        str(params.get("language") or "").strip() or None,
+        str(params.get("time_range") or "").strip() or None,
+        _normalized_domains(params.get("domains")),
+        tuple(search_provider_order(None)),
+    )
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    result = await _run_web_worker("search", params)
+    _cache_put(cache_key, result)
+    return result
 
 
 def _resource_scope(context: MonToolContext) -> str:
@@ -264,12 +320,17 @@ def _search_text(result: dict[str, Any]) -> str:
 def create_web_tools(context: MonToolContext | None = None) -> list[AgentTool]:
     context = context or MonToolContext()
 
+    def raise_if_aborted(signal: Any) -> None:
+        if getattr(signal, "aborted", False):
+            raise asyncio.CancelledError
+
     async def web_execute(
         _tool_call_id: str,
         params: dict[str, Any],
         _signal: Any = None,
         _on_update: Any = None,
     ) -> dict[str, Any]:
+        raise_if_aborted(_signal)
         action = str(params.get("action") or "").strip().lower()
         if action == "open":
             ref_id = str(params.get("ref_id") or "").strip()
@@ -283,7 +344,8 @@ def create_web_tools(context: MonToolContext | None = None) -> list[AgentTool]:
             total_timeout = _total_tool_timeout_seconds("MON_AGENT_FETCH_TOTAL_TIMEOUT_MS", 30_000)
             try:
                 async with asyncio.timeout(total_timeout):
-                    fetched = await asyncio.to_thread(fetch_web_page, url)
+                    fetched = await _run_web_worker("open", {"url": url})
+                raise_if_aborted(_signal)
             except TimeoutError as error:
                 raise tool_failure("timeout", f"网页打开超时：目标页面未在 {total_timeout:g} 秒内返回。", retryable=True) from error
             body = truncate(
@@ -339,19 +401,20 @@ def create_web_tools(context: MonToolContext | None = None) -> list[AgentTool]:
             async with asyncio.timeout(total_timeout):
                 completed = await asyncio.gather(
                     *(
-                        asyncio.to_thread(
-                            web_search,
-                            query,
-                            max_results,
-                            params.get("language"),
-                            params.get("time_range"),
-                            None,
-                            domains,
+                        _run_web_search_worker(
+                            {
+                                "query": query,
+                                "max_results": max_results,
+                                "language": params.get("language"),
+                                "time_range": params.get("time_range"),
+                                "domains": domains,
+                            }
                         )
                         for query in queries
                     ),
                     return_exceptions=True,
                 )
+                raise_if_aborted(_signal)
                 search_results = [item for item in completed if isinstance(item, dict)]
                 query_errors = {
                     query: str(item)

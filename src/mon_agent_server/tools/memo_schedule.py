@@ -14,7 +14,7 @@ logger = get_logger("MonAgent", "MemoSchedule")
 
 def resolve_memo_schedule_request_dir(workspace_root: Path | str) -> Path:
     mon_root = find_mon_root(workspace_root)
-    base_os_root = mon_root / "Backend" / "BaseOs"
+    base_os_root = mon_root / "归档" / "BaseOs"
     config_path = base_os_root / ".monconfig"
     content = (
         config_path.read_text(encoding="utf-8", errors="replace")

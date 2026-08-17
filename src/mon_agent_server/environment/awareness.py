@@ -12,14 +12,11 @@ class OsEnvironmentAwarenessImportError(RuntimeError):
 def _find_base_os_code_dir() -> Path:
     current = Path(__file__).resolve()
     for parent in current.parents:
-        candidates = [
-            parent / "BaseOs" / "Code",
-            parent / "Backend" / "BaseOs" / "Code",
-        ]
+        candidates = [parent / "归档" / "BaseOs" / "Code"]
         for candidate in candidates:
             if candidate.exists():
                 return candidate
-    raise OsEnvironmentAwarenessImportError("无法定位 Backend/BaseOs/Code，环境感知能力不可用。")
+    raise OsEnvironmentAwarenessImportError("无法定位归档/BaseOs/Code，环境感知能力不可用。")
 
 
 def _ensure_base_os_code_path() -> None:

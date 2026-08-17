@@ -600,7 +600,7 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
     async def test_self_awake_profile_exposes_observation_tools(self):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            base_os = root / "Backend" / "BaseOs"
+            base_os = root / "归档" / "BaseOs"
             base_os.mkdir(parents=True)
             (base_os / ".monconfig").write_text("[self_awake]\nDATA_DIR=Data/SelfAwake\n", encoding="utf-8")
             state_path = base_os / "Data" / "SelfAwake" / "state.json"
@@ -688,7 +688,7 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
     async def test_timer_tool_submits_request_without_writing_monos_state(self):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            base_os = root / "Backend" / "BaseOs"
+            base_os = root / "归档" / "BaseOs"
             base_os.mkdir(parents=True)
             (base_os / ".monconfig").write_text(
                 "[self_awake]\nDATA_DIR=Data/SelfAwake\nMIN_WAKE_MINUTES=1\nMAX_WAKE_MINUTES=1440\n",
@@ -716,7 +716,7 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
     async def test_weather_uses_full_environment_location_label(self):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            base_os = root / "Backend" / "BaseOs"
+            base_os = root / "归档" / "BaseOs"
             base_os.mkdir(parents=True)
             (base_os / ".monconfig").write_text("", encoding="utf-8")
             tools = create_mon_agent_tools(
@@ -763,7 +763,7 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
     async def test_weather_explicit_city_does_not_reuse_environment_coordinates(self):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            base_os = root / "Backend" / "BaseOs"
+            base_os = root / "归档" / "BaseOs"
             base_os.mkdir(parents=True)
             (base_os / ".monconfig").write_text("", encoding="utf-8")
             tools = create_mon_agent_tools(

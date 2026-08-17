@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import threading
 import signal
+from typing import Any
 
 from .app import AppState
 from .app.lifecycle import render_startup_summary
 from .config import load_server_config
-from .hub import HubRegistryClient
 from .http_server import AgentHTTPServer, AgentRequestHandler
 from .logging import (
     configure_from_server_config,
@@ -24,13 +24,12 @@ def main(argv: list[str] | None = None) -> int:
     configure_from_server_config(config)
     install_standard_logging_bridge(level=config.log_level)
     app = AppState(config)
-    hub = HubRegistryClient(config)
     server = AgentHTTPServer((config.host, config.port), AgentRequestHandler)
     server.app = app
     stopping = threading.Event()
 
     def shutdown_worker(reason: str) -> None:
-        hub.stop(reason)
+        server_logger.info(f"正在停止 Agent server：{reason}")
         server.shutdown()
 
     def shutdown(signum: int, _frame: Any) -> None:
@@ -55,11 +54,9 @@ def main(argv: list[str] | None = None) -> int:
     server_logger.info("Python AgentCore 已启用")
     server_logger.info("外部邮件能力：Core 用户配置 -> MonOs Email")
     render_startup_summary(app)
-    hub.start()
     try:
         server.serve_forever()
     finally:
-        hub.stop("shutdown")
         app.close()
         server.server_close()
         shutdown_logging()

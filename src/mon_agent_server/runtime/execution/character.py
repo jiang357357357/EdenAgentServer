@@ -545,7 +545,7 @@ class RuntimeCharacterMixin:
             self._agents[session_id] = agent
             cancelled = session_id in self._cancelled_sessions
         if cancelled:
-            agent.abort()
+            raise TurnAborted("当前回合已由用户停止")
         agent.subscribe(lambda event, _signal: self.handle_agent_event(session_id, event, run_state))
         content: list[dict[str, Any]] = []
         if runtime_config.supports_images:

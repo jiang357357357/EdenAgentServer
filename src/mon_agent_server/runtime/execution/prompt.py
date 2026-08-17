@@ -464,7 +464,12 @@ class RuntimePromptMixin:
             self.events.emit({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "idle"}}})
             self.emit_session(session_id)
             logger.info(f"session {session_id} companion turn completed in {now_ms() - started}ms")
-        except TurnAborted:
+        except (TurnAborted, asyncio.CancelledError) as error:
+            if isinstance(error, asyncio.CancelledError):
+                with self._lock:
+                    cancelled_by_user = session_id in self._cancelled_sessions
+                if not cancelled_by_user:
+                    raise
             if active_run_state is not None:
                 self.fail_unfinished_tool_calls(
                     session_id, active_run_state, "当前回合已由用户停止。", aborted=True

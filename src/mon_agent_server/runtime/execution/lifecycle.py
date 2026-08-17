@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections.abc import Callable
-from concurrent.futures import Future
+from concurrent.futures import CancelledError as FutureCancelledError, Future
 import json
 import os
 import threading
@@ -99,6 +99,7 @@ class RuntimeLifecycleMixin:
             running = session_id in self._running
             if running:
                 self._cancelled_sessions.add(session_id)
+            running_future = self._running.get(session_id)
             agent = self._agents.get(session_id)
             control = self._agent_controls.get(session_id)
         cancelled_at = now_ms()
@@ -119,26 +120,31 @@ class RuntimeLifecycleMixin:
                         },
                     }
                 )
-        if agent is not None:
-            agent.abort()
         active_subagents = False
         if control is not None:
             active_subagents = any(
                 snapshot.status not in TERMINAL_AGENT_STATUSES
                 for snapshot in control.list_agents()
             )
-            if active_subagents:
-                future = self._host.submit(self._interrupt_all_subagents(control))
-                future.add_done_callback(self._log_abort_cleanup_error)
+        if running or active_subagents:
+            self.events.emit(
+                {"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "stopping"}}}
+            )
         self.permissions.reject_all(session_id, reason="session_aborted")
         if self.screen_captures is not None:
             self.screen_captures.reject_all(session_id, reason="session_aborted")
         if self.camera_captures is not None:
             self.camera_captures.reject_all(session_id, reason="session_aborted")
-        if running or active_subagents:
-            self.events.emit(
-                {"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "stopping"}}}
-            )
+        if agent is not None:
+            agent.abort()
+        elif running_future is not None:
+            # Covers setup, compaction, and other phases that have not created
+            # an Agent yet. concurrent.futures.Future.cancel() forwards the
+            # cancellation to RuntimeHost's asyncio task.
+            running_future.cancel()
+        if active_subagents and control is not None:
+            future = self._host.submit(self._interrupt_all_subagents(control))
+            future.add_done_callback(self._log_abort_cleanup_error)
         return running or active_subagents
 
     @staticmethod
@@ -260,6 +266,11 @@ class RuntimeLifecycleMixin:
     def _finish_submission(self, session_id: str, completed: Future[Any]) -> None:
         try:
             completed.result()
+        except FutureCancelledError:
+            self.events.emit(
+                {"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "idle"}}}
+            )
+            self.emit_session(session_id)
         except Exception as error:
             self.emit_session_error(session_id, error)
         finally:

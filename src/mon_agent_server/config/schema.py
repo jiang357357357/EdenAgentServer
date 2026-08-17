@@ -5,19 +5,6 @@ from pathlib import Path
 
 
 @dataclass(slots=True)
-class HubConfig:
-    enabled: bool
-    address: str
-    heartbeat_interval_seconds: int
-    service_id: str
-    service_name: str
-    service_type: str
-    version: str
-    description: str
-    public_host: str
-
-
-@dataclass(slots=True)
 class EnvironmentConfig:
     timezone: str
     locale: str
@@ -53,4 +40,3 @@ class ServerConfig:
     auth_dev_username: str
     auth_dev_password: str
     environment: EnvironmentConfig
-    hub: HubConfig

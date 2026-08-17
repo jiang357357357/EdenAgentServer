@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- MonCore 配置读取路径切换为 Mon 根工作区的 `Server/.monconfig`。
+
 ## [1.8.0] - 2026-08-05
 
 ### Added

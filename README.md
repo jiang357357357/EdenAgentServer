@@ -43,8 +43,8 @@ The server uses the MonAgent logging package, modeled after MonCore
 rotation, and a standard-library logging bridge share one handler registry.
 Additional logger mains are written under `Data/Logs/Text/<Main>/<Main>.log`.
 
-MonHub registration is optional service discovery. Disable it for standalone
-debug runs with `MON_AGENT_HUB_ENABLED=false`.
+The server is a local-only service and listens on the fixed default endpoint
+`http://127.0.0.1:40092`.
 
 ## Installable skills
 

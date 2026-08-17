@@ -28,7 +28,18 @@ def handle_sessions(handler: Any, path: str, query: dict[str, list[str]], method
         token = require_core_token(handler.headers)
         limit = handler.query_int(query, "limit", 50)
         sessions = handler.app.core_client.list_agent_sessions(token, limit)
-        merged_sessions = [handler.app.store.upsert_session_info(session) for session in sessions]
+        merged_sessions = []
+        for session in sessions:
+            merged = handler.app.store.upsert_session_info(session)
+            merged_sessions.append(
+                {
+                    **merged,
+                    # Runtime state is process-local and is not persisted by Core.
+                    # Returning it here lets a refreshed/reconnected client keep
+                    # the stop control available for an already-running turn.
+                    "runtimeStatus": "busy" if handler.app.runtime.is_running(merged["id"]) else "idle",
+                }
+            )
         handler.json_response(merged_sessions)
         return True
 
@@ -59,7 +70,12 @@ def handle_sessions(handler: Any, path: str, query: dict[str, list[str]], method
         if isinstance(initial_parts, list) and initial_parts:
             handler.app.hydrate_permission_mode(token, session["id"])
             handler.app.runtime.prompt_async(session["id"], initial_parts, token)
-        handler.json_response(session)
+        handler.json_response(
+            {
+                **session,
+                "runtimeStatus": "busy" if isinstance(initial_parts, list) and initial_parts else "idle",
+            }
+        )
         return True
 
     participants_match = re.match(r"^/session/([^/]+)/participants$", path)
@@ -136,10 +152,10 @@ def handle_sessions(handler: Any, path: str, query: dict[str, list[str]], method
     if message_match and method == "GET":
         session_id = urllib.parse.unquote(message_match.group(1))
         token = require_core_token(handler.headers)
-        if not handler.app.runtime.is_running(session_id):
-            handler.app.hydrate(token, session_id)
-        else:
-            handler.app.ensure_hydrated(token, session_id)
+        # The local store is authoritative for the lifetime of this Server.
+        # Hydrate from Core once after startup; repeated history reads must not
+        # re-fetch and rebuild the complete session.
+        handler.app.ensure_hydrated(token, session_id)
         before = (query.get("before") or [""])[0].strip() or None
         # Hydration rebuilds the actual model context. Publish its token count on
         # the initial page only; older-page reads must not create event traffic.

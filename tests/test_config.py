@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from mon_agent_server.config import MonConfig, create_core_base_url, environment_context, load_server_config, publish_web_env_defaults
+from mon_agent_server.config import MonConfig, create_core_base_url, environment_context, load_mon_config, load_server_config, publish_web_env_defaults
 
 
 class ConfigTest(unittest.TestCase):
@@ -68,6 +68,7 @@ class ConfigTest(unittest.TestCase):
     def test_search_config_publishes_defaults_without_overriding_environment(self):
         config = MonConfig(
             data={"search": {"PROVIDER": "exa,brave", "EXA_API_KEY": "config-key", "FETCH_MAX_BYTES": "1000000"}},
+            module_root=Path("/tmp"),
             workspace_root=Path("/tmp"),
             files=[],
         )
@@ -76,6 +77,39 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(os.environ["MON_AGENT_SEARCH_PROVIDER"], "exa,brave")
             self.assertEqual(os.environ["EXA_API_KEY"], "environment-key")
             self.assertEqual(os.environ["MON_AGENT_FETCH_MAX_BYTES"], "1000000")
+
+    def test_monconfig_is_module_local_and_preserves_url_fragments(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / ".monworkspace").write_text("modules: []\n", encoding="utf-8")
+            (workspace / ".monconfig").write_text("[server]\nPORT=1\n", encoding="utf-8")
+            module = workspace / "Agent"
+            nested = module / "Server" / "src"
+            nested.mkdir(parents=True)
+            (module / ".monconfig").write_text(
+                "[Server]\nport=40092\nURL=https://example.test/#fragment # comment\n",
+                encoding="utf-8",
+            )
+
+            config = load_mon_config(nested)
+
+            self.assertEqual(config.get("SERVER", "port"), "40092")
+            self.assertEqual(config.get("server", "URL"), "https://example.test/#fragment")
+            self.assertEqual(config.module_root, module)
+            self.assertEqual(config.workspace_root, workspace)
+            self.assertEqual(config.files, [module / ".monconfig"])
+
+    def test_monconfig_rejects_invalid_typed_values(self):
+        config = MonConfig(
+            data={"test": {"COUNT": "many", "ENABLED": "maybe"}},
+            module_root=Path("/tmp"),
+            workspace_root=Path("/tmp"),
+            files=[],
+        )
+        with self.assertRaises(ValueError):
+            config.number("test", "COUNT", 1)
+        with self.assertRaises(ValueError):
+            config.boolean("test", "ENABLED", True)
 
 
 if __name__ == "__main__":

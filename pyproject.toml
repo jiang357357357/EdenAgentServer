@@ -10,7 +10,6 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "mon-agent-core",
-    "pyzmq>=26",
     "rich>=13",
     "PyYAML>=6.0",
     "tzdata>=2025.2; platform_system == 'Windows'",

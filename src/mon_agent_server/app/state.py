@@ -22,6 +22,8 @@ class AppState:
     events: EventBus = field(default_factory=EventBus)
     store: SessionStore = field(default_factory=SessionStore)
     hydrated_session_ids: set[str] = field(default_factory=set)
+    _hydrating_session_ids: set[str] = field(default_factory=set, init=False, repr=False)
+    _hydration_condition: threading.Condition = field(default_factory=threading.Condition, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.permissions = PermissionBroker(self.events)
@@ -163,25 +165,49 @@ class AppState:
         return self.permissions.set_mode(persisted, self.permission_scope(token))
 
     def hydrate(self, token: str, session_id: str) -> None:
-        data = self.core_client.get_agent_session(token, session_id)
-        self.store.upsert_session_info(data["info"])
-        self.store.hydrate_messages(session_id, data["messages"], data.get("modelEvents"))
-        self.runtime.load_persisted_subagents(session_id)
-        self.connector_manager.reconcile_user(token)
-        self.hydrated_session_ids.add(session_id)
-        self.runtime.backfill_session_title_async(session_id, token)
+        # Several Electron surfaces can request the same history at startup.
+        # Only one thread may fetch and rebuild a session; concurrent callers
+        # wait for that result instead of repeating the full Core hydration.
+        with self._hydration_condition:
+            if session_id in self._hydrating_session_ids:
+                self._hydration_condition.wait_for(
+                    lambda: session_id not in self._hydrating_session_ids
+                )
+                if session_id in self.hydrated_session_ids:
+                    self.store.require_session(session_id)
+                    return
+            self._hydrating_session_ids.add(session_id)
+
+        succeeded = False
+        try:
+            data = self.core_client.get_agent_session(token, session_id)
+            self.store.upsert_session_info(data["info"])
+            self.store.hydrate_messages(session_id, data["messages"], data.get("modelEvents"))
+            self.runtime.load_persisted_subagents(session_id)
+            self.runtime.backfill_session_title_async(session_id, token)
+            succeeded = True
+        finally:
+            with self._hydration_condition:
+                if succeeded:
+                    self.hydrated_session_ids.add(session_id)
+                self._hydrating_session_ids.discard(session_id)
+                self._hydration_condition.notify_all()
 
     def ensure_hydrated(self, token: str, session_id: str) -> None:
-        if session_id not in self.hydrated_session_ids:
+        with self._hydration_condition:
+            hydrated = session_id in self.hydrated_session_ids
+        if not hydrated:
             self.hydrate(token, session_id)
             return
         self.store.require_session(session_id)
 
     def mark_hydrated(self, session_id: str) -> None:
-        self.hydrated_session_ids.add(session_id)
+        with self._hydration_condition:
+            self.hydrated_session_ids.add(session_id)
 
     def forget_hydrated(self, session_id: str) -> None:
-        self.hydrated_session_ids.discard(session_id)
+        with self._hydration_condition:
+            self.hydrated_session_ids.discard(session_id)
 
     def switch_workspace(self, workspace: str) -> Path:
         target = Path(workspace).expanduser().resolve()

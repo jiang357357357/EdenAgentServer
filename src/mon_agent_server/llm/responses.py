@@ -66,6 +66,13 @@ async def stream_responses_sync(
     options: dict[str, Any],
     push: Any,
 ) -> None:
+    signal = options.get("signal")
+
+    def raise_if_aborted() -> None:
+        if getattr(signal, "aborted", False):
+            raise asyncio.CancelledError
+
+    raise_if_aborted()
     api_key = options.get("apiKey")
     if not api_key:
         raise RuntimeError(f"模型 {model.get('provider')}/{model.get('id')} 缺少 API Key")
@@ -123,6 +130,7 @@ async def stream_responses_sync(
             first_event_timeout_seconds=first_event_timeout,
             idle_timeout_seconds=idle_timeout,
         ):
+            raise_if_aborted()
             received_data = True
             stream_started = True
             if data == "[DONE]":
@@ -212,6 +220,7 @@ async def stream_responses_sync(
     connect_timeout_seconds, first_event_timeout_seconds, idle_timeout_seconds = stream_timeouts()
     attempt = 1
     while True:
+        raise_if_aborted()
         stream_started = False
         try:
             async with open_sse(
@@ -259,7 +268,9 @@ async def stream_responses_sync(
         )
         if delay_ms:
             await asyncio.sleep(delay_ms / 1000)
+            raise_if_aborted()
 
+    raise_if_aborted()
     if native_sources:
         content = partial.setdefault("content", [])
         existing_text = "\n".join(

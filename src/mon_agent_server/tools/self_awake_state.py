@@ -10,7 +10,7 @@ from .datetime_utils import parse_local_datetime
 def find_mon_root(workspace_root: Path | str) -> Path:
     current = Path(workspace_root).resolve()
     for _ in range(8):
-        if (current / "Backend" / "BaseOs" / ".monconfig").exists():
+        if (current / "归档" / "BaseOs" / ".monconfig").exists():
             return current
         if current.parent == current:
             break
@@ -36,7 +36,7 @@ def read_ini_value(content: str, section: str, key: str) -> str | None:
 
 def resolve_self_awake_state_path(workspace_root: Path | str) -> dict[str, Any]:
     mon_root = find_mon_root(workspace_root)
-    base_os_root = mon_root / "Backend" / "BaseOs"
+    base_os_root = mon_root / "归档" / "BaseOs"
     config_path = base_os_root / ".monconfig"
     content = config_path.read_text(encoding="utf-8", errors="replace") if config_path.exists() else ""
     data_dir = read_ini_value(content, "self_awake", "DATA_DIR") or "Data/SelfAwake"

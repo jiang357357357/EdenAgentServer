@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from mon_agent_server.tools.web import (
     _merge_search_results,
+    _run_web_worker,
     bing_freshness_filter,
     clear_search_cache,
     clear_web_resources,
@@ -255,12 +256,12 @@ class WebSearchProviderTest(unittest.TestCase):
 
 class WebToolTimeoutTest(unittest.IsolatedAsyncioTestCase):
     async def test_web_search_has_total_async_timeout(self) -> None:
-        async def hanging_to_thread(*_args, **_kwargs):
+        async def hanging_worker(*_args, **_kwargs):
             await asyncio.Event().wait()
 
         tool = next(item for item in create_web_tools() if item.name == "web")
         with (
-            patch("mon_agent_server.tools.web.asyncio.to_thread", new=hanging_to_thread),
+            patch("mon_agent_server.tools.web._run_web_worker", new=hanging_worker),
             patch("mon_agent_server.tools.web._total_tool_timeout_seconds", return_value=0.01),
         ):
             with self.assertRaisesRegex(RuntimeError, "网页搜索总超时"):
@@ -269,7 +270,8 @@ class WebToolTimeoutTest(unittest.IsolatedAsyncioTestCase):
     async def test_batch_search_keeps_successful_queries_when_one_fails(self) -> None:
         tool = next(item for item in create_web_tools() if item.name == "web")
 
-        def fake_search(query, *_args, **_kwargs):
+        async def fake_worker(_action, params):
+            query = params["query"]
             if query == "失败查询":
                 raise RuntimeError("没有结果")
             return {
@@ -281,7 +283,7 @@ class WebToolTimeoutTest(unittest.IsolatedAsyncioTestCase):
                 "elapsed_ms": 10,
             }
 
-        with patch("mon_agent_server.tools.web.web_search", side_effect=fake_search):
+        with patch("mon_agent_server.tools.web._run_web_worker", side_effect=fake_worker):
             result = await tool.execute("call-batch", {"action": "search", "query": "成功查询", "queries": ["失败查询"]})
 
         self.assertIn("成功查询结果", result["content"][0]["text"])
@@ -292,27 +294,57 @@ class WebToolTimeoutTest(unittest.IsolatedAsyncioTestCase):
 
         clear_web_resources()
         tool = create_web_tools(MonToolContext(session_id="session-a"))[0]
-        with patch(
-            "mon_agent_server.tools.web.web_search",
-            return_value={
+        async def fake_worker(action, _params):
+            if action == "open":
+                return {
+                    "url": "https://example.com/docs", "title": "文档", "body": "MonAgent 支持统一网页工具。",
+                    "contentType": "text/html", "bytes": 30, "truncated": False, "charset": "utf-8",
+                }
+            return {
                 "provider": "bing", "query": "MonAgent", "results": [
                     {"title": "文档", "url": "https://example.com/docs", "provider": "bing"}
                 ], "attempts": [], "cached": False, "elapsed_ms": 1,
-            },
-        ):
-            searched = await tool.execute("search", {"action": "search", "query": "MonAgent"})
-        self.assertEqual(searched["details"]["results"][0]["ref_id"], "search_1")
+            }
 
-        fetched = {
-            "url": "https://example.com/docs", "title": "文档", "body": "MonAgent 支持统一网页工具。",
-            "contentType": "text/html", "bytes": 30, "truncated": False, "charset": "utf-8",
-        }
-        with patch("mon_agent_server.tools.web.fetch_web_page", return_value=fetched):
+        with patch("mon_agent_server.tools.web._run_web_worker", side_effect=fake_worker):
+            searched = await tool.execute("search", {"action": "search", "query": "MonAgent"})
             opened = await tool.execute("open", {"action": "open", "ref_id": "search_1"})
+        self.assertEqual(searched["details"]["results"][0]["ref_id"], "search_1")
         self.assertEqual(opened["details"]["ref_id"], "page_1")
 
         found = await tool.execute("find", {"action": "find", "ref_id": "page_1", "pattern": "统一网页"})
         self.assertEqual(len(found["details"]["matches"]), 1)
+
+    async def test_cancelling_web_worker_terminates_its_process(self) -> None:
+        communicate_started = asyncio.Event()
+
+        class Process:
+            returncode = None
+            terminated = False
+
+            async def communicate(self, _payload):
+                communicate_started.set()
+                await asyncio.Event().wait()
+
+            def terminate(self):
+                self.terminated = True
+                self.returncode = -15
+
+            async def wait(self):
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+
+        process = Process()
+        with patch("mon_agent_server.tools.web.asyncio.create_subprocess_exec", return_value=process):
+            task = asyncio.create_task(_run_web_worker("search", {"query": "test"}))
+            await asyncio.wait_for(communicate_started.wait(), timeout=1)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        self.assertTrue(process.terminated)
 
 
 class FakeProvider:

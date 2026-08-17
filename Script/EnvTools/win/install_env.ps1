@@ -58,7 +58,7 @@ try {
     exit 1
   }
   Write-Host "[OK] Python: $(& $VenvPython --version)"
-  & $VenvPython -c "import mon_agent_server, mon_agent_core, yaml, zmq; print('[OK] dependencies available')"
+  & $VenvPython -c "import mon_agent_server, mon_agent_core, yaml; print('[OK] dependencies available')"
   Write-Host ""
   Write-Host "[OK] MonAgent Server environment installation completed"
   Write-Host "[INSTALL_STATUS:SUCCESS]"

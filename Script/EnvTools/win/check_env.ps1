@@ -29,7 +29,7 @@ if (Get-Command "uv" -ErrorAction SilentlyContinue) {
 if (Test-Path $VenvPython) {
   Write-Host "[OK] Python: $(& $VenvPython --version)"
   try {
-    & $VenvPython -c "import mon_agent_server, mon_agent_core, yaml, zmq; print('[OK] dependencies available')"
+    & $VenvPython -c "import mon_agent_server, mon_agent_core, yaml; print('[OK] dependencies available')"
   } catch {
     Write-Host "[x] Critical dependency check failed" -ForegroundColor Red
     $Ok = $false

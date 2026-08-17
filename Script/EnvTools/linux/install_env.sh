@@ -61,7 +61,6 @@ echo "✓ Python: $("$VENV_PYTHON" --version)"
 check_import "$VENV_PYTHON" "MonAgent Server" "import mon_agent_server; print('ok')"
 check_import "$VENV_PYTHON" "MonAgent Core" "import mon_agent_core; print('ok')"
 check_import "$VENV_PYTHON" "PyYAML" "import yaml; print(yaml.__version__)"
-check_import "$VENV_PYTHON" "pyzmq" "import zmq; print(zmq.__version__)"
 echo
 
 echo "========================================================"

@@ -51,6 +51,13 @@ async def _stream_openai_compatible(
     options: dict[str, Any],
     push: Any,
 ) -> None:
+    signal = options.get("signal")
+
+    def raise_if_aborted() -> None:
+        if getattr(signal, "aborted", False):
+            raise asyncio.CancelledError
+
+    raise_if_aborted()
     if uses_responses_api(model):
         await stream_responses_sync(model, context, options, push)
         return
@@ -84,6 +91,7 @@ async def _stream_openai_compatible(
             first_event_timeout_seconds=first_event_timeout,
             idle_timeout_seconds=idle_timeout,
         ):
+            raise_if_aborted()
             received_data = True
             stream_started = True
             if data == "[DONE]":
@@ -172,6 +180,7 @@ async def _stream_openai_compatible(
     attempt = 1
     stream_options_fallback_used = False
     while True:
+        raise_if_aborted()
         stream_started = False
         try:
             async with open_sse(
@@ -227,7 +236,9 @@ async def _stream_openai_compatible(
         )
         if delay_ms:
             await asyncio.sleep(delay_ms / 1000)
+            raise_if_aborted()
 
+    raise_if_aborted()
     if thinking_index is not None:
         push_partial({"type": "thinking_end", "contentIndex": thinking_index})
     if text_index is not None:

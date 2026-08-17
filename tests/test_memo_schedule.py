@@ -13,7 +13,7 @@ class MemoScheduleRequestTest(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             agent_root = root / "Agent"
-            base_os_root = root / "Backend" / "BaseOs"
+            base_os_root = root / "归档" / "BaseOs"
             agent_root.mkdir(parents=True)
             base_os_root.mkdir(parents=True)
             (base_os_root / ".monconfig").write_text(

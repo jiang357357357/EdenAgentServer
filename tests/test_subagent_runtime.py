@@ -27,6 +27,36 @@ class EventRecorder:
 
 
 class SubagentRuntimeIntegrationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_abort_hard_cancels_a_run_before_agent_creation(self) -> None:
+        permissions = Mock()
+        events = EventRecorder()
+        store = SessionStore()
+        session_id = store.create_session("setup cancellation")["id"]
+        runtime = MonAgentRuntime(
+            Path.cwd(), store, events, permissions, None, object()
+        )
+        pending = Future()
+        runtime._running[session_id] = pending
+        runtime._running_kinds[session_id] = "user"
+        pending.add_done_callback(
+            lambda completed: runtime._finish_submission(session_id, completed)
+        )
+
+        try:
+            self.assertTrue(runtime.abort(session_id))
+            self.assertTrue(pending.cancelled())
+            statuses = [
+                event["properties"]["status"]["type"]
+                for event in events.events
+                if event.get("type") == "session.status"
+            ]
+            self.assertEqual(statuses, ["stopping", "idle"])
+            permissions.reject_all.assert_called_once_with(
+                session_id, reason="session_aborted"
+            )
+        finally:
+            runtime.close()
+
     async def test_abort_interrupts_all_active_subagents(self) -> None:
         permissions = Mock()
         runtime = MonAgentRuntime(

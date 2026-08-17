@@ -14,6 +14,97 @@ from mon_agent_server.runtime.config.models import RuntimeModelConfig
 
 
 class RouteTest(unittest.TestCase):
+    def test_message_history_uses_cached_session_hydration(self):
+        calls = []
+
+        class Runtime:
+            @staticmethod
+            def emit_session(session_id):
+                calls.append(("emit", session_id))
+
+        class Store:
+            @staticmethod
+            def list_message_page(session_id, **options):
+                calls.append(("page", session_id, options))
+                return {"items": [], "hasMore": False, "nextCursor": None}
+
+        class App:
+            runtime = Runtime()
+            store = Store()
+
+            @staticmethod
+            def ensure_hydrated(token, session_id):
+                calls.append(("ensure", token, session_id))
+
+            @staticmethod
+            def hydrate(_token, _session_id):
+                raise AssertionError("history reads must not force a full refresh")
+
+        class Handler:
+            headers = {"Authorization": "Bearer core-token"}
+            app = App()
+
+            @staticmethod
+            def query_int(_query, _name, default):
+                return default
+
+            def json_response(self, data, status=200):
+                self.response = (data, status)
+
+        handler = Handler()
+        handled = handle_sessions(
+            handler,
+            "/session/session%201/message",
+            {"limit": ["50"], "includeCompactions": ["1"]},
+            "GET",
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(calls[0], ("ensure", "core-token", "session 1"))
+        self.assertEqual(handler.response[0]["items"], [])
+
+    def test_session_list_includes_live_runtime_status(self):
+        class Runtime:
+            @staticmethod
+            def is_running(session_id):
+                return session_id == "session-running"
+
+        class CoreClient:
+            @staticmethod
+            def list_agent_sessions(_token, _limit):
+                return [
+                    {"id": "session-running", "title": "运行中"},
+                    {"id": "session-idle", "title": "空闲"},
+                ]
+
+        class Store:
+            @staticmethod
+            def upsert_session_info(session):
+                return {**session, "time": {"created": 1, "updated": 1}}
+
+        class App:
+            runtime = Runtime()
+            core_client = CoreClient()
+            store = Store()
+
+        class Handler:
+            headers = {"Authorization": "Bearer core-token"}
+            app = App()
+
+            @staticmethod
+            def query_int(_query, _name, default):
+                return default
+
+            def json_response(self, data, status=200):
+                self.response = (data, status)
+
+        handler = Handler()
+        handled = handle_sessions(handler, "/session", {}, "GET")
+
+        self.assertTrue(handled)
+        self.assertEqual(handler.response[0][0]["runtimeStatus"], "busy")
+        self.assertEqual(handler.response[0][1]["runtimeStatus"], "idle")
+
     def test_connector_catalog_route_returns_installed_manifest_catalog(self):
         class Catalog:
             @staticmethod
@@ -223,6 +314,7 @@ class RouteTest(unittest.TestCase):
             calls,
         )
         self.assertEqual(handler.response[0]["id"], "session-1")
+        self.assertEqual(handler.response[0]["runtimeStatus"], "busy")
 
     def test_participant_update_rejects_running_session(self):
         class Runtime:
