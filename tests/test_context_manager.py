@@ -113,7 +113,7 @@ class ContextManagerTests(unittest.TestCase):
         self.assertEqual([message["role"] for message in messages], ["user", "user"])
         self.assertEqual(messages[-1]["content"], "重新请求")
 
-    def test_prunes_large_old_tool_results_but_keeps_recent_two_user_turns(self):
+    def test_old_tool_results_remain_stable_until_durable_compaction(self):
         # Repeated single characters compress into comparatively few BPE tokens.
         # Use realistic, varied tool output so this test exercises the token
         # thresholds rather than depending on the removed chars/4 heuristic.
@@ -135,9 +135,24 @@ class ContextManagerTests(unittest.TestCase):
         messages = ContextManager.compile(events)
         results = {message["toolCallId"]: message["content"] for message in messages if message["role"] == "toolResult"}
 
-        self.assertEqual(results["old_1"][0]["text"], ContextManager.PRUNED_TOOL_RESULT_TEXT)
+        self.assertIn("tail preserved", results["old_1"])
         self.assertIsInstance(results["old_3"], str)
         self.assertIsInstance(results["recent"], str)
+
+    def test_persists_skill_snapshot_as_model_context(self):
+        snapshot = {
+            "role": "custom",
+            "kind": "skillSnapshot",
+            "snapshotID": "snapshot-1",
+            "skillIDs": ["workspace-development"],
+            "content": "<active_skill_snapshot>instructions</active_skill_snapshot>",
+            "timestamp": 1,
+        }
+
+        event_payload = ContextManager.event_for_message(snapshot, sequence=1).dump()
+        messages = ContextManager.compile([event_payload])
+
+        self.assertEqual(messages, [snapshot])
 
     def test_does_not_prune_small_old_tool_history(self):
         events = [

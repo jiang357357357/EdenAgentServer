@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from mon_agent_core import AssistantMessageEventStream
+from mon_agent_server.agent_api import AssistantMessageEventStream
 
 from mon_agent_server.brokers import PermissionBroker
 from mon_agent_server.llm.messages import to_openai_messages
@@ -433,10 +433,12 @@ class CharacterMainAgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("web", observed_tools[0])
         self.assertIn("web", observed_tools[1])
         self.assertEqual(observed_tools[0], observed_tools[1])
-        self.assertIn('<skill name="character-performance"', observed_prompts[0])
-        self.assertNotIn('<skill name="web-research"', observed_prompts[0])
-        self.assertIn("当前已加载技能", observed_prompts[1])
-        self.assertIn('<skill name="web-research"', observed_prompts[1])
+        self.assertEqual(observed_prompts[0], observed_prompts[1])
+        self.assertNotIn('<skill name="character-performance"', observed_prompts[0])
+        self.assertNotIn('<skill name="web-research"', observed_prompts[1])
+        self.assertIn('<skill name="character-performance"', str(observed_messages[0]))
+        self.assertNotIn('<skill name="web-research"', str(observed_messages[0]))
+        self.assertIn('<skill name="web-research"', str(observed_messages[1]))
         self.assertNotIn("当前本地时间：", observed_prompts[0])
         self.assertNotIn("当前本地时间：", observed_prompts[1])
         self.assertIn("当前本地时间：", str(observed_messages[0]))

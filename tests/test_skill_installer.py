@@ -3,14 +3,20 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 
 from mon_agent_server.skills import create_skill_runtime, owner_storage_key
-from mon_agent_server.skills.installer import INSTALLATION_MANIFEST, SkillInstallationService, skill_roots
+from mon_agent_server.skills.installer import (
+    INSTALLATION_MANIFEST,
+    SkillInstallationService,
+    skill_roots,
+)
 
 
 class FakeCoreClient:
@@ -438,14 +444,18 @@ class SkillInstallationServiceTest(unittest.TestCase):
         )
 
         target = skill_roots(self.workspace, self.owner_key)["project"] / "code-bundle"
-        self.assertTrue((target / "scripts" / "greet.py").stat().st_mode & 0o111)
+        script = target / "scripts" / "greet.py"
+        self.assertTrue(script.is_file())
+        if os.name != "nt":
+            self.assertTrue(script.stat().st_mode & 0o111)
         self.assertEqual((target / "assets" / "pixel.bin").read_bytes(), b"\x00\x01\x02")
         metadata = (target / "agents" / "openai.yaml").read_text(encoding="utf-8")
         self.assertIn("使用代码技能包生成一次问候", metadata)
         self.assertEqual(installed["fileCount"], 6)
 
+        command = [str(script)] if os.name != "nt" else [sys.executable, str(script)]
         result = subprocess.run(
-            [str(target / "scripts" / "greet.py")],
+            command,
             capture_output=True,
             text=True,
             check=False,

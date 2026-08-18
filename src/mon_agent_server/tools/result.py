@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mon_agent_core import ToolExecutionError
+from ..agent_api import ToolExecutionError
 
 
 def tool_failure(

@@ -4,18 +4,25 @@ import asyncio
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from mon_agent_core import AgentTool, ToolExecutionError
-
+from ..agent_api import AgentTool, ToolExecutionError
 from ..tools.result import text_result, truncate
-
 
 TOOL_MANIFEST_GLOB = "tools/*.json"
 TOOL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 MAX_TIMEOUT_SECONDS = 120
+
+
+def _resolved_command(command: tuple[str, ...]) -> tuple[str, ...]:
+    if os.name == "nt" and command[0].casefold() in {
+        "python", "python.exe", "python3", "python3.exe",
+    }:
+        return (sys.executable, *command[1:])
+    return command
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +119,7 @@ def run_plugin_tests(plugins: tuple[SkillToolPlugin, ...]) -> None:
         if not plugin.test_command:
             continue
         result = subprocess.run(
-            plugin.test_command,
+            _resolved_command(plugin.test_command),
             cwd=plugin.root,
             input="{}",
             capture_output=True,
@@ -137,7 +144,7 @@ def plugin_agent_tools(plugins: tuple[SkillToolPlugin, ...]) -> list[AgentTool]:
             current: SkillToolPlugin = plugin,
         ) -> dict[str, Any]:
             process = await asyncio.create_subprocess_exec(
-                *current.command,
+                *_resolved_command(current.command),
                 cwd=current.root,
                 env={**os.environ, "MONAGENT_SKILL_ROOT": str(current.root)},
                 stdin=asyncio.subprocess.PIPE,

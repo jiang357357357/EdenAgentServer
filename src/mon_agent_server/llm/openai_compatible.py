@@ -7,8 +7,7 @@ from typing import Any
 
 import httpx
 
-from mon_agent_core import AssistantMessageEventStream
-from mon_agent_core.types import now_ms
+from ..agent_api import AssistantMessageEventStream, now_ms
 from .messages import message_content, to_openai_messages
 from .http_stream import RETRYABLE_STATUS_CODES, iter_sse_data, open_sse, stream_timeouts
 from .models import core_model, endpoint_to_chat_url, env_model, http_user_agent, normalize_vendor, trim_endpoint_to_base, uses_responses_api
@@ -82,6 +81,19 @@ async def _stream_openai_compatible(
     finish_reason = "stop"
     usage: dict[str, Any] | None = None
     stream_started = False
+
+    def reset_partial_for_retry() -> None:
+        """Retract provisional text/reasoning while preserving stable part indexes."""
+        nonlocal finish_reason, stream_started, usage
+        for block in partial.get("content") or []:
+            if block.get("type") == "text":
+                block["text"] = ""
+            elif block.get("type") == "thinking":
+                block["thinking"] = ""
+        finish_reason = "stop"
+        usage = None
+        stream_started = False
+        push_partial({"type": "stream_reset"})
 
     async def consume(response: Any, first_event_timeout: int, idle_timeout: int) -> bool:
         nonlocal finish_reason, stream_started, thinking_index, text_index, usage
@@ -217,10 +229,13 @@ async def _stream_openai_compatible(
             retry_reason = f"HTTP {error.response.status_code}"
             status_code: int | None = error.response.status_code
         except (httpx.HTTPError, TimeoutError, ConnectionError, EOFError) as error:
-            if stream_started or attempt >= max_attempts:
+            if tool_indexes or attempt >= max_attempts:
                 raise
             retry_reason = str(error)
             status_code = None
+
+        if stream_started:
+            reset_partial_for_retry()
 
         attempt += 1
         delay_ms = min(max_delay_ms, 500 * (2 ** (attempt - 2)))
@@ -259,6 +274,14 @@ async def stream_openai_compatible(model: dict[str, Any], context: dict[str, Any
         try:
             await _stream_openai_compatible(model, context, options, stream.push)
         except Exception as error:
+            raw_error = str(error)
+            normalized_error = raw_error.lower()
+            if "incomplete chunked read" in normalized_error or (
+                "peer closed connection" in normalized_error and "complete message body" in normalized_error
+            ):
+                error_message = "模型服务在生成过程中提前断开连接；自动重试后仍未完成，请重试。"
+            else:
+                error_message = raw_error
             message = {
                 "role": "assistant",
                 "content": [{"type": "text", "text": ""}],
@@ -266,7 +289,7 @@ async def stream_openai_compatible(model: dict[str, Any], context: dict[str, Any
                 "provider": model.get("provider", "openai"),
                 "model": model.get("id", "unknown"),
                 "stopReason": "error",
-                "errorMessage": str(error),
+                "errorMessage": error_message,
                 "timestamp": now_ms(),
             }
             stream.push({"type": "error", "error": message})

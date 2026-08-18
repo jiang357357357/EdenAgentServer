@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from mon_agent_core import AgentTool, ToolRegistry
+from ..agent_api import AgentTool, ToolRegistry, now_ms
 
 from ..tools import MonToolContext, create_mon_agent_tools
 from ..tools.result import text_result
@@ -56,6 +57,7 @@ class MonAgentSkillRuntime:
         ]
         self._revision = 0
         self._applied_revision = 0
+        self._deferred_activation_order: list[str] = []
         self._tool_filter = tool_filter
         self._loader_tool = self._create_loader_tool()
         self._search_tool = self._create_search_tool()
@@ -104,6 +106,10 @@ class MonAgentSkillRuntime:
             self._discover_plugin_tools(),
         )
         self._tools_by_name = {tool.name: tool for tool in self._all_tools}
+        for name in self._deferred_activation_order:
+            tool = self._tools_by_name.get(name)
+            if tool is not None and tool.exposure == "deferred":
+                tool.exposure = "direct"
         available = {skill.name for skill in refreshed.snapshot.skills}
         self._loaded_skill_ids = [name for name in self._loaded_skill_ids if name in available]
         self._loader_tool = self._create_loader_tool()
@@ -140,6 +146,26 @@ class MonAgentSkillRuntime:
         )
         return [tool for tool in tools if self._tool_filter is None or self._tool_filter(tool)]
 
+    def ordered_active_tools(self) -> list[AgentTool]:
+        """Keep the stable direct prefix first and append discovered tools by activation order."""
+        tools = self.active_tools()
+        activated = set(self._deferred_activation_order)
+        stable_direct = sorted(
+            (tool for tool in tools if tool.exposure == "direct" and tool.name not in activated),
+            key=lambda tool: tool.name,
+        )
+        revealed = [
+            tool
+            for name in self._deferred_activation_order
+            if (tool := next((candidate for candidate in tools if candidate.name == name), None)) is not None
+            and tool.exposure == "direct"
+        ]
+        inactive = sorted(
+            (tool for tool in tools if tool.exposure != "direct"),
+            key=lambda tool: tool.name,
+        )
+        return [*stable_direct, *revealed, *inactive]
+
     def _create_search_tool(self) -> AgentTool:
         registry = ToolRegistry()
         registry.register_many(self._all_tools)
@@ -151,7 +177,7 @@ class MonAgentSkillRuntime:
             _on_update: Any = None,
         ) -> dict[str, Any]:
             query = str(params.get("query") or "").strip()
-            limit = int(params.get("limit") or 8)
+            limit = int(params.get("limit") or 5)
             namespace = str(params.get("namespace") or "").strip() or None
             source = str(params.get("source") or "").strip() or None
             matches = registry.search(query, limit=limit, namespace=namespace, source=source)
@@ -169,6 +195,8 @@ class MonAgentSkillRuntime:
                 if tool is None or tool.exposure == "hidden":
                     continue
                 tool.exposure = "direct"
+                if tool.name not in self._deferred_activation_order:
+                    self._deferred_activation_order.append(tool.name)
                 revealed.append(tool)
             entries = [
                 {
@@ -300,33 +328,84 @@ class MonAgentSkillRuntime:
         return result
 
     def prompt_section(self) -> str:
+        """Compatibility view containing discovery and loaded instructions."""
+        sections = [self.catalog_prompt_section()]
+        loaded = self.loaded_instructions_section()
+        if loaded:
+            sections.extend(["当前已加载技能：", loaded])
+        return "\n\n".join(section for section in sections if section)
+
+    def catalog_prompt_section(self) -> str:
+        """Stable system-prompt section; loading a skill must not change it."""
         self._refresh_resources()
-        sections: list[str] = []
-        catalog = self.resources.snapshot.format_catalog("load_skill")
-        if catalog:
-            sections.append(catalog)
+        return self.resources.snapshot.format_catalog("load_skill")
+
+    def loaded_instructions_section(self) -> str:
+        self._refresh_resources()
         loaded = [
             invocation
             for skill_id in self._loaded_skill_ids
             if (invocation := self.resources.snapshot.format_skill_invocation(skill_id))
         ]
-        if loaded:
-            sections.extend(["当前已加载技能：", "\n\n".join(loaded)])
-        return "\n\n".join(sections)
+        return "\n\n".join(loaded)
+
+    def skill_snapshot_message(self) -> dict[str, Any] | None:
+        instructions = self.loaded_instructions_section().strip()
+        if not instructions:
+            return None
+        skill_ids = list(self.active_skill_ids)
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {"skills": skill_ids, "instructions": instructions},
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        return {
+            "role": "custom",
+            "kind": "skillSnapshot",
+            "snapshotID": fingerprint,
+            "skillIDs": skill_ids,
+            "timestamp": now_ms(),
+            "content": (
+                "<active_skill_snapshot>\n"
+                "这是运行时生成的当前技能快照；它取代更早的技能快照。请持续遵守，直到出现更新快照。\n"
+                f"已加载技能：{', '.join(skill_ids)}\n\n"
+                f"{instructions}\n"
+                "</active_skill_snapshot>"
+            ),
+        }
+
+    def append_skill_snapshot(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        snapshot = self.skill_snapshot_message()
+        if snapshot is None:
+            return messages
+        latest = next(
+            (
+                message for message in reversed(messages)
+                if isinstance(message, dict) and message.get("kind") == "skillSnapshot"
+            ),
+            None,
+        )
+        if isinstance(latest, dict) and latest.get("snapshotID") == snapshot["snapshotID"]:
+            return messages
+        return [*messages, snapshot]
 
     def prepare_next_turn(
         self,
         turn: dict[str, Any],
-        system_prompt_builder: Callable[[tuple[str, ...]], str],
+        _system_prompt_builder: Callable[[tuple[str, ...]], str],
     ) -> dict[str, Any] | None:
         if self._revision == self._applied_revision:
             return None
         current_context = turn.get("context") if isinstance(turn.get("context"), dict) else {}
-        system_prompt = system_prompt_builder(self.active_skill_ids)
+        messages = current_context.get("messages")
+        messages = messages if isinstance(messages, list) else []
         next_context = {
             **current_context,
-            "systemPrompt": system_prompt,
-            "tools": self.active_tools(),
+            "messages": self.append_skill_snapshot(messages),
+            "tools": self.ordered_active_tools(),
         }
         self._applied_revision = self._revision
         return {"context": next_context}
@@ -351,10 +430,7 @@ class MonAgentSkillRuntime:
             loaded = result["loaded"]
             if not loaded:
                 return text_result("请求的技能已经加载，无需重复读取。", result)
-            instructions = str(result.get("instructions") or "").strip()
-            body = [f"已加载技能：{', '.join(loaded)}。请遵循下面的技能说明。"]
-            if instructions:
-                body.extend(["", instructions])
+            body = [f"已加载技能：{', '.join(loaded)}。完整说明已写入下一轮上下文的技能快照。"]
             return text_result("\n".join(body), result)
 
         return finalize_tool(AgentTool(

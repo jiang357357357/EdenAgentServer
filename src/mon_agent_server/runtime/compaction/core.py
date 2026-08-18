@@ -4,8 +4,6 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from mon_agent_core.harness.compaction import DEFAULT_COMPACTION_SETTINGS
-
 from ...ids import now_ms
 from ...model_stream import stream_openai_compatible
 
@@ -28,16 +26,17 @@ def _env_int(name: str, default: int) -> int:
 
 
 def runtime_compaction_settings() -> dict[str, Any]:
+    defaults = {"enabled": True, "reserveTokens": 16_384, "keepRecentTokens": 8_000, "tailTurns": 2}
     configured_keep_recent = os.environ.get("MON_AGENT_COMPACTION_KEEP_RECENT_TOKENS")
     return {
-        "enabled": _env_bool("MON_AGENT_COMPACTION_ENABLED", bool(DEFAULT_COMPACTION_SETTINGS["enabled"])),
-        "reserveTokens": _env_int("MON_AGENT_COMPACTION_RESERVE_TOKENS", int(DEFAULT_COMPACTION_SETTINGS["reserveTokens"])),
+        "enabled": _env_bool("MON_AGENT_COMPACTION_ENABLED", bool(defaults["enabled"])),
+        "reserveTokens": _env_int("MON_AGENT_COMPACTION_RESERVE_TOKENS", int(defaults["reserveTokens"])),
         "keepRecentTokens": (
-            _env_int("MON_AGENT_COMPACTION_KEEP_RECENT_TOKENS", int(DEFAULT_COMPACTION_SETTINGS["keepRecentTokens"]))
+            _env_int("MON_AGENT_COMPACTION_KEEP_RECENT_TOKENS", int(defaults["keepRecentTokens"]))
             if configured_keep_recent is not None
             else None
         ),
-        "tailTurns": _env_int("MON_AGENT_COMPACTION_TAIL_TURNS", int(DEFAULT_COMPACTION_SETTINGS.get("tailTurns", 2))),
+        "tailTurns": _env_int("MON_AGENT_COMPACTION_TAIL_TURNS", int(defaults["tailTurns"])),
     }
 
 

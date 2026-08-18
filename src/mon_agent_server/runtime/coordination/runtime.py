@@ -11,25 +11,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-from mon_agent_core import (
-    Agent,
+from mon_agent_server.agent_api import convert_to_llm, fork_messages
+from mon_agent_server.native_runtime import (
     AgentControl,
-    AgentOptions,
     AgentResult,
     AgentSnapshot,
     AgentThread,
-    TERMINAL_AGENT_STATUSES,
-    fork_messages,
+    NativeAgent as Agent,
+    NativeAgentOptions as AgentOptions,
 )
-from mon_agent_core.harness.compaction import (
-    compact as compact_context,
-    estimate_context_tokens,
-    prepare_compaction,
-    should_compact,
-)
-from mon_agent_core.harness.messages import convert_to_llm
-from mon_agent_core.harness.session.session import build_session_context
-
 from mon_agent_server.brokers import PermissionBroker, QuestionBroker, ScreenCaptureBroker
 from mon_agent_server.core import CoreAuthenticationExpiredError, CoreClient
 from mon_agent_server.events import EventBus
@@ -795,18 +785,44 @@ class RuntimeCoordinationMixin:
                 tool_filter=tool_policy.filter(),
             )
             blocked_tools = {"ask_user", "list_character_actions", "switch_character_action"}
-            tools = [tool for tool in skill_runtime.active_tools() if tool.name not in blocked_tools]
+            tools = [
+                tool for tool in skill_runtime.ordered_active_tools()
+                if tool.name not in blocked_tools
+            ]
 
-            def system_prompt_for(active_skill_ids: tuple[str, ...]) -> str:
+            def system_prompt_for(_active_skill_ids: tuple[str, ...]) -> str:
                 return build_subagent_system_prompt(
                     role,
                     agent_path=thread.snapshot.path,
                     workspace_root=str(self.workspace_root),
-                    skill_prompt=skill_runtime.prompt_section(),
+                    skill_prompt=skill_runtime.catalog_prompt_section(),
                     tool_policy=tool_policy,
                     budget=budget,
                     environment=environment,
                 )
+
+            stable_system_prompt = system_prompt_for(())
+            initial_messages = skill_runtime.append_skill_snapshot(inherited_messages)
+
+            def prepare_subagent_next_turn(turn: dict[str, Any], _signal: Any) -> dict[str, Any]:
+                update = skill_runtime.prepare_next_turn(turn, system_prompt_for) or {}
+                updated_context = (
+                    update.get("context")
+                    if isinstance(update.get("context"), dict)
+                    else turn["context"]
+                )
+                return {
+                    **update,
+                    "context": {
+                        **updated_context,
+                        "systemPrompt": stable_system_prompt,
+                        "tools": [
+                            tool for tool in skill_runtime.ordered_active_tools()
+                            if tool.name not in blocked_tools
+                        ],
+                        "promptCacheKey": f"{thread.snapshot.root_session_id}:{thread.snapshot.id}",
+                    },
+                }
 
             permission_hook = self._before_tool_call(
                 thread.snapshot.root_session_id,
@@ -842,31 +858,22 @@ class RuntimeCoordinationMixin:
             agent = Agent(
                 AgentOptions(
                     session_id=f"{thread.snapshot.root_session_id}:{thread.snapshot.id}",
+                    workspace_root=str(self.workspace_root),
                     tool_execution="sequential",
                     convert_to_llm=convert_to_llm,
                     stream_fn=stream_openai_compatible,
                     initial_state={
                         "model": runtime_config.model,
                         "thinkingLevel": runtime_config.thinking_level,
-                        "systemPrompt": system_prompt_for(skill_runtime.active_skill_ids),
+                        "systemPrompt": stable_system_prompt,
                         "tools": tools,
-                        "messages": inherited_messages,
+                        "messages": initial_messages,
+                        "promptCacheKey": f"{thread.snapshot.root_session_id}:{thread.snapshot.id}",
                     },
                     get_api_key=lambda _provider: runtime_config.api_key,
                     before_tool_call=budgeted_before_tool_call,
                     should_stop_after_turn=should_stop_after_turn,
-                    prepare_next_turn_with_context=lambda turn, _signal: {
-                        **(skill_runtime.prepare_next_turn(turn, system_prompt_for) or {}),
-                        "context": {
-                            **turn["context"],
-                            "systemPrompt": system_prompt_for(skill_runtime.active_skill_ids),
-                            "tools": [
-                                tool
-                                for tool in skill_runtime.active_tools()
-                                if tool.name not in blocked_tools
-                            ],
-                        },
-                    },
+                    prepare_next_turn_with_context=prepare_subagent_next_turn,
                 )
             )
             holder["agent"] = agent

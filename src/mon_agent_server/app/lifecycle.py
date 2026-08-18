@@ -19,7 +19,7 @@ def render_startup_summary(app: AppState) -> None:
             ["监听地址", f"http://{config.host}:{config.port}"],
             ["工作区", str(config.workspace_root)],
             ["Core 地址", app.core_client.base_url],
-            ["AgentCore", "Python AgentCore"],
+            ["AgentCore", "Rust sidecar"],
             ["日志文件", str(config.log_file)],
             ["纯文本日志", str(config.plain_log_file)],
             ["渲染日志", str(config.render_log_dir)],

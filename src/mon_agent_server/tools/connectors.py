@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from mon_agent_core import AgentTool
+from ..agent_api import AgentTool
 
 from ..connectors.catalog import ConnectorCatalog, ConnectorContractError, DEFAULT_CONNECTOR_CATALOG
 from .context import MonToolContext

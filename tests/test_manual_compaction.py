@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from mon_agent_core.harness.types import ok
+from mon_agent_server.agent_api import ok
 
 from mon_agent_server.runtime import MonAgentRuntime
 from mon_agent_server.runtime.manager import NoCompactionNeeded

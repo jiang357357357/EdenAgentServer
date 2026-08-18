@@ -20,3 +20,6 @@ dist/
 Data/
 
 *.log
+
+# Platform sidecars are release artifacts, not source files.
+bin/*/

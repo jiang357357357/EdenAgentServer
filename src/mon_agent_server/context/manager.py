@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import json
 from typing import Any, Iterable
 
-from mon_agent_core.harness.compaction import estimate_tokens
+from ..token_counting import estimate_tokens
 
 from ..ids import create_id, now_ms
 
@@ -55,6 +55,7 @@ class ContextManager:
             "assistant": "assistant_message",
             "toolResult": "tool_result",
             "compactionSummary": "compaction",
+            "custom": "context_snapshot",
         }.get(role)
         if not event_type:
             raise ValueError(f"unsupported model message role: {role}")
@@ -79,7 +80,7 @@ class ContextManager:
                 messages = [cls._truncate_message(payload)]
                 pending_calls.clear()
                 continue
-            if event_type not in {"user_message", "assistant_message", "tool_result"}:
+            if event_type not in {"user_message", "assistant_message", "tool_result", "context_snapshot"}:
                 continue
             if event_type == "assistant_message":
                 if cls._is_failed_assistant(payload):
@@ -93,7 +94,11 @@ class ContextManager:
                     continue
                 pending_calls.discard(call_id)
             messages.append(cls._truncate_message(payload))
-        return cls._prune_old_tool_results(messages)
+        # Tool results are bounded deterministically when first compiled. Do
+        # not rewrite older results merely because later user turns arrived:
+        # that mutates a previously cacheable middle prefix. Durable context
+        # compaction owns removal of old history.
+        return messages
 
     @classmethod
     def _prune_old_tool_results(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -2,8 +2,8 @@
 
 Python implementation of the MonAgent local HTTP server.
 
-It keeps the existing frontend-facing API shape and loads the Python
-`mon_agent_core` package from the sibling `AgentCore` submodule at runtime.
+It keeps the existing frontend-facing API shape and runs the Rust
+`mon-agent-runtime` sidecar from the sibling `AgentCore` workspace.
 
 ## Development
 
@@ -24,6 +24,21 @@ From this directory:
 ```bash
 uv run python -m mon_agent_server
 ```
+
+Build and install the host Rust sidecar into `Server/bin/<platform>/` from the
+Agent root:
+
+```powershell
+.\Script\Project\package_agentcore.ps1
+```
+
+```sh
+sh ./Script/Project/package_agentcore.sh
+```
+
+At startup the Server first checks that bundled platform directory, then the
+sibling development workspace's release/debug target. Set
+`MON_AGENT_RUNTIME_PATH` to an absolute executable path to override both.
 
 Health check:
 
@@ -52,8 +67,8 @@ MonAgent separates skill ownership across three layers:
 
 - Core stores the authenticated user's installation metadata.
 - Agent Server inspects, installs, updates, enables and removes skill files.
-- AgentCore provides the immutable `ResourceSnapshot` used by each run and
-  formats skill metadata/content for progressive loading.
+- Rust AgentCore discovers and validates skill packages; Agent Server owns the
+  immutable per-run resource snapshot and progressive-loading policy.
 - Agent Server separately binds trusted skills to already registered tool
   capabilities; loading instructions never grants permission by itself.
 
@@ -68,7 +83,7 @@ User skills are stored under
 `<workspace>/.pi/skills/monagent/<user-key>/`. Core records and physical files
 are updated with rollback protection.
 
-A skill uses AgentCore's normal frontmatter and may add MonAgent metadata:
+A skill uses standard `SKILL.md` frontmatter and may add MonAgent metadata:
 
 ```markdown
 ---

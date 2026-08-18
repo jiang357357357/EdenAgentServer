@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from mon_agent_server.llm.sync import call_openai_compatible
 from mon_agent_server.llm.messages import to_openai_messages, to_responses_input
-from mon_agent_core import AgentTool, text_tool_result
+from mon_agent_server.agent_api import AgentTool, text_tool_result
 
 
 class FakeResponse:

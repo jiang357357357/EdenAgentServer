@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from mon_agent_core import AgentTool
+from ..agent_api import AgentTool
 
 from .context import MonToolContext
 from .result import text_result

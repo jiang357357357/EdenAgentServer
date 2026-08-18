@@ -5,7 +5,7 @@ import os
 import threading
 from typing import TYPE_CHECKING, Any
 
-from mon_agent_core import Agent, AgentOptions
+from mon_agent_server.native_runtime import NativeAgent as Agent, NativeAgentOptions as AgentOptions
 
 from ..ids import create_id, now_ms
 from ..logging import get_logger
@@ -302,6 +302,24 @@ async def finalize_memo_due_notification(
     return {"attempted": True, "completed": completed, "errors": errors}
 
 
+def _prepare_self_awake_next_turn(
+    turn: dict[str, Any],
+    skill_runtime: Any,
+    stable_system_prompt: str,
+    system_prompt_for: Any,
+) -> dict[str, Any]:
+    update = skill_runtime.prepare_next_turn(turn, system_prompt_for) or {}
+    updated_context = update.get("context") if isinstance(update.get("context"), dict) else turn["context"]
+    return {
+        **update,
+        "context": {
+            **updated_context,
+            "systemPrompt": stable_system_prompt,
+            "tools": skill_runtime.ordered_active_tools(),
+        },
+    }
+
+
 async def run_self_awake_agent(
     request: dict[str, Any],
     app: AppState,
@@ -373,7 +391,7 @@ async def run_self_awake_agent(
         profile="self_awake",
         owner_key=skill_owner_key,
     )
-    tools = skill_runtime.active_tools()
+    tools = skill_runtime.ordered_active_tools()
     character = request_character(request, runtime_config.core)
     prompt_core = runtime_config.core if runtime_config.core else {"character": character}
     relevant_memories: list[dict[str, Any]] = []
@@ -388,13 +406,13 @@ async def run_self_awake_agent(
             )
         except Exception as error:
             logger.warning(f"自醒角色记忆召回失败，继续使用当前上下文: {error}")
-    def system_prompt_for(active_skill_ids: tuple[str, ...]) -> str:
+    def system_prompt_for(_active_skill_ids: tuple[str, ...]) -> str:
         return build_agent_system_prompt(
             prompt_core,
             source="self_awake",
             supports_images=runtime_config.supports_images,
-            active_skill_ids=active_skill_ids,
-            skill_resource_prompt=skill_runtime.prompt_section(),
+            active_skill_ids=(),
+            skill_resource_prompt=skill_runtime.catalog_prompt_section(),
             environment=context.get("environment") if isinstance(context.get("environment"), dict) else None,
             relevant_memories=relevant_memories,
         )
@@ -408,6 +426,7 @@ async def run_self_awake_agent(
     except Exception as error:
         logger.warning(f"读取连接器绑定会话历史失败，继续按事件处理: {error}")
     user_prompt = build_self_awake_task_prompt(prompt_context)
+    initial_skill_snapshot = skill_runtime.skill_snapshot_message()
     logger.info(f"调用开始 session={session_id} model={runtime_config.label} tools={len(tools)} context_keys={list(context.keys())}")
     render_self_awake_request(
         app,
@@ -422,6 +441,7 @@ async def run_self_awake_agent(
     agent = Agent(
         AgentOptions(
             session_id=session_id,
+            workspace_root=str(app.config.workspace_root),
             tool_execution="sequential",
             stream_fn=stream_openai_compatible,
             initial_state={
@@ -429,18 +449,17 @@ async def run_self_awake_agent(
                 "thinkingLevel": runtime_config.thinking_level,
                 "systemPrompt": system_prompt,
                 "tools": tools,
-                "messages": [],
+                "messages": [initial_skill_snapshot] if initial_skill_snapshot else [],
+                "promptCacheKey": session_id,
             },
             get_api_key=lambda _provider: runtime_config.api_key,
             before_tool_call=self_awake_before_tool_call(context),
-            prepare_next_turn_with_context=lambda turn, _signal: {
-                **(skill_runtime.prepare_next_turn(turn, system_prompt_for) or {}),
-                "context": {
-                    **turn["context"],
-                    "systemPrompt": system_prompt_for(skill_runtime.active_skill_ids),
-                    "tools": skill_runtime.active_tools(),
-                },
-            },
+            prepare_next_turn_with_context=lambda turn, _signal: _prepare_self_awake_next_turn(
+                turn,
+                skill_runtime,
+                system_prompt,
+                system_prompt_for,
+            ),
         )
     )
     notification = {"attempted": False, "succeeded": False, "error": ""}

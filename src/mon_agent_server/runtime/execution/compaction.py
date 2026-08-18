@@ -8,27 +8,9 @@ import json
 import os
 import threading
 import time
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Any
-
-from mon_agent_core import (
-    Agent,
-    AgentControl,
-    AgentOptions,
-    AgentResult,
-    AgentSnapshot,
-    AgentThread,
-    TERMINAL_AGENT_STATUSES,
-    fork_messages,
-)
-from mon_agent_core.harness.compaction import (
-    compact as compact_context,
-    estimate_context_tokens,
-    prepare_compaction,
-    should_compact,
-)
-from mon_agent_core.harness.messages import convert_to_llm
-from mon_agent_core.harness.session.session import build_session_context
 
 from mon_agent_server.brokers import PermissionBroker, QuestionBroker, ScreenCaptureBroker
 from mon_agent_server.core import CoreAuthenticationExpiredError, CoreClient
@@ -36,6 +18,7 @@ from mon_agent_server.events import EventBus
 from mon_agent_server.ids import create_id, now_ms
 from mon_agent_server.logging import get_logger
 from mon_agent_server.model_stream import core_model, env_model, stream_openai_compatible
+from mon_agent_server.native_runtime import native_runtime_service
 from mon_agent_server.prompts import attachment_context, build_agent_system_prompt
 from mon_agent_server.skills import create_skill_runtime, owner_storage_key
 from mon_agent_server.store import SessionStore, SubagentThreadRepository
@@ -92,7 +75,7 @@ class RuntimeCompactionMixin:
             await self.sync_core_session(session_id, auth_token, runtime_config.core)
             messages = self.store.context_messages(session_id)
             model_id = str(runtime_config.model.get("id") or "").strip() or None
-            before_tokens = int(estimate_context_tokens(messages, model_id).get("tokens") or 0)
+            before_tokens = int((await _estimate_context_tokens(messages, model_id)).get("tokens") or 0)
             compacted_messages = await self.compact_agent_messages_if_needed(
                 session_id,
                 run_state,
@@ -104,7 +87,7 @@ class RuntimeCompactionMixin:
                 custom_instructions=custom_instructions,
             )
             after_tokens = int(
-                estimate_context_tokens(compacted_messages, model_id).get("tokens") or 0
+                (await _estimate_context_tokens(compacted_messages, model_id)).get("tokens") or 0
             )
             self.emit_runtime_thinking(
                 session_id,
@@ -148,6 +131,7 @@ class RuntimeCompactionMixin:
         *,
         force: bool = False,
         custom_instructions: str | None = None,
+        cache_context: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         settings = runtime_compaction_settings()
         if not messages:
@@ -162,7 +146,7 @@ class RuntimeCompactionMixin:
         if not force and not settings.get("enabled", True):
             return messages
         model_id = str(runtime_config.model.get("id") or "").strip() or None
-        estimate = estimate_context_tokens(messages, model_id)
+        estimate = await _estimate_context_tokens(messages, model_id)
         context_tokens = int(estimate.get("tokens") or 0)
         context_window = runtime_context_window(runtime_config.model)
         if settings.get("keepRecentTokens") is None:
@@ -174,7 +158,7 @@ class RuntimeCompactionMixin:
                     max(2_000, usable_context // 4),
                 ),
             }
-        if not force and not should_compact(context_tokens, context_window, settings):
+        if not force and not _should_compact(context_tokens, context_window, settings):
             return messages
         if not runtime_config.api_key:
             if force:
@@ -192,30 +176,36 @@ class RuntimeCompactionMixin:
             ),
         )
         entries = messages_to_compaction_entries(messages)
-        preparation = prepare_compaction(entries, settings, model_id)
-        if not preparation.ok:
+        try:
+            preparation = await _prepare_compaction(entries, settings, model_id)
+        except Exception as error:
             if force:
-                raise RuntimeError(f"上下文压缩准备失败：{preparation.error}")
-            logger.warning(f"上下文压缩准备失败: {preparation.error}")
+                raise RuntimeError(f"上下文压缩准备失败：{error}") from error
+            logger.warning(f"上下文压缩准备失败: {error}")
             return messages
-        if not preparation.value:
+        if not preparation:
             if force:
                 raise NoCompactionNeeded("当前会话刚完成压缩，没有新增内容可继续压缩。")
             return messages
         if force and not (
-            preparation.value.get("messagesToSummarize")
-            or preparation.value.get("turnPrefixMessages")
-            or preparation.value.get("previousSummary")
+            preparation.get("messagesToSummarize")
+            or preparation.get("turnPrefixMessages")
+            or preparation.get("previousSummary")
         ):
             raise NoCompactionNeeded("当前上下文仍在保留范围内，无需压缩。")
 
-        result = await compact_context(
-            preparation.value,
+        compact_arguments = (
+            preparation,
             RuntimeCompactionModels(runtime_config.api_key),
             runtime_config.model,
             custom_instructions,
             None,
             runtime_config.thinking_level,
+        )
+        result = await (
+            compact_context(*compact_arguments, cache_context=cache_context)
+            if cache_context is not None
+            else compact_context(*compact_arguments)
         )
         if not result.ok or not result.value:
             if force:
@@ -234,14 +224,14 @@ class RuntimeCompactionMixin:
             "firstKeptEntryId": compaction.get("firstKeptEntryId"),
             "details": compaction.get("details"),
         }
-        compacted_messages = build_session_context([*entries, compaction_entry])["messages"]
+        compacted_messages = (await _build_session_context([*entries, compaction_entry]))["messages"]
         # Provider usage describes the request before compaction. Keeping it on
         # retained messages makes estimate_context_tokens report the stale,
         # pre-compaction size and can immediately trigger another compaction.
         for compacted_message in compacted_messages:
             compacted_message.pop("usage", None)
         tokens_after = int(
-            estimate_context_tokens(compacted_messages, model_id).get("tokens") or 0
+            (await _estimate_context_tokens(compacted_messages, model_id)).get("tokens") or 0
         )
         self.store.replace_context_messages(session_id, compacted_messages)
         hidden_message = self.store.append_compaction_message(
@@ -276,3 +266,76 @@ class RuntimeCompactionMixin:
             compaction_entry.get("firstKeptEntryId"),
         )
         return compacted_messages
+
+
+async def _estimate_context_tokens(
+    messages: list[dict[str, Any]],
+    model_id: str | None,
+) -> dict[str, Any]:
+    service = native_runtime_service()
+    await service.ensure_started()
+    return await service.client.estimate_context_tokens(messages, model_id)
+
+
+def _should_compact(context_tokens: int, context_window: int, settings: dict[str, Any]) -> bool:
+    if not settings.get("enabled", True):
+        return False
+    return context_tokens > context_window - int(settings.get("reserveTokens") or 16_384)
+
+
+async def _prepare_compaction(
+    entries: list[dict[str, Any]],
+    settings: dict[str, Any],
+    model_id: str | None,
+) -> dict[str, Any] | None:
+    service = native_runtime_service()
+    await service.ensure_started()
+    return await service.client.prepare_compaction(entries, settings, model_id)
+
+
+async def _build_session_context(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    service = native_runtime_service()
+    await service.ensure_started()
+    return await service.client.build_session_context(entries)
+
+
+async def _compact_context_native_result(
+    preparation: dict[str, Any],
+    models: RuntimeCompactionModels,
+    model: dict[str, Any],
+    custom_instructions: str | None = None,
+    _signal: Any | None = None,
+    thinking_level: str | None = None,
+    cache_context: dict[str, Any] | None = None,
+) -> SimpleNamespace:
+    try:
+        service = native_runtime_service()
+        await service.ensure_started()
+        request = await service.client.build_compaction_summary_request(
+            preparation,
+            model,
+            custom_instructions,
+            thinking_level,
+            cache_context=(
+                {"systemPrompt": cache_context.get("systemPrompt")}
+                if cache_context else None
+            ),
+        )
+        request_context = dict(request.get("context") or {})
+        if cache_context:
+            request_context["tools"] = list(cache_context.get("tools") or [])
+            if cache_context.get("promptCacheKey"):
+                request_context["promptCacheKey"] = cache_context["promptCacheKey"]
+        response = await models.complete_simple(
+            model,
+            request_context,
+            dict(request.get("options") or {}),
+        )
+        compaction = await service.client.finalize_compaction(preparation, response)
+        return SimpleNamespace(ok=True, value=compaction, error=None)
+    except Exception as error:
+        return SimpleNamespace(ok=False, value=None, error=error)
+
+
+# Transitional name retained for callers/tests while implementation is native.
+compact_context = _compact_context_native_result

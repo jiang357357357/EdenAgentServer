@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from mon_agent_core.harness.compaction import estimate_context_tokens, estimate_tokens
+from ...token_counting import estimate_context_tokens, estimate_tokens
 
 from ...core import CoreAuthenticationExpiredError
 from ...ids import create_id, now_ms
@@ -28,6 +28,10 @@ def strip_current_speaker_prefix(text: str, speaker: dict[str, Any] | None) -> s
 def runtime_error_summary(error: Any) -> str:
     message = str(error).strip() or "未知错误"
     normalized = message.lower()
+    if "incomplete chunked read" in normalized or (
+        "peer closed connection" in normalized and "complete message body" in normalized
+    ):
+        return "模型服务在生成过程中提前断开连接：自动重试后仍未完成，请重试。"
     if "ssl" in normalized and ("unexpected_eof" in normalized or "eof occurred" in normalized):
         return "模型连接失败：安全连接被远端提前断开。"
     if "timed out" in normalized or "timeout" in normalized:
@@ -55,7 +59,7 @@ class RuntimeEmitterMixin:
         info = {
             "id": message_id,
             "role": "assistant",
-            "agent": "python-agent-core",
+            "agent": "rust-agent-core",
             "kind": "runtime",
             "runID": run_state.run_id,
             "speaker": run_state.runtime_speaker,
@@ -96,7 +100,7 @@ class RuntimeEmitterMixin:
         info = {
             "id": run_state.runtime_message_id,
             "role": "assistant",
-            "agent": "python-agent-core",
+            "agent": "rust-agent-core",
             "kind": "runtime",
             "runID": run_state.run_id,
             "speaker": run_state.runtime_speaker,
@@ -259,7 +263,7 @@ class RuntimeEmitterMixin:
         info = {
             "id": message_id,
             "role": "assistant",
-            "agent": "python-agent-core",
+            "agent": "rust-agent-core",
             "kind": "model",
             "runID": run_state.run_id,
             "phase": "tool" if has_tool_calls else "final" if done else "streaming",
@@ -395,10 +399,12 @@ class RuntimeEmitterMixin:
             estimate_tokens(message, tokenizer_model) for message in context_messages
         )
         cache_read_tokens = 0
+        cache_miss_tokens = 0
         for message in reversed(context_messages):
             usage = message.get("usage") if isinstance(message, dict) else None
             if isinstance(usage, dict):
                 cache_read_tokens = int(usage.get("cacheRead") or 0)
+                cache_miss_tokens = int(usage.get("cacheMiss") or 0)
                 break
         character_tokens = int(breakdown.get("characterRaw") or breakdown.get("character") or 0)
         tool_tokens = int(breakdown.get("toolsRaw") or breakdown.get("tools") or 0)
@@ -418,7 +424,16 @@ class RuntimeEmitterMixin:
                 "system": system_tokens,
             }
         )
-        breakdown.update({"history": history_tokens, "cacheRead": cache_read_tokens})
+        cache_total_tokens = cache_read_tokens + cache_miss_tokens
+        breakdown.update({
+            "history": history_tokens,
+            "cacheRead": cache_read_tokens,
+            "cacheMiss": cache_miss_tokens,
+            "cacheHitRate": (
+                round(cache_read_tokens / cache_total_tokens, 4)
+                if cache_total_tokens else 0
+            ),
+        })
         session["info"]["tokenBreakdown"] = breakdown
         session["info"]["contextTokens"] = context_tokens
         self.events.emit({"type": "session.updated", "properties": {"sessionID": session_id, "info": session["info"]}})

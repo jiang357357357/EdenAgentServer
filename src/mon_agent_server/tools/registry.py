@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from mon_agent_core import ToolRegistry
-from mon_agent_core.coding_agent.tools import create_all_tools
+from ..agent_api import ToolRegistry
+from .coding import create_all_tools
 
 from .assistants import create_assistant_tools
 from .character_actions import create_character_action_tools

@@ -258,7 +258,7 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tools_by_name["read_self_awake_diary"].exposure, "direct")
         for tool in tools:
             self.assertEqual(tool.parameters.get("type"), "object", tool.name)
-            if tool.name not in {"read", "ls", "grep", "find", "write", "edit", "apply_patch", "bash", "write_stdin"}:
+            if tool.name not in {"read", "ls", "grep", "find", "write", "edit", "apply_patch", "bash", "powershell", "write_stdin"}:
                 self.assertIs(tool.parameters.get("additionalProperties"), False, tool.name)
                 if tool.name == "ask_user":
                     self.assertIsNone(tool.timeout_seconds)
@@ -269,6 +269,10 @@ class MonToolsTest(unittest.IsolatedAsyncioTestCase):
                 request = tool.permission_request({"command": "git status"})
                 self.assertEqual(request["permission"], "bash")
                 self.assertEqual(request["patterns"], ["git status"])
+            if tool.name == "powershell":
+                request = tool.permission_request({"command": "Get-PSDrive"})
+                self.assertEqual(request["permission"], "powershell")
+                self.assertEqual(request["patterns"], ["Get-PSDrive"])
             if tool.name == "read":
                 self.assertIsNone(tool.permission_request({"path": "README.md"}))
 

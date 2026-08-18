@@ -7,9 +7,19 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from mon_agent_core.harness import LocalExecutionEnv, load_skills
+
+from mon_agent_server.native_runtime import NativeRuntimeClient
 
 from .tool_plugins import load_tool_plugins, run_plugin_tests
+
+
+async def _load_skills_native(root: Path) -> dict[str, Any]:
+    client = NativeRuntimeClient(server_version="skill-loader")
+    await client.start()
+    try:
+        return await client.load_skills([str(root)])
+    finally:
+        await client.close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +72,7 @@ def load_skill_package(
         if collisions:
             raise ValueError(f"代码工具名称与宿主工具冲突：{', '.join(collisions)}")
 
-    coroutine = load_skills(LocalExecutionEnv(root), str(root))
+    coroutine = _load_skills_native(root)
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -76,13 +86,13 @@ def load_skill_package(
         message = "; ".join(str(item.get("message") or item) for item in diagnostics) or "必须且只能包含一个有效技能"
         raise ValueError(message)
 
-    skill = skills[0]
-    skill_file = Path(skill.file_path)
+    skill = dict(skills[0])
+    skill_file = Path(str(skill["filePath"]))
     frontmatter = _frontmatter(skill_file)
     metadata = frontmatter.get("metadata")
     metadata = metadata.get("monagent") if isinstance(metadata, dict) else {}
     metadata = metadata if isinstance(metadata, dict) else {}
-    name = str(skill.name).strip()
+    name = str(skill["name"]).strip()
     if reserved_names and name in reserved_names:
         raise ValueError(f"技能名称与基础技能冲突：{name}")
     tool_names = _string_tuple(metadata.get("tools"))
@@ -100,11 +110,11 @@ def load_skill_package(
         SkillDefinition(
             id=name,
             name=display_name,
-            description=str(skill.description).strip(),
+            description=str(skill["description"]).strip(),
             tool_names=tool_names,
-            instructions=(str(skill.content).strip(),),
+            instructions=(str(skill["content"]).strip(),),
             profiles=profiles,
-            model_invocable=not bool(skill.disable_model_invocation),
+            model_invocable=not bool(skill.get("disableModelInvocation")),
             source=source,
             file_path=str(skill_file.resolve()),
             scope=scope,

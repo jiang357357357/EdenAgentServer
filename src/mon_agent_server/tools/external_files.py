@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
-from mon_agent_core import AgentTool
+from ..agent_api import AgentTool
 
 from .context import MonToolContext
 from .result import text_result, tool_failure

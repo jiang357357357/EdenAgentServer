@@ -9,7 +9,8 @@ description = "Python MonAgent local server"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "mon-agent-core",
+    "tiktoken>=0.12,<1",
+    "pyzmq>=26",
     "rich>=13",
     "PyYAML>=6.0",
     "tzdata>=2025.2; platform_system == 'Windows'",
@@ -20,9 +21,6 @@ dependencies = [
 
 [tool.uv]
 managed = true
-
-[tool.uv.sources]
-mon-agent-core = { path = "../AgentCore", editable = true }
 
 [[tool.uv.index]]
 name = "aliyun"

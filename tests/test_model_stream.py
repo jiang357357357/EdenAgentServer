@@ -59,6 +59,14 @@ class InterruptedStreamResponse(FakeStreamResponse):
         raise ssl.SSLEOFError(8, "unexpected eof while reading")
 
 
+class RemoteProtocolInterruptedStreamResponse(FakeStreamResponse):
+    def __iter__(self):
+        yield from self.lines
+        raise httpx.RemoteProtocolError(
+            "peer closed connection without sending complete message body (incomplete chunked read)"
+        )
+
+
 class AsyncStreamResponse:
     def __init__(self, response, request):
         self._response = response
@@ -457,14 +465,21 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([event["type"] for event in events].count("provider_retry"), 1)
         self.assertEqual(events[-1]["message"]["content"][0]["text"], "recovered")
 
-    async def test_openai_compatible_does_not_replay_after_stream_content(self):
+    async def test_openai_compatible_retracts_partial_text_before_retry(self):
         attempts = 0
 
         def fake_urlopen(_request, timeout):
             nonlocal attempts
             attempts += 1
-            return InterruptedStreamResponse(
-                [b'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n']
+            if attempts == 1:
+                return InterruptedStreamResponse(
+                    [b'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n']
+                )
+            return FakeStreamResponse(
+                [
+                    b'data: {"choices":[{"delta":{"content":"recovered"},"finish_reason":"stop"}]}\n\n',
+                    b"data: [DONE]\n\n",
+                ]
             )
 
         model = {
@@ -479,9 +494,99 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
             stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test"})
             events = [event async for event in stream]
 
+        self.assertEqual(attempts, 2)
+        reset = next(event for event in events if event["type"] == "stream_reset")
+        self.assertEqual(reset["partial"]["content"][0]["text"], "")
+        self.assertLess(
+            next(index for index, event in enumerate(events) if event["type"] == "stream_reset"),
+            next(index for index, event in enumerate(events) if event["type"] == "provider_retry"),
+        )
+        self.assertEqual(events[-1]["message"]["content"][0]["text"], "recovered")
+
+    async def test_openai_compatible_retracts_partial_reasoning_before_retry(self):
+        attempts = 0
+
+        def fake_urlopen(_request, timeout):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return InterruptedStreamResponse(
+                    [b'data: {"choices":[{"delta":{"reasoning":"unfinished"},"finish_reason":null}]}\n\n']
+                )
+            return FakeStreamResponse(
+                [
+                    b'data: {"choices":[{"delta":{"reasoning":"checked","content":"done"},"finish_reason":"stop"}]}\n\n',
+                    b"data: [DONE]\n\n",
+                ]
+            )
+
+        model = {
+            "id": "deepseek-v4-flash",
+            "api": "openai-completions",
+            "provider": "opencode-go",
+            "baseUrl": "https://opencode.ai/zen/go/v1",
+        }
+        context = {"messages": [{"role": "user", "content": "ping"}], "tools": []}
+
+        with patch("mon_agent_server.llm.openai_compatible.open_sse", make_open_sse(fake_urlopen)), patch("mon_agent_server.llm.openai_compatible.asyncio.sleep"):
+            stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test"})
+            events = [event async for event in stream]
+
+        reset = next(event for event in events if event["type"] == "stream_reset")
+        self.assertEqual(reset["partial"]["content"][0]["thinking"], "")
+        self.assertEqual(events[-1]["message"]["content"][0]["thinking"], "checked")
+        self.assertEqual(events[-1]["message"]["content"][1]["text"], "done")
+
+    async def test_openai_compatible_does_not_retry_after_tool_call_starts(self):
+        attempts = 0
+
+        def fake_urlopen(_request, timeout):
+            nonlocal attempts
+            attempts += 1
+            return InterruptedStreamResponse(
+                [b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{}"}}]},"finish_reason":null}]}\n\n']
+            )
+
+        model = {
+            "id": "deepseek-v4-flash",
+            "api": "openai-completions",
+            "provider": "opencode-go",
+            "baseUrl": "https://opencode.ai/zen/go/v1",
+        }
+        context = {"messages": [{"role": "user", "content": "ping"}], "tools": []}
+
+        with patch("mon_agent_server.llm.openai_compatible.open_sse", make_open_sse(fake_urlopen)), patch("mon_agent_server.llm.openai_compatible.asyncio.sleep"):
+            stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test"})
+            events = [event async for event in stream]
+
         self.assertEqual(attempts, 1)
+        self.assertNotIn("stream_reset", [event["type"] for event in events])
         self.assertNotIn("provider_retry", [event["type"] for event in events])
         self.assertEqual(events[-1]["type"], "error")
+
+    async def test_openai_compatible_classifies_incomplete_chunked_read(self):
+        def fake_urlopen(_request, timeout):
+            return RemoteProtocolInterruptedStreamResponse(
+                [b'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n']
+            )
+
+        model = {
+            "id": "deepseek-v4-flash",
+            "api": "openai-completions",
+            "provider": "opencode-go",
+            "baseUrl": "https://opencode.ai/zen/go/v1",
+        }
+        context = {"messages": [{"role": "user", "content": "ping"}], "tools": []}
+
+        with patch("mon_agent_server.llm.openai_compatible.open_sse", make_open_sse(fake_urlopen)):
+            stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test", "maxRetries": 0})
+            events = [event async for event in stream]
+
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertEqual(
+            events[-1]["error"]["errorMessage"],
+            "模型服务在生成过程中提前断开连接；自动重试后仍未完成，请重试。",
+        )
 
     async def test_openai_compatible_streams_tool_calls(self):
         def fake_urlopen(_request, timeout):
@@ -573,6 +678,41 @@ class ModelStreamTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1]["message"]["content"][0]["thinking"], "inspect")
         self.assertEqual(events[-1]["message"]["content"][1]["text"], "done")
         self.assertEqual(events[-1]["message"]["usage"]["totalTokens"], 12)
+
+    async def test_responses_api_retracts_partial_output_before_retry(self):
+        attempts = 0
+
+        def fake_urlopen(_request, timeout):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return InterruptedStreamResponse(
+                    [b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n']
+                )
+            return FakeStreamResponse(
+                [
+                    b'data: {"type":"response.output_text.delta","delta":"recovered"}\n\n',
+                    b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+                    b"data: [DONE]\n\n",
+                ]
+            )
+
+        model = {
+            "id": "gpt-5.6-luna",
+            "api": "openai-responses",
+            "provider": "opencode-go",
+            "baseUrl": "https://opencode.ai/zen/go/v1",
+        }
+        context = {"messages": [{"role": "user", "content": "solve"}], "tools": []}
+
+        with patch("mon_agent_server.llm.responses.open_sse", make_open_sse(fake_urlopen)), patch("mon_agent_server.llm.responses.asyncio.sleep"):
+            stream = await stream_openai_compatible(model, context, {"apiKey": "sk-test"})
+            events = [event async for event in stream]
+
+        self.assertEqual(attempts, 2)
+        reset = next(event for event in events if event["type"] == "stream_reset")
+        self.assertEqual(reset["partial"]["content"][0]["text"], "")
+        self.assertEqual(events[-1]["message"]["content"][0]["text"], "recovered")
 
     async def test_luna_responses_streams_tool_call_and_replays_tool_output(self):
         captured = {}

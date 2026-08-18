@@ -14,10 +14,10 @@ def handle_tools(handler: Any, path: str, _query: dict[str, list[str]], method: 
         {
             "search": {
                 "status": "online",
-                "provider": "python-agent-core",
+                "provider": "rust-agent-core",
                 "mode": "embedded",
-                "label": "Python AgentCore",
-                "message": "Python Agent Server 已启动；当前内置 Mon 工具、日历工具、天气工具、备忘录工具、自醒工具和 Python AgentCore 文件工具。",
+                "label": "Rust AgentCore",
+                "message": "Agent Server 已启动；智能体循环由 Rust sidecar 执行，并已加载 Mon 工具、日历、天气、备忘录和自醒能力。",
             },
             "tools": {name: name for name in tool_names},
             "toolDetails": {

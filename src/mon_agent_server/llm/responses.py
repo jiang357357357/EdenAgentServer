@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from mon_agent_core.types import now_ms
+from ..agent_api import now_ms
 
 from .messages import to_responses_input
 from .http_stream import RETRYABLE_STATUS_CODES, iter_sse_data, open_sse, stream_timeouts
@@ -93,6 +93,20 @@ async def stream_responses_sync(
     response_status = "completed"
     stream_started = False
     native_sources: list[dict[str, str]] = []
+
+    def reset_partial_for_retry() -> None:
+        """Retract provisional text/reasoning while preserving stable part indexes."""
+        nonlocal response_status, stream_started, usage
+        for block in partial.get("content") or []:
+            if block.get("type") == "text":
+                block["text"] = ""
+            elif block.get("type") == "thinking":
+                block["thinking"] = ""
+        response_status = "completed"
+        usage = None
+        native_sources.clear()
+        stream_started = False
+        push_partial({"type": "stream_reset"})
 
     def ensure_tool(output_index: int, item: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
         item = item or {}
@@ -249,10 +263,13 @@ async def stream_responses_sync(
             retry_reason = f"HTTP {error.response.status_code}"
             status_code: int | None = error.response.status_code
         except (httpx.HTTPError, TimeoutError, ConnectionError, EOFError) as error:
-            if stream_started or attempt >= max_attempts:
+            if tool_indexes or attempt >= max_attempts:
                 raise
             retry_reason = str(error)
             status_code = None
+
+        if stream_started:
+            reset_partial_for_retry()
 
         attempt += 1
         delay_ms = min(max_delay_ms, 500 * (2 ** (attempt - 2)))

@@ -9,7 +9,8 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
-from mon_agent_core import AgentControl, AssistantMessageEventStream
+from mon_agent_server.agent_api import AssistantMessageEventStream
+from mon_agent_server.native_runtime import AgentControl
 
 from mon_agent_server.runtime import MonAgentRuntime
 from mon_agent_server.runtime.config import RuntimeModelConfig

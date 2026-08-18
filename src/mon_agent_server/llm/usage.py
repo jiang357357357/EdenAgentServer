@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mon_agent_core.types import now_ms
+from ..agent_api import now_ms
 
 from .tools import parse_tool_arguments
 

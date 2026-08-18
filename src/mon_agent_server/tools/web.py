@@ -11,7 +11,7 @@ import time
 from typing import Any
 from urllib.parse import urlparse
 
-from mon_agent_core import AgentTool
+from ..agent_api import AgentTool
 
 from .result import text_result, tool_failure, truncate
 from .context import MonToolContext

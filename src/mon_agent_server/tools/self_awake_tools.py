@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from mon_agent_core import AgentTool
+from ..agent_api import AgentTool
 
 from .context import MonToolContext
 from .core_access import core_call, require_core_access

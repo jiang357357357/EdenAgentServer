@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from mon_agent_core import AgentTool
+from ..agent_api import AgentTool
 
 from ..calendar_context import EnvironmentAwarenessService, build_calendar_context, calendar_context_summary
 from .context import MonToolContext

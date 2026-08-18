@@ -10,28 +10,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from mon_agent_core import (
-    Agent,
-    AgentControl,
-    AgentOptions,
-    AgentResult,
-    AgentSnapshot,
-    AssistantMessageEventStream,
-    AgentThread,
-    TERMINAL_AGENT_STATUSES,
-    count_json_tokens,
-    count_text_tokens,
-    fork_messages,
-    tokenizer_name,
-)
-from mon_agent_core.harness.compaction import (
-    compact as compact_context,
-    estimate_context_tokens,
-    prepare_compaction,
-    should_compact,
-)
-from mon_agent_core.harness.messages import convert_to_llm
-from mon_agent_core.harness.session.session import build_session_context
+from mon_agent_server.agent_api import AssistantMessageEventStream, convert_to_llm
+from mon_agent_server.token_counting import count_json_tokens, count_text_tokens, tokenizer_name
+from mon_agent_server.native_runtime import NativeAgent as Agent, NativeAgentOptions as AgentOptions
 
 from mon_agent_server.brokers import PermissionBroker, QuestionBroker, ScreenCaptureBroker
 from mon_agent_server.core import CoreAuthenticationExpiredError, CoreClient
@@ -40,6 +21,7 @@ from mon_agent_server.events import EventBus
 from mon_agent_server.ids import create_id, now_ms
 from mon_agent_server.logging import get_logger
 from mon_agent_server.llm.tools import tool_payload
+from mon_agent_server.llm.cache import advance_cache_prefix, cache_prefix_state
 from mon_agent_server.model_stream import core_model, env_model, stream_openai_compatible
 from mon_agent_server.prompts import (
     attachment_context,
@@ -311,7 +293,7 @@ class RuntimeCharacterMixin:
                 continuation["relevantMemories"] = relevant_memories
             except Exception:
                 logger.exception("长期记忆召回失败，当前回合将不注入记忆: session={}", session_id)
-        tools = sorted(skill_runtime.active_tools(), key=lambda tool: tool.name)
+        tools = skill_runtime.ordered_active_tools()
         attachment_details = attachment_context(files, runtime_config.supports_images)
         if not runtime_config.supports_images:
             automatic_vision_context = await self._analyze_non_multimodal_images(
@@ -350,7 +332,7 @@ class RuntimeCharacterMixin:
         if turn_context:
             task_prompt = "\n\n".join(filter(None, [task_prompt, turn_context]))
 
-        def system_prompt_for(active_skill_ids: tuple[str, ...]) -> str:
+        def system_prompt_for(_active_skill_ids: tuple[str, ...]) -> str:
             active_config = continuation["config"]
             active_core = active_config.core
             active_character = (active_core or {}).get("character") if active_core else None
@@ -366,8 +348,8 @@ class RuntimeCharacterMixin:
                 ),
                 supports_images=active_config.supports_images,
                 environment=environment,
-                active_skill_ids=active_skill_ids,
-                skill_resource_prompt=skill_runtime.prompt_section(),
+                active_skill_ids=(),
+                skill_resource_prompt=skill_runtime.catalog_prompt_section(),
                 delegation_mode=active_config.delegation_policy.mode,
                 relevant_memories=continuation["relevantMemories"],
                 include_turn_context=False,
@@ -385,7 +367,7 @@ class RuntimeCharacterMixin:
             current_system_prompt: str,
             current_tools: list[Any],
             current_config: RuntimeModelConfig,
-        ) -> None:
+        ) -> dict[str, Any]:
             active_core = current_config.core
             active_character = (active_core or {}).get("character") if active_core else None
             character_sections = [
@@ -398,7 +380,7 @@ class RuntimeCharacterMixin:
             character_prompt = "\n\n".join(
                 section for section in character_sections if section
             )
-            current_skill_prompt = skill_runtime.prompt_section()
+            current_skill_prompt = skill_runtime.catalog_prompt_section()
             model_id = str(current_config.model.get("id") or "").strip()
             character_tokens = count_text_tokens(character_prompt, model_id)
             skill_tokens = count_text_tokens(current_skill_prompt, model_id)
@@ -407,6 +389,17 @@ class RuntimeCharacterMixin:
                 tool_payload(current_tools), model_id
             )
             session_info = self.store.require_session(session_id)["info"]
+            current_cache_prefix = cache_prefix_state(
+                current_config.model,
+                current_config.thinking_level,
+                current_system_prompt,
+                current_tools,
+            )
+            cache_prefix = advance_cache_prefix(
+                session_info.get("promptCache"),
+                current_cache_prefix,
+            )
+            session_info["promptCache"] = cache_prefix
             token_breakdown = dict(session_info.get("tokenBreakdown") or {})
             token_breakdown.update(
                 {
@@ -416,11 +409,24 @@ class RuntimeCharacterMixin:
                     "toolsRaw": tool_tokens,
                     "tokenizer": tokenizer_name(model_id),
                     "tokenizerModel": model_id,
+                    "promptCacheFingerprint": cache_prefix["fingerprint"],
+                    "promptCacheEpoch": cache_prefix["epoch"],
+                    "promptCacheInvalidationReason": cache_prefix["invalidationReason"],
                 }
             )
             session_info["tokenBreakdown"] = token_breakdown
+            return cache_prefix
 
         existing_context_messages = self.store.context_messages(session_id)
+        messages_with_skill_snapshot = skill_runtime.append_skill_snapshot(existing_context_messages)
+        if messages_with_skill_snapshot is not existing_context_messages:
+            skill_snapshot = messages_with_skill_snapshot[-1]
+            self.store.append_context_message(
+                session_id,
+                skill_snapshot,
+                turn_id=run_state.run_id,
+            )
+            existing_context_messages = messages_with_skill_snapshot
         user_created_at = user_message["info"]["time"]["created"]
         user_already_persisted = any(
             message.get("role") == "user" and message.get("timestamp") == user_created_at
@@ -437,6 +443,7 @@ class RuntimeCharacterMixin:
                 "content": canonical_user_content,
             }
 
+        initial_system_prompt = system_prompt_for(skill_runtime.active_skill_ids)
         agent_messages = await self.compact_agent_messages_if_needed(
             session_id,
             run_state,
@@ -444,9 +451,14 @@ class RuntimeCharacterMixin:
             existing_context_messages,
             user_created_at,
             auth_token,
+            cache_context={
+                "systemPrompt": initial_system_prompt,
+                "tools": tools,
+                "promptCacheKey": session_id,
+            },
         )
-        record_prompt_breakdown(
-            system_prompt_for(skill_runtime.active_skill_ids),
+        initial_cache_prefix = record_prompt_breakdown(
+            initial_system_prompt,
             tools,
             runtime_config,
         )
@@ -460,17 +472,35 @@ class RuntimeCharacterMixin:
             )
             if not isinstance(current_context, dict):
                 return skill_update
+            if isinstance(skill_update, dict):
+                updated_messages = current_context.get("messages")
+                previous_messages = turn.get("context", {}).get("messages")
+                if (
+                    isinstance(updated_messages, list)
+                    and isinstance(previous_messages, list)
+                    and len(updated_messages) > len(previous_messages)
+                    and isinstance(updated_messages[-1], dict)
+                    and updated_messages[-1].get("kind") == "skillSnapshot"
+                ):
+                    self.store.append_context_message(
+                        session_id,
+                        updated_messages[-1],
+                        turn_id=run_state.run_id,
+                    )
             # 固定系统提示词与工具顺序，保持同一会话的缓存前缀稳定。
             active_system_prompt = system_prompt_for(skill_runtime.active_skill_ids)
-            active_tools = sorted(skill_runtime.active_tools(), key=lambda tool: tool.name)
+            active_tools = skill_runtime.ordered_active_tools()
             active_config = continuation["config"]
-            record_prompt_breakdown(active_system_prompt, active_tools, active_config)
+            cache_prefix = record_prompt_breakdown(active_system_prompt, active_tools, active_config)
             current_context = {
                 **current_context,
                 "systemPrompt": active_system_prompt,
                 "tools": active_tools,
                 "activeSpeaker": run_state.speaker,
                 "promptCacheKey": session_id,
+                "promptCacheFingerprint": cache_prefix["fingerprint"],
+                "promptCacheEpoch": cache_prefix["epoch"],
+                "promptCacheInvalidationReason": cache_prefix["invalidationReason"],
             }
             skill_update = {
                 **(skill_update or {}),
@@ -508,6 +538,11 @@ class RuntimeCharacterMixin:
                 current_messages,
                 user_message["info"]["time"]["created"],
                 auth_token,
+                cache_context={
+                    "systemPrompt": active_system_prompt,
+                    "tools": active_tools,
+                    "promptCacheKey": session_id,
+                },
             )
             if compacted_messages is current_messages:
                 return skill_update
@@ -519,17 +554,21 @@ class RuntimeCharacterMixin:
         agent = Agent(
             AgentOptions(
                 session_id=session_id,
+                workspace_root=str(self.workspace_root),
                 tool_execution="sequential",
                 convert_to_llm=convert_to_llm,
                 stream_fn=stream_openai_compatible,
                 initial_state={
                     "model": runtime_config.model,
                     "thinkingLevel": runtime_config.thinking_level,
-                    "systemPrompt": system_prompt_for(skill_runtime.active_skill_ids),
+                    "systemPrompt": initial_system_prompt,
                     "tools": tools,
                     "messages": agent_messages,
                     "activeSpeaker": run_state.speaker,
                     "promptCacheKey": session_id,
+                    "promptCacheFingerprint": initial_cache_prefix["fingerprint"],
+                    "promptCacheEpoch": initial_cache_prefix["epoch"],
+                    "promptCacheInvalidationReason": initial_cache_prefix["invalidationReason"],
                 },
                 get_api_key=lambda _provider: continuation["config"].api_key,
                 before_tool_call=self._before_tool_call(
@@ -557,7 +596,7 @@ class RuntimeCharacterMixin:
             {"speaker": run_state.speaker, "orchestration": run_state.orchestration},
             turn_id=run_state.run_id,
         )
-        self.emit_runtime_thinking(session_id, run_state, "正在发送给 Python AgentCore，并等待模型回复。")
+        self.emit_runtime_thinking(session_id, run_state, "正在发送给 Rust AgentCore，并等待模型回复。")
 
         model_label = runtime_config.label or str(runtime_config.model.get("id") or "unknown")
 

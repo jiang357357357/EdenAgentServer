@@ -49,7 +49,7 @@ echo
 echo "[4/4] 检查关键依赖..."
 if [[ -x "$VENV_PYTHON" ]]; then
     check_import "$VENV_PYTHON" "MonAgent Server" "import mon_agent_server; print('ok')" || check_passed=false
-    check_import "$VENV_PYTHON" "MonAgent Core" "import mon_agent_core; print('ok')" || check_passed=false
+    check_import "$VENV_PYTHON" "Rust AgentCore client" "from mon_agent_server.native_runtime import resolve_runtime_executable; print(resolve_runtime_executable())" || check_passed=false
     check_import "$VENV_PYTHON" "PyYAML" "import yaml; print(yaml.__version__)" || check_passed=false
 else
     echo "  ✗ 无法检查依赖"

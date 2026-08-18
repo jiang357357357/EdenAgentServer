@@ -6,7 +6,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from mon_agent_core import Agent, AgentOptions, AssistantMessageEventStream
+from mon_agent_server.agent_api import AssistantMessageEventStream
+from mon_agent_server.native_runtime import NativeAgent as Agent, NativeAgentOptions as AgentOptions
 
 from mon_agent_server.prompts.builder import build_agent_tool_section
 from mon_agent_server.skills import SKILL_DEFINITIONS, SkillDirectoryWatcher, create_skill_runtime
@@ -101,7 +102,7 @@ class SkillCatalogTest(unittest.TestCase):
 
         self.assertNotIn("loaded_tools", names)
         for name in {
-            "load_skill", "read", "write", "edit", "apply_patch", "bash", "write_stdin",
+            "load_skill", "read", "write", "edit", "apply_patch", "bash", "powershell", "write_stdin",
             "web", "create_memo", "analyze_screen", "send_qq_message",
             "switch_session_assistant", "remember_memory", "spawn_agent",
             "create_skill",
@@ -110,7 +111,7 @@ class SkillCatalogTest(unittest.TestCase):
         }:
             self.assertIn(name, names)
 
-    def test_loading_updates_prompt_but_not_tools_for_next_model_call(self) -> None:
+    def test_loading_appends_snapshot_without_rewriting_system_prompt(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
         initial_tools = runtime.active_tools()
 
@@ -138,7 +139,13 @@ class SkillCatalogTest(unittest.TestCase):
         self.assertIn("web", names)
         self.assertIn("write", names)
         self.assertEqual(names, _tool_names(initial_tools))
-        self.assertEqual(context["systemPrompt"], "active=character-performance,memo-management")
+        self.assertEqual(context["systemPrompt"], "initial")
+        self.assertEqual(context["messages"][-1]["kind"], "skillSnapshot")
+        self.assertEqual(
+            context["messages"][-1]["skillIDs"],
+            ["character-performance", "memo-management"],
+        )
+        self.assertIn("create_reminder", context["messages"][-1]["content"])
         self.assertIsNone(runtime.prepare_next_turn({"context": context}, lambda _ids: "unused"))
 
     def test_workspace_development_exposes_apply_patch(self) -> None:
@@ -282,6 +289,42 @@ class SkillCatalogTest(unittest.TestCase):
 
 
 class SkillActivationLoopTest(unittest.IsolatedAsyncioTestCase):
+    async def test_tool_search_does_not_fill_results_with_generic_matches(self) -> None:
+        runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
+        search = next(tool for tool in runtime.active_tools() if tool.name == "tool_search")
+
+        result = await search.run(
+            "search-screen",
+            {"query": "分析当前屏幕截图 desktop screen", "limit": 8},
+        )
+
+        names = [item["name"] for item in result["structuredContent"]["tools"]]
+        self.assertEqual(names, ["analyze_screen", "analyze_image"])
+        self.assertNotIn("list_due_memos", names)
+
+    async def test_tool_search_ignores_stopword_only_query(self) -> None:
+        runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
+        search = next(tool for tool in runtime.active_tools() if tool.name == "tool_search")
+
+        result = await search.run("search-generic", {"query": "当前"})
+
+        self.assertEqual(result["structuredContent"]["tools"], [])
+
+    async def test_tool_search_appends_revealed_schemas_after_stable_prefix(self) -> None:
+        runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
+        before = [tool.name for tool in runtime.ordered_active_tools() if tool.exposure == "direct"]
+        search = next(tool for tool in runtime.active_tools() if tool.name == "tool_search")
+
+        result = await search.run(
+            "search-screen-order",
+            {"query": "分析当前屏幕截图 desktop screen", "limit": 8},
+        )
+
+        revealed = [item["name"] for item in result["structuredContent"]["tools"]]
+        after = [tool.name for tool in runtime.ordered_active_tools() if tool.exposure == "direct"]
+        self.assertEqual(after[:len(before)], before)
+        self.assertEqual(after[len(before):], revealed)
+
     async def test_tool_search_falls_back_when_namespace_has_no_matches(self) -> None:
         runtime = create_skill_runtime(Path.cwd(), profile="user_chat")
         search = next(tool for tool in runtime.active_tools() if tool.name == "tool_search")
@@ -470,7 +513,7 @@ class SkillActivationLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed_tools[0], observed_tools[1])
         self.assertEqual(
             [message["role"] for message in agent.state.messages],
-            ["user", "assistant", "toolResult", "assistant"],
+            ["user", "assistant", "toolResult", "custom", "assistant"],
         )
 
     async def test_tool_search_reveals_deferred_tool_on_next_model_call(self) -> None:

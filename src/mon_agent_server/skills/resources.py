@@ -3,10 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from mon_agent_core import ResourceSnapshot, SkillResource
-
 from .catalog import SkillDefinition, load_builtin_skill_definitions, skill_definitions_for_profile
 from .installer import load_installed_skill_definitions
+from .resource_types import ResourceSnapshot, SkillResource
 
 
 @dataclass(frozen=True, slots=True)

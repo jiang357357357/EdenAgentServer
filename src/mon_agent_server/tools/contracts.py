@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from mon_agent_core import AgentTool
+from ..agent_api import AgentTool
 
 
 SAFE_TOOL_NAMES = frozenset({
@@ -24,14 +24,14 @@ CONNECTOR_TOOL_NAMES = frozenset({
     "list_connectors", "register_connector", "set_connector_state", "claim_connector_events",
     "finish_connector_events", "query_openttd", "execute_connector_action", "openttd_newgrf",
 })
-CODING_TOOL_NAMES = frozenset({"read", "bash", "write_stdin", "edit", "write", "apply_patch", "grep", "find", "ls", "get_diff"})
+CODING_TOOL_NAMES = frozenset({"read", "bash", "powershell", "write_stdin", "edit", "write", "apply_patch", "grep", "find", "ls", "get_diff"})
 
 # Match Codex's distinction between registration and model exposure. These are
 # the small, general-purpose tools worth paying schema tokens for on every turn.
 DIRECT_TOOL_NAMES = frozenset({
     "load_skill", "tool_search", "ask_user",
     "web",
-    "read", "ls", "grep", "find", "get_diff", "write", "edit", "apply_patch", "bash", "write_stdin",
+    "read", "ls", "grep", "find", "get_diff", "write", "edit", "apply_patch", "bash", "powershell", "write_stdin",
     "list_character_actions", "switch_character_action",
     "remember_memory", "search_memories", "update_memory", "forget_memory",
     # A character's work diary is a first-party conversational resource, not a

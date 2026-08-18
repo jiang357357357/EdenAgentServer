@@ -562,7 +562,7 @@ class SessionStore:
             "info": {
                 "id": message_id,
                 "role": "assistant",
-                "agent": "python-agent-core",
+                "agent": "rust-agent-core",
                 "hidden": True,
                 "time": {"created": current, "completed": current},
             },

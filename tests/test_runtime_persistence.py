@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from mon_agent_core.harness.compaction import estimate_tokens
+from mon_agent_server.token_counting import estimate_tokens
 
 from mon_agent_server.runtime import MonAgentRuntime
 from mon_agent_server.runtime.emitters import RuntimeEmitterMixin, runtime_error_summary
@@ -106,6 +106,16 @@ class RuntimePersistenceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(runtime_error_summary(error), "模型连接失败：安全连接被远端提前断开。")
 
+    def test_incomplete_chunked_read_has_readable_runtime_summary(self):
+        error = RuntimeError(
+            "peer closed connection without sending complete message body (incomplete chunked read)"
+        )
+
+        self.assertEqual(
+            runtime_error_summary(error),
+            "模型服务在生成过程中提前断开连接：自动重试后仍未完成，请重试。",
+        )
+
     def test_token_breakdown_keeps_independently_tokenized_sections_unscaled(self):
         store = SessionStore()
         session = store.create_session("上下文统计")
@@ -125,6 +135,7 @@ class RuntimePersistenceTest(unittest.IsolatedAsyncioTestCase):
                         "input": 900,
                         "output": 100,
                         "cacheRead": 640,
+                        "cacheMiss": 360,
                         "cacheWrite": 0,
                         "totalTokens": 1000,
                     },
@@ -148,6 +159,8 @@ class RuntimePersistenceTest(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(info["tokenBreakdown"]["cacheRead"], 640)
+        self.assertEqual(info["tokenBreakdown"]["cacheMiss"], 360)
+        self.assertEqual(info["tokenBreakdown"]["cacheHitRate"], 0.64)
 
     def test_upstream_500_has_readable_runtime_summary(self):
         error = RuntimeError('模型请求失败: 500 Internal Server Error {"error":"failed"}')
@@ -331,6 +344,32 @@ class RuntimePersistenceTest(unittest.IsolatedAsyncioTestCase):
         runtime_message = store.list_messages(session["id"])[0]
         self.assertIn("第 2/3 次", runtime_message["parts"][0]["text"])
         self.assertIn("0.5 秒", runtime_message["parts"][0]["text"])
+
+    def test_stream_reset_message_update_retracts_provisional_text(self):
+        store = SessionStore()
+        session = store.create_session("流重试回退")
+        emitter = EmitterHarness(store)
+        run_state = RunState()
+        partial = {
+            "role": "assistant",
+            "timestamp": 1,
+            "provider": "opencode-go",
+            "model": "deepseek-v4-flash",
+            "content": [{"type": "text", "text": "尚未完成"}],
+        }
+        reset = {**partial, "content": [{"type": "text", "text": ""}]}
+
+        emitter.handle_agent_event(session["id"], {"type": "message_start", "message": partial}, run_state)
+        emitter.handle_agent_event(session["id"], {"type": "message_update", "message": reset}, run_state)
+
+        message = store.list_messages(session["id"])[0]
+        self.assertEqual(message["parts"][0]["text"], "")
+        part_update = next(
+            event
+            for event in reversed(emitter.events.events)
+            if event["type"] == "message.part.updated"
+        )
+        self.assertEqual(part_update["properties"]["part"]["text"], "")
 
     def test_failed_turn_closes_every_unfinished_tool_part(self):
         store = SessionStore()

@@ -27,6 +27,31 @@ class OpenTTDInstance:
     started_at: str
 
 
+def _process_is_alive(pid: int) -> bool:
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return False
+        return True
+
+    # Windows has no POSIX signal-0 probe: os.kill(pid, 0) can deliver a
+    # console control event. Query a process handle without signalling it.
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ctypes.get_last_error() == 5  # Access denied still means it exists.
+    kernel32.CloseHandle(handle)
+    return True
+
+
 def load_active_instance(path: str | os.PathLike[str] | None = None) -> OpenTTDInstance:
     registry = Path(path) if path else default_instance_registry()
     try:
@@ -54,8 +79,6 @@ def load_active_instance(path: str | os.PathLike[str] | None = None) -> OpenTTDI
         raise RuntimeError(f"OpenTTD 实例注册身份无效：{registry}")
     if not 1 <= instance.game_port <= 65535 or not 1 <= instance.admin_port <= 65535:
         raise RuntimeError(f"OpenTTD 实例端口无效：{registry}")
-    try:
-        os.kill(instance.pid, 0)
-    except (ProcessLookupError, PermissionError) as error:
-        raise RuntimeError(f"OpenTTD 实例已经退出：{instance.instance_id}") from error
+    if not _process_is_alive(instance.pid):
+        raise RuntimeError(f"OpenTTD 实例已经退出：{instance.instance_id}")
     return instance

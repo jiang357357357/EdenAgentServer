@@ -51,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
         server_logger.info(f"渲染日志目录：{config.render_log_dir}")
     server_logger.info("session 存储：Core Server（当前进程仅保留运行期内存缓存）")
     server_logger.info(f"Core 地址：{app.core_client.base_url}")
-    server_logger.info("Python AgentCore 已启用")
+    server_logger.info("Rust AgentCore sidecar 已启用")
     server_logger.info("外部邮件能力：Core 用户配置 -> MonOs Email")
     render_startup_summary(app)
     try:

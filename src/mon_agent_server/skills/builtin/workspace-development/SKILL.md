@@ -5,7 +5,7 @@ metadata:
   monagent:
     display_name: 工作区开发与操作
     version: 2.0.0
-    tools: [read, ls, grep, find, get_diff, write, edit, apply_patch, bash, write_stdin]
+    tools: [read, ls, grep, find, get_diff, write, edit, apply_patch, bash, powershell, write_stdin]
     profiles: [user_chat]
 ---
 

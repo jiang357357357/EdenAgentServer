@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mon_agent_core import AgentTool
+from ..agent_api import AgentTool
 
 from .result import text_result
 
