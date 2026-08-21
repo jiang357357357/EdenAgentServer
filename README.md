@@ -1,119 +1,44 @@
-# Mon Agent Server
+# MonAgent Rust Server
 
-Python implementation of the MonAgent local HTTP server.
+`mon-agent-server` 是 MonAgent 唯一的本地后端进程。它直接依赖 `AgentCore` 的 Rust library crates，并提供带能力令牌的 WebSocket JSON-RPC、Blob HTTP 端点、SQLite 持久化、模型适配、权限审批、技能、多智能体、作业和连接器宿主。
 
-It keeps the existing frontend-facing API shape and runs the Rust
-`mon-agent-runtime` sidecar from the sibling `AgentCore` workspace.
+## 开发运行
 
-## Development
-
-Install or refresh the Python environment:
-
-```bash
-./Script/EnvTools/linux/install_env.sh
-```
-
-From the Agent root:
+从仓库根目录执行：
 
 ```bash
 npm run dev:server
 ```
 
-From this directory:
+或直接执行：
 
 ```bash
-uv run python -m mon_agent_server
+cargo run -p mon-agent-server
 ```
 
-Build and install the host Rust sidecar into `Server/bin/<platform>/` from the
-Agent root:
-
-```powershell
-.\Script\Project\package_agentcore.ps1
-```
-
-```sh
-sh ./Script/Project/package_agentcore.sh
-```
-
-At startup the Server first checks that bundled platform directory, then the
-sibling development workspace's release/debug target. Set
-`MON_AGENT_RUNTIME_PATH` to an absolute executable path to override both.
-
-Health check:
+健康检查：
 
 ```bash
-curl http://127.0.0.1:40092/api/tools/status
+curl http://127.0.0.1:40092/readyz
 ```
 
-Logs are written from the Agent workspace root to:
+本地配置主要通过环境变量注入：
+
+- `MON_AGENT_MODEL=provider/model`
+- 对应模型供应商的 API Key 与 Base URL
+- `MON_AGENT_DATABASE`、`MON_AGENT_BLOB_ROOT`、`MON_AGENT_WORKSPACE_ROOT`
+- `MON_AGENT_CAPABILITY_TOKEN`（未提供时写入 `MON_AGENT_TOKEN_FILE`）
+- `MON_CORE_BASE_URL` 与 `MON_CORE_TOKEN`（启用 Mon 业务工具时）
+- `MON_AGENT_SANDBOX_EXECUTABLE`（平台没有内置隔离器时）
+
+服务默认仅绑定 `127.0.0.1:40092`。命令工具在没有可用 OS 沙箱时保持禁用；写文件、外部通信、连接器动作、技能变更和作业调度均经过权限策略。
+
+## 协议与类型
+
+前端只使用 `/rpc` 的 JSON-RPC 和 `/blobs`；不提供旧 REST/SSE 兼容层。Rust API 类型生成 TypeScript 客户端：
 
 ```bash
-Data/Logs/Text/MonAgent/MonAgent.log
-Data/Logs/Text/MonAgent/MonAgent_plain.log
+npm run generate:rpc
 ```
 
-The server uses the MonAgent logging package, modeled after MonCore
-`DjangoLogs`: console output, colored file output, plain text file output, size
-rotation, and a standard-library logging bridge share one handler registry.
-Additional logger mains are written under `Data/Logs/Text/<Main>/<Main>.log`.
-
-The server is a local-only service and listens on the fixed default endpoint
-`http://127.0.0.1:40092`.
-
-## Installable skills
-
-MonAgent separates skill ownership across three layers:
-
-- Core stores the authenticated user's installation metadata.
-- Agent Server inspects, installs, updates, enables and removes skill files.
-- Rust AgentCore discovers and validates skill packages; Agent Server owns the
-  immutable per-run resource snapshot and progressive-loading policy.
-- Agent Server separately binds trusted skills to already registered tool
-  capabilities; loading instructions never grants permission by itself.
-
-Open the skill manager with `/skills` in chat or from Settings. Local folders
-and Git repositories are supported. Every install is a two-step operation:
-preview first, then explicit confirmation. A native Pi `SKILL.md` does not need
-MonAgent-specific metadata. The installer rejects symbolic
-links, invalid names, unknown tools, oversized packages and unsafe subpaths.
-
-User skills are stored under
-`~/.pi/agent/skills/monagent/<user-key>/`; project skills are stored under
-`<workspace>/.pi/skills/monagent/<user-key>/`. Core records and physical files
-are updated with rollback protection.
-
-A skill uses standard `SKILL.md` frontmatter and may add MonAgent metadata:
-
-```markdown
----
-name: web-briefing
-description: Research current information and prepare a concise briefing.
-metadata:
-  monagent:
-    display_name: 网页简报
-    version: 1.0.0
-    tools: [web_search, web_fetch]
-    profiles: [user_chat]
----
-Search only when current information is required and identify the sources used.
-```
-
-The model sees only skill metadata until it calls `load_skill`; the complete
-instructions are then loaded from the run's resource snapshot. Optional
-`tools` entries are host capability bindings and must name tools already
-registered by MonAgent. They are not part of the portable skill resource and
-do not grant permission: write and command tools continue through the normal
-permission broker. `profiles` accepts `user_chat` and `self_awake`.
-
-## External Email
-
-External email is owned by Core and MonOs, not by this Agent server.
-
-- Core stores the user mailbox configuration.
-- MonOs `Email` performs SMTP delivery.
-- MonMcp exposes `email_status` and `email_send`.
-- MonAgent only registers conversation tools that call the Core user context.
-
-Use the Core/Web settings page to configure the mailbox. The Agent tool names
-are `external_email_status` and `send_external_email`.
+架构边界见 `文档/技术/MonAgent 全 Rust 服务端长期架构方案.md`；架构切换历史见 `文档/技术/MonAgent 全 Rust 迁移执行清单.md`。完整产品能力迁移及当前待复验项以 `文档/技术/MonAgent 全 Rust 完整功能迁移计划.md` 和 `文档/技术/MonAgent 归档行为验收矩阵.md` 为准。

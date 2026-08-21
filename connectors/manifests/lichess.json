@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "key": "lichess",
+  "name": "Lichess",
+  "description": "接收挑战与棋局事件，并通过 Lichess Bot API 执行动作。",
+  "icon": "cable",
+  "version": "3",
+  "runtime": "rust-native-lichess-api",
+  "settingsSchema": {
+    "type": "object",
+    "properties": {
+      "baseUrl": { "type": "string", "minLength": 1, "maxLength": 2048 },
+      "tokenEnv": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+      "selfAwakeOnEvent": { "type": "boolean" },
+      "boundSessionId": { "type": "string", "format": "uuid" }
+    },
+    "additionalProperties": false
+  },
+  "events": {
+    "challenge": { "title": "收到挑战", "description": "接收新的 Lichess 对局挑战。" },
+    "game_state": { "title": "棋局状态", "description": "接收走棋、时钟、轮次与终局状态。" }
+  },
+  "queries": {},
+  "actions": {
+    "accept_challenge": {
+      "type": "object", "title": "接受挑战", "description": "接受指定的挑战。",
+      "properties": { "challenge_id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_-]+$" } },
+      "required": ["challenge_id"], "additionalProperties": false
+    },
+    "decline_challenge": {
+      "type": "object", "title": "拒绝挑战", "description": "拒绝指定的挑战。",
+      "properties": {
+        "challenge_id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_-]+$" },
+        "reason": { "type": "string", "enum": ["generic", "later", "tooFast", "tooSlow", "timeControl", "rated", "casual", "standard", "variant", "noBot", "onlyBot"] }
+      },
+      "required": ["challenge_id"], "additionalProperties": false
+    },
+    "make_move": {
+      "type": "object", "title": "执行走棋", "description": "提交 UCI 格式走法。",
+      "properties": {
+        "game_id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_-]+$" },
+        "move": { "type": "string", "minLength": 4, "maxLength": 5, "pattern": "^[a-h][1-8][a-h][1-8][qrbn]?$" },
+        "offer_draw": { "type": "boolean" }
+      },
+      "required": ["game_id", "move"], "additionalProperties": false
+    },
+    "resign": {
+      "type": "object", "title": "认输", "description": "在指定棋局认输。",
+      "properties": { "game_id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_-]+$" } },
+      "required": ["game_id"], "additionalProperties": false
+    },
+    "offer_draw": {
+      "type": "object", "title": "提出和棋", "description": "在指定棋局提出和棋。",
+      "properties": { "game_id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_-]+$" } },
+      "required": ["game_id"], "additionalProperties": false
+    },
+    "send_chat": {
+      "type": "object", "title": "发送棋局消息", "description": "向棋局聊天室发送消息。",
+      "properties": {
+        "game_id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_-]+$" },
+        "text": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "room": { "type": "string", "enum": ["player", "spectator"] }
+      },
+      "required": ["game_id", "text"], "additionalProperties": false
+    }
+  }
+}

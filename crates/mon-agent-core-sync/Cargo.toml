@@ -1,0 +1,21 @@
+[package]
+name = "mon-agent-core-sync"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+chrono.workspace = true
+hex.workspace = true
+mon-agent-domain = { path = "../../../AgentCore/crates/mon-agent-domain" }
+mon-agent-store = { path = "../mon-agent-store" }
+reqwest.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true

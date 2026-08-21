@@ -1,0 +1,48 @@
+[package]
+name = "mon-agent-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "mon-agent-server"
+path = "rust/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+chrono.workspace = true
+futures.workspace = true
+http.workspace = true
+mon-agent-api = { path = "crates/mon-agent-api" }
+mon-agent-app = { path = "crates/mon-agent-app" }
+mon-agent-blob = { path = "crates/mon-agent-blob" }
+mon-agent-core = { path = "../AgentCore/crates/mon-agent-core" }
+mon-agent-connectors = { path = "crates/mon-agent-connectors" }
+mon-agent-core-sync = { path = "crates/mon-agent-core-sync" }
+mon-agent-host = { path = "crates/mon-agent-host" }
+mon-agent-interaction = { path = "crates/mon-agent-interaction" }
+mon-agent-multiagent = { path = "crates/mon-agent-multiagent" }
+mon-agent-provider = { path = "crates/mon-agent-provider" }
+mon-agent-sandbox = { path = "crates/mon-agent-sandbox" }
+mon-agent-skills = { path = "crates/mon-agent-skills" }
+mon-agent-store = { path = "crates/mon-agent-store" }
+mon-agent-tools = { path = "../AgentCore/crates/mon-agent-tools" }
+mon-agent-workspace = { path = "crates/mon-agent-workspace" }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tokio-tungstenite.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

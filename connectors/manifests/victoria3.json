@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "key": "victoria3",
+  "name": "Victoria 3 Bridge",
+  "description": "通过日志桥接观察本地 Victoria 3 战役；控制探针默认关闭。",
+  "icon": "gamepad",
+  "version": "4",
+  "runtime": "rust-native-log-observer",
+  "settingsSchema": {
+    "type": "object",
+    "properties": {
+      "logPath": { "type": "string", "minLength": 1, "maxLength": 4096 },
+      "controlEnabled": { "type": "boolean" },
+      "selfAwakeOnEvent": { "type": "boolean" },
+      "boundSessionId": { "type": "string", "format": "uuid" }
+    },
+    "additionalProperties": false
+  },
+  "events": {
+    "bridge_ready": { "title": "Bridge 已就绪", "description": "检测到兼容的 Victoria 3 Observer Bridge。" },
+    "snapshot": { "title": "战役状态快照", "description": "接收玩家国家的只读状态快照。" },
+    "command_ack": { "title": "控制命令回执", "description": "接收带唯一命令 ID 的控制台执行回执。" }
+  },
+  "queries": {
+    "get_state": {
+      "type": "object",
+      "title": "读取最新战役状态",
+      "description": "返回 Bridge 状态和最新玩家国家快照。",
+      "x-monagent-invocation": { "tool": "query_victoria3", "query": "get_state" },
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  "actions": {
+    "probe_control": {
+      "type": "object",
+      "title": "验证回程通道",
+      "description": "执行只写 ACK 日志的无副作用控制探针。",
+      "properties": {},
+      "additionalProperties": false
+    }
+  }
+}

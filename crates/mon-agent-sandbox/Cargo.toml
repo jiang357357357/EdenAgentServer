@@ -1,0 +1,21 @@
+[package]
+name = "mon-agent-sandbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+globset.workspace = true
+mon-agent-core = { path = "../../../AgentCore/crates/mon-agent-core" }
+mon-agent-domain = { path = "../../../AgentCore/crates/mon-agent-domain" }
+mon-agent-store = { path = "../mon-agent-store" }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
