@@ -2,6 +2,10 @@
 
 `mon-agent-server` 是 MonAgent 唯一的本地后端进程。它直接依赖 `AgentCore` 的 Rust library crates，并提供带能力令牌的 WebSocket JSON-RPC、Blob HTTP 端点、SQLite 持久化、模型适配、权限审批、技能、多智能体、作业和连接器宿主。
 
+## 授权
+
+当前版本以 [PolyForm Noncommercial License 1.0.0](LICENSE) 提供非商业源码使用；商业使用必须取得[单独书面商业授权](COMMERCIAL-LICENSE.md)。此前在 MIT 条款下取得的历史版本继续适用其随附的 MIT 条款。第三方依赖、连接器内容、游戏素材、模型、数据和商标不自动包含在上述授权中。
+
 ## 开发运行
 
 从仓库根目录执行：

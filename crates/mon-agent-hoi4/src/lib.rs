@@ -129,7 +129,7 @@ pub enum Observation {
         observed_at: u64,
         fields: BTreeMap<String, String>,
     },
-    Snapshot(Snapshot),
+    Snapshot(Box<Snapshot>),
 }
 
 impl Observation {
@@ -323,7 +323,7 @@ impl Observer {
             BridgeRecord::Snapshot(fields) => {
                 let snapshot = Snapshot::from_fields(observed_at, fields);
                 state.latest_snapshot = Some(snapshot.clone());
-                Observation::Snapshot(snapshot)
+                Observation::Snapshot(Box::new(snapshot))
             }
         }
     }

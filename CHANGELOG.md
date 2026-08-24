@@ -6,6 +6,7 @@
 
 ### Changed
 
+- 自 2026-08-24 起，当前版本改用 PolyForm Noncommercial 1.0.0 非商业许可，并提供单独商业授权；历史 MIT 版本的既有授权不追溯撤销。
 - MonCore 配置读取路径切换为 Mon 根工作区的 `Core/.monconfig`。
 
 ## [1.8.0] - 2026-08-05

@@ -13,6 +13,14 @@ pub const PROTOCOL_VERSION: u32 = 2;
 pub const WEBSOCKET_PROTOCOL: &str = "mon-agent-rpc-v2";
 pub const TOKEN_PROTOCOL_PREFIX: &str = "mon-agent-token.";
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeOrigin {
+    #[default]
+    Mon,
+    Local,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct RpcRequest {
@@ -97,6 +105,8 @@ pub struct InitializeParams {
     pub client_version: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub runtime_origin: RuntimeOrigin,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -107,6 +117,7 @@ pub struct InitializeResult {
     pub server_version: String,
     pub agent_core_version: String,
     pub capabilities: Vec<String>,
+    pub runtime_origin: RuntimeOrigin,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -235,6 +246,7 @@ pub struct SessionSummary {
     pub title: String,
     pub title_source: String,
     pub status: SessionStatus,
+    pub runtime_origin: RuntimeOrigin,
     #[serde(default)]
     pub participants: Vec<SessionParticipant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -519,6 +531,238 @@ pub struct SkillPreviewInfo {
     pub file_count: u64,
     pub total_bytes: u64,
     pub expires_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginListParams {}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginReadParams {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInspectParams {
+    pub source_type: String,
+    pub source_uri: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPreviewInstallParams {
+    #[serde(rename = "previewID")]
+    pub preview_id: String,
+    #[serde(default = "plugin_default_true")]
+    pub activate: bool,
+    #[serde(default = "plugin_default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub require_verified: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginEnableParams {
+    pub id: String,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginActivateParams {
+    pub id: String,
+    pub version: String,
+    pub revision: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginUninstallResult {
+    pub id: String,
+    pub deleted: bool,
+    pub removed_versions: u64,
+    pub cleanup_errors: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginComponentInfo {
+    pub id: String,
+    pub kind: String,
+    pub path: String,
+    pub enabled_by_default: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginUiContributionInfo {
+    pub component_id: String,
+    pub id: String,
+    pub location: String,
+    pub title: String,
+    pub body: String,
+    pub tone: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPermissionInfo {
+    pub capability: String,
+    pub resource: String,
+    pub access: String,
+    pub required: bool,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPermissionDecision {
+    pub capability: String,
+    pub resource: String,
+    pub access: String,
+    pub decision: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPermissionSetParams {
+    pub id: String,
+    pub revision: String,
+    pub decisions: Vec<PluginPermissionDecision>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPermissionGrantInfo {
+    pub capability: String,
+    pub resource: String,
+    pub access: String,
+    pub decision: String,
+    pub manifest_revision: String,
+    pub decided_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMarketSourceAddParams {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    #[serde(rename = "keyID")]
+    pub key_id: String,
+    #[serde(default = "plugin_default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMarketSourceParams {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMarketListParams {
+    #[serde(rename = "sourceID", default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMarketInspectParams {
+    #[serde(rename = "sourceID")]
+    pub source_id: String,
+    #[serde(rename = "pluginID")]
+    pub plugin_id: String,
+    pub version: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMarketSourceInfo {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    #[serde(rename = "keyID")]
+    pub key_id: String,
+    pub enabled: bool,
+    pub index_revision: Option<String>,
+    pub last_refreshed_at: Option<i64>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMarketReleaseInfo {
+    #[serde(rename = "sourceID")]
+    pub source_id: String,
+    #[serde(rename = "pluginID")]
+    pub plugin_id: String,
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub revision: String,
+    pub revoked: bool,
+    pub revocation_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginVersionInfo {
+    pub version: String,
+    pub revision: String,
+    pub active: bool,
+    pub trust_state: String,
+    pub source_type: String,
+    pub source_uri: String,
+    pub installed_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub revision: String,
+    pub enabled: bool,
+    pub trust_state: String,
+    pub source_type: String,
+    pub source_uri: String,
+    pub components: Vec<PluginComponentInfo>,
+    pub ui_contributions: Vec<PluginUiContributionInfo>,
+    pub permissions: Vec<PluginPermissionInfo>,
+    pub permission_grants: Vec<PluginPermissionGrantInfo>,
+    pub versions: Vec<PluginVersionInfo>,
+    pub manifest: Value,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPreviewInfo {
+    #[serde(rename = "previewID")]
+    pub preview_id: String,
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub revision: String,
+    pub verified: bool,
+    pub source_type: String,
+    pub source_uri: String,
+    pub components: Vec<PluginComponentInfo>,
+    pub permissions: Vec<PluginPermissionInfo>,
+    pub expires_at: i64,
+}
+
+fn plugin_default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
@@ -1350,6 +1594,18 @@ pub struct ProtocolSchemaCatalog {
     pub skill_enable: SkillEnableParams,
     pub skill_inspect: SkillInspectParams,
     pub skill_preview_install: SkillPreviewInstallParams,
+    pub plugin_list: PluginListParams,
+    pub plugin_read: PluginReadParams,
+    pub plugin_inspect: PluginInspectParams,
+    pub plugin_preview_install: PluginPreviewInstallParams,
+    pub plugin_enable: PluginEnableParams,
+    pub plugin_activate: PluginActivateParams,
+    pub plugin_uninstall: PluginUninstallResult,
+    pub plugin_permission_set: PluginPermissionSetParams,
+    pub plugin_market_source_add: PluginMarketSourceAddParams,
+    pub plugin_market_source: PluginMarketSourceParams,
+    pub plugin_market_list: PluginMarketListParams,
+    pub plugin_market_inspect: PluginMarketInspectParams,
     pub agent_list: AgentListParams,
     pub agent_read: AgentReadParams,
     pub agent_message: AgentMessageParams,

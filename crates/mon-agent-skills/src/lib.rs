@@ -6,7 +6,7 @@ use mon_agent_core::{
     ContentBlock, DynamicToolSource, PermissionRequest, Tool, ToolCall, ToolCallContext,
     ToolDefinition, ToolExecutionMode, ToolFailure, ToolOutput,
 };
-use mon_agent_tools::{ProcessSandbox, run_sandboxed_program};
+use mon_agent_tools::{ProcessSandbox, SandboxedProgramRequest, run_sandboxed_program};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -150,6 +150,7 @@ pub struct SkillCatalog {
     install_root: Arc<PathBuf>,
     state_path: Arc<PathBuf>,
     roots: Arc<RwLock<Vec<PathBuf>>>,
+    plugin_roots: Arc<RwLock<BTreeMap<String, Vec<PathBuf>>>>,
     previews: Arc<RwLock<BTreeMap<String, SkillPreviewRecord>>>,
     update_previews: Arc<RwLock<BTreeMap<String, SkillUpdatePreview>>>,
     known_tools: Arc<RwLock<BTreeSet<String>>>,
@@ -183,6 +184,7 @@ impl SkillCatalog {
             disabled: Arc::new(RwLock::new(load_disabled(&install_root)?)),
             state_path: Arc::new(install_root.join(".disabled.json")),
             roots: Arc::new(RwLock::new(roots)),
+            plugin_roots: Arc::new(RwLock::new(BTreeMap::new())),
             install_root: Arc::new(install_root),
             previews: Arc::new(RwLock::new(BTreeMap::new())),
             update_previews: Arc::new(RwLock::new(BTreeMap::new())),
@@ -285,11 +287,17 @@ impl SkillCatalog {
     /// Re-scan all configured roots and atomically replace the visible catalog.
     /// Existing readers always observe either the old or the new complete snapshot.
     pub fn refresh(&self) -> Result<bool, SkillError> {
-        let roots = self
+        let base_roots = self
             .roots
             .read()
             .unwrap_or_else(|value| value.into_inner())
             .clone();
+        let plugin_roots = self
+            .plugin_roots
+            .read()
+            .unwrap_or_else(|value| value.into_inner())
+            .clone();
+        let roots = effective_skill_roots(&base_roots, &plugin_roots);
         let directories = roots
             .iter()
             .map(|root| root.to_string_lossy().into_owned())
@@ -298,7 +306,8 @@ impl SkillCatalog {
             serde_json::from_value(mon_agent_tools::load_skills(&directories))?;
         let mut refreshed = BTreeMap::new();
         for skill in loaded.skills {
-            let skill = enrich_skill(skill, self.install_root.as_ref())?;
+            let mut skill = enrich_skill(skill, self.install_root.as_ref())?;
+            mark_plugin_skill(&mut skill, &plugin_roots);
             self.validate_skill_policy(&skill)?;
             let name = skill.name.clone();
             if refreshed.insert(name.clone(), skill).is_some() {
@@ -331,7 +340,13 @@ impl SkillCatalog {
         if !roots.iter().any(|root| root == self.install_root.as_ref()) {
             roots.push(self.install_root.as_ref().clone());
         }
-        let directories = roots
+        let plugin_roots = self
+            .plugin_roots
+            .read()
+            .unwrap_or_else(|value| value.into_inner())
+            .clone();
+        let effective_roots = effective_skill_roots(&roots, &plugin_roots);
+        let directories = effective_roots
             .iter()
             .map(|root| root.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
@@ -339,7 +354,8 @@ impl SkillCatalog {
             serde_json::from_value(mon_agent_tools::load_skills(&directories))?;
         let mut refreshed = BTreeMap::new();
         for skill in loaded.skills {
-            let skill = enrich_skill(skill, self.install_root.as_ref())?;
+            let mut skill = enrich_skill(skill, self.install_root.as_ref())?;
+            mark_plugin_skill(&mut skill, &plugin_roots);
             self.validate_skill_policy(&skill)?;
             let name = skill.name.clone();
             if refreshed.insert(name.clone(), skill).is_some() {
@@ -357,6 +373,86 @@ impl SkillCatalog {
             .roots
             .write()
             .unwrap_or_else(|value| value.into_inner()) = roots;
+        Ok(changed)
+    }
+
+    /// Atomically publish discovery roots owned by one plugin. Workspace root
+    /// replacement cannot remove these roots; disabling the plugin must do so
+    /// explicitly through `remove_plugin_roots`.
+    pub fn set_plugin_roots(
+        &self,
+        plugin_id: &str,
+        roots: Vec<PathBuf>,
+    ) -> Result<bool, SkillError> {
+        if plugin_id.trim().is_empty() {
+            return Err(SkillError::UnsafePackage(
+                "plugin ID cannot be empty".to_owned(),
+            ));
+        }
+        let mut canonical = roots
+            .into_iter()
+            .map(fs::canonicalize)
+            .collect::<Result<Vec<_>, _>>()?;
+        canonical.sort();
+        canonical.dedup();
+        let mut plugin_roots = self
+            .plugin_roots
+            .read()
+            .unwrap_or_else(|value| value.into_inner())
+            .clone();
+        plugin_roots.insert(plugin_id.to_owned(), canonical);
+        self.publish_plugin_roots(plugin_roots)
+    }
+
+    pub fn remove_plugin_roots(&self, plugin_id: &str) -> Result<bool, SkillError> {
+        let mut plugin_roots = self
+            .plugin_roots
+            .read()
+            .unwrap_or_else(|value| value.into_inner())
+            .clone();
+        if plugin_roots.remove(plugin_id).is_none() {
+            return Ok(false);
+        }
+        self.publish_plugin_roots(plugin_roots)
+    }
+
+    fn publish_plugin_roots(
+        &self,
+        plugin_roots: BTreeMap<String, Vec<PathBuf>>,
+    ) -> Result<bool, SkillError> {
+        let base_roots = self
+            .roots
+            .read()
+            .unwrap_or_else(|value| value.into_inner())
+            .clone();
+        let effective_roots = effective_skill_roots(&base_roots, &plugin_roots);
+        let directories = effective_roots
+            .iter()
+            .map(|root| root.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let loaded: LoadedCatalog =
+            serde_json::from_value(mon_agent_tools::load_skills(&directories))?;
+        let mut refreshed = BTreeMap::new();
+        for skill in loaded.skills {
+            let mut skill = enrich_skill(skill, self.install_root.as_ref())?;
+            mark_plugin_skill(&mut skill, &plugin_roots);
+            self.validate_skill_policy(&skill)?;
+            let name = skill.name.clone();
+            if refreshed.insert(name.clone(), skill).is_some() {
+                return Err(SkillError::Duplicate(name));
+            }
+        }
+        self.validate_code_tool_catalog(&refreshed)?;
+        let mut current = self
+            .skills
+            .write()
+            .unwrap_or_else(|value| value.into_inner());
+        let changed = *current != refreshed;
+        *current = refreshed;
+        *self
+            .plugin_roots
+            .write()
+            .unwrap_or_else(|value| value.into_inner()) = plugin_roots;
         Ok(changed)
     }
 
@@ -428,7 +524,7 @@ impl SkillCatalog {
             .tempdir_in(&installation_root)?;
         let staged_directory = staging.path().join(name);
         fs::create_dir(&staged_directory)?;
-        let frontmatter = render_skill_file(
+        let frontmatter = render_skill_file(SkillFileContent {
             name,
             display_name,
             version,
@@ -438,7 +534,7 @@ impl SkillCatalog {
             profiles,
             permissions,
             default_prompt,
-        );
+        });
         fs::write(staged_directory.join("SKILL.md"), frontmatter)?;
         apply_generated_file_changes(&staged_directory, files, false)?;
         fs::write(
@@ -769,17 +865,17 @@ impl SkillCatalog {
         let next_profiles = profiles.unwrap_or(&current.profiles);
         let next_permissions = permissions.unwrap_or(&current.permissions);
         let next_default_prompt = default_prompt.unwrap_or(&current.default_prompt);
-        let rendered = render_skill_file(
-            &current.name,
-            next_display_name,
-            next_version,
-            next_description,
-            next_content,
-            next_tools,
-            next_profiles,
-            next_permissions,
-            next_default_prompt,
-        );
+        let rendered = render_skill_file(SkillFileContent {
+            name: &current.name,
+            display_name: next_display_name,
+            version: next_version,
+            description: next_description,
+            content: next_content,
+            tools: next_tools,
+            profiles: next_profiles,
+            permissions: next_permissions,
+            default_prompt: next_default_prompt,
+        });
         let previous_skill_file = fs::read_to_string(preview_root.join("SKILL.md"))?;
         fs::write(preview_root.join("SKILL.md"), &rendered)?;
         let mut changed_files = apply_generated_file_changes(&preview_root, files, true)?;
@@ -1176,30 +1272,61 @@ const MAX_PACKAGE_FILES: usize = 256;
 const MAX_PACKAGE_BYTES: u64 = 32 * 1024 * 1024;
 const INSTALLATION_MANIFEST: &str = ".monagent-install.json";
 
-fn render_skill_file(
-    name: &str,
-    display_name: &str,
-    version: &str,
-    description: &str,
-    content: &str,
-    tools: &[String],
-    profiles: &[String],
-    permissions: &[String],
-    default_prompt: &str,
-) -> String {
+struct SkillFileContent<'a> {
+    name: &'a str,
+    display_name: &'a str,
+    version: &'a str,
+    description: &'a str,
+    content: &'a str,
+    tools: &'a [String],
+    profiles: &'a [String],
+    permissions: &'a [String],
+    default_prompt: &'a str,
+}
+
+fn render_skill_file(skill: SkillFileContent<'_>) -> String {
     let quoted = |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned());
     format!(
         "---\nname: {}\ndescription: {}\nmetadata:\n  monagent:\n    display_name: {}\n    version: {}\n    tools: {}\n    profiles: {}\n    permissions: {}\n    default_prompt: {}\n---\n{}\n",
-        quoted(name),
-        quoted(description.trim()),
-        quoted(display_name.trim()),
-        quoted(version.trim()),
-        serde_json::to_string(tools).unwrap_or_else(|_| "[]".to_owned()),
-        serde_json::to_string(profiles).unwrap_or_else(|_| "[]".to_owned()),
-        serde_json::to_string(permissions).unwrap_or_else(|_| "[]".to_owned()),
-        quoted(default_prompt.trim()),
-        content.trim(),
+        quoted(skill.name),
+        quoted(skill.description.trim()),
+        quoted(skill.display_name.trim()),
+        quoted(skill.version.trim()),
+        serde_json::to_string(skill.tools).unwrap_or_else(|_| "[]".to_owned()),
+        serde_json::to_string(skill.profiles).unwrap_or_else(|_| "[]".to_owned()),
+        serde_json::to_string(skill.permissions).unwrap_or_else(|_| "[]".to_owned()),
+        quoted(skill.default_prompt.trim()),
+        skill.content.trim(),
     )
+}
+
+fn effective_skill_roots(
+    base_roots: &[PathBuf],
+    plugin_roots: &BTreeMap<String, Vec<PathBuf>>,
+) -> Vec<PathBuf> {
+    let mut seen = BTreeSet::new();
+    base_roots
+        .iter()
+        .chain(plugin_roots.values().flatten())
+        .filter(|root| seen.insert((*root).clone()))
+        .cloned()
+        .collect()
+}
+
+fn mark_plugin_skill(skill: &mut SkillDefinition, plugin_roots: &BTreeMap<String, Vec<PathBuf>>) {
+    let Some(plugin_id) = plugin_roots.iter().find_map(|(plugin_id, roots)| {
+        roots
+            .iter()
+            .any(|root| skill.root_path.starts_with(root))
+            .then_some(plugin_id)
+    }) else {
+        return;
+    };
+    skill.scope = "plugin".to_owned();
+    skill.source_type = "plugin".to_owned();
+    let mut manifest = skill.manifest.as_object().cloned().unwrap_or_default();
+    manifest.insert("pluginId".to_owned(), Value::String(plugin_id.clone()));
+    skill.manifest = Value::Object(manifest);
 }
 
 fn chrono_now_ms() -> i64 {
@@ -1888,13 +2015,15 @@ impl SkillCodeTool {
         let root = self.definition.root_path.to_string_lossy().into_owned();
         run_sandboxed_program(
             &self.sandbox,
-            &self.definition.root_path,
-            &self.definition.root_path,
-            &command[0],
-            &command[1..],
-            stdin,
-            &[("MONAGENT_SKILL_ROOT", root.as_str())],
-            Duration::from_secs(self.definition.timeout_seconds),
+            SandboxedProgramRequest {
+                workspace_root: &self.definition.root_path,
+                cwd: &self.definition.root_path,
+                program: &command[0],
+                arguments: &command[1..],
+                stdin,
+                environment: &[("MONAGENT_SKILL_ROOT", root.as_str())],
+                timeout: Duration::from_secs(self.definition.timeout_seconds),
+            },
             cancellation,
         )
         .await
@@ -2623,7 +2752,8 @@ mod tests {
         let project_root = workspace.path().join(".agents/skills");
         let user_root = workspace.path().join("user-skills");
         let catalog =
-            SkillCatalog::discover(&[project_root.clone()], user_root.clone()).expect("catalog");
+            SkillCatalog::discover(std::slice::from_ref(&project_root), user_root.clone())
+                .expect("catalog");
         catalog
             .set_known_tools(["read".to_owned()])
             .expect("known tools");
@@ -2707,8 +2837,8 @@ mod tests {
         let install_root = workspace.path().join("installed");
         let project_root = workspace.path().join(".agents/skills");
         write_package(&source, "read");
-        let catalog =
-            SkillCatalog::discover(&[project_root.clone()], install_root).expect("catalog");
+        let catalog = SkillCatalog::discover(std::slice::from_ref(&project_root), install_root)
+            .expect("catalog");
         catalog
             .set_known_tools(["read".to_owned()])
             .expect("known tools");
@@ -2886,6 +3016,50 @@ mod tests {
             catalog.get("second").expect("second").description,
             "Second workspace"
         );
+    }
+
+    #[test]
+    fn plugin_roots_survive_workspace_changes_and_are_removed_atomically() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let first_root = workspace.path().join("first-root");
+        let second_root = workspace.path().join("second-root");
+        let plugin_root = workspace.path().join("plugin/skills/plugin-skill");
+        for (root, name) in [
+            (&first_root, "first"),
+            (&second_root, "second"),
+            (&plugin_root, "plugin-skill"),
+        ] {
+            fs::create_dir_all(root).expect("skill directory");
+            fs::write(
+                root.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {name}\n---\nInstructions.\n"),
+            )
+            .expect("skill");
+        }
+        let install_root = workspace.path().join("installed");
+        let catalog = SkillCatalog::discover(&[first_root], install_root).expect("skill catalog");
+        assert!(
+            catalog
+                .set_plugin_roots("mon.test", vec![plugin_root])
+                .expect("plugin roots")
+        );
+        let plugin_skill = catalog.get("plugin-skill").expect("plugin skill");
+        assert_eq!(plugin_skill.scope, "plugin");
+        assert_eq!(plugin_skill.source_type, "plugin");
+        assert_eq!(plugin_skill.manifest["pluginId"], "mon.test");
+
+        assert!(catalog.replace_roots(vec![second_root]).expect("workspace"));
+        assert!(catalog.get("first").is_none());
+        assert!(catalog.get("second").is_some());
+        assert!(catalog.get("plugin-skill").is_some());
+
+        assert!(
+            catalog
+                .remove_plugin_roots("mon.test")
+                .expect("remove plugin roots")
+        );
+        assert!(catalog.get("plugin-skill").is_none());
+        assert!(catalog.get("second").is_some());
     }
 
     #[test]

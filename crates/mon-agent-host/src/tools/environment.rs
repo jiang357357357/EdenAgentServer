@@ -150,13 +150,12 @@ pub(crate) async fn weather_context(
         {
             let mut query = url.query_pairs_mut();
             let country_code = country.trim();
-            let search_name = if country_code.len() == 2
-                && country_code
-                    .chars()
-                    .all(|value| value.is_ascii_alphabetic())
+            let search_name = if country_code.is_empty()
+                || (country_code.len() == 2
+                    && country_code
+                        .chars()
+                        .all(|value| value.is_ascii_alphabetic()))
             {
-                city.clone()
-            } else if country_code.is_empty() {
                 city.clone()
             } else {
                 format!("{city}, {country_code}")
@@ -381,7 +380,7 @@ fn weather_code_text(value: Option<&Value>) -> &'static str {
         Some(61 | 63 | 65) => "雨",
         Some(66 | 67) => "冻雨",
         Some(71 | 73 | 75 | 77) => "雪",
-        Some(80 | 81 | 82) => "阵雨",
+        Some(80..=82) => "阵雨",
         Some(85 | 86) => "阵雪",
         Some(95 | 96 | 99) => "雷暴",
         _ => "未知天气",

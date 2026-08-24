@@ -139,6 +139,7 @@ pub struct ControlProbeResult {
     pub ack: CommandAck,
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 struct ConsoleInjection {
     command_stem: String,
     console_virtual_key: u16,

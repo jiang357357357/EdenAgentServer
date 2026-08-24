@@ -9,15 +9,21 @@ use mon_agent_api::{
     MemoIdParams, MemoInfo, MemoListParams, MemoUpdateParams, MessageListParams,
     ModelCatalogParams, ModelReadParams, ModelSelectParams, OperationDecision, OperationInfo,
     OperationListParams, OperationResolveParams, PermissionDecision, PermissionListParams,
-    PermissionRequestInfo, PermissionResolveParams, QuestionItemInfo, QuestionListParams,
-    QuestionOptionInfo, QuestionRejectParams, QuestionRequestInfo, QuestionResolveParams,
-    ReadyNotification, RpcError, RpcNotification, RpcRequest, RpcResponse, RuntimeModelCatalogInfo,
-    RuntimeModelIdentityInfo, RuntimeModelInfo, RuntimeModelOptionInfo, SelfAwakeDiaryInfo,
-    SelfAwakeListParams, SelfAwakePage, SelfAwakeRunInfo, SessionCompactParams,
-    SessionCreateParams, SessionEnvironment, SessionEnvironmentLocation, SessionEvent,
-    SessionListParams, SessionParticipant, SessionParticipantsParams, SessionReadParams,
-    SessionStatus, SessionSummary, SessionTitleParams, SkillEnableParams, SkillInfo,
-    SkillInspectParams, SkillInstallParams, SkillListParams, SkillPreviewInfo,
+    PermissionRequestInfo, PermissionResolveParams, PluginActivateParams, PluginComponentInfo,
+    PluginEnableParams, PluginInfo, PluginInspectParams, PluginListParams,
+    PluginMarketInspectParams, PluginMarketListParams, PluginMarketReleaseInfo,
+    PluginMarketSourceAddParams, PluginMarketSourceInfo, PluginMarketSourceParams,
+    PluginPermissionDecision, PluginPermissionGrantInfo, PluginPermissionInfo,
+    PluginPermissionSetParams, PluginPreviewInfo, PluginPreviewInstallParams, PluginReadParams,
+    PluginUiContributionInfo, PluginUninstallResult, PluginVersionInfo, QuestionItemInfo,
+    QuestionListParams, QuestionOptionInfo, QuestionRejectParams, QuestionRequestInfo,
+    QuestionResolveParams, ReadyNotification, RpcError, RpcNotification, RpcRequest, RpcResponse,
+    RuntimeModelCatalogInfo, RuntimeModelIdentityInfo, RuntimeModelInfo, RuntimeModelOptionInfo,
+    RuntimeOrigin, SelfAwakeDiaryInfo, SelfAwakeListParams, SelfAwakePage, SelfAwakeRunInfo,
+    SessionCompactParams, SessionCreateParams, SessionEnvironment, SessionEnvironmentLocation,
+    SessionEvent, SessionListParams, SessionParticipant, SessionParticipantsParams,
+    SessionReadParams, SessionStatus, SessionSummary, SessionTitleParams, SkillEnableParams,
+    SkillInfo, SkillInspectParams, SkillInstallParams, SkillListParams, SkillPreviewInfo,
     SkillPreviewInstallParams, SkillPreviewSource, SkillReadParams, TokenBreakdown,
     ToolExecutionModeInfo, ToolExposureInfo, ToolInfo, TurnAccepted, TurnQueueParams,
     TurnQueueResult, TurnStartParams, VoiceSpeechSegmentInfo, VoiceSpeechSegmentListParams,
@@ -56,6 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         RpcResponse::decl(&config),
         RpcError::decl(&config),
         RpcNotification::decl(&config),
+        RuntimeOrigin::decl(&config),
         InitializeParams::decl(&config),
         InitializeResult::decl(&config),
         ReadyNotification::decl(&config),
@@ -89,6 +96,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SkillPreviewInstallParams::decl(&config),
         SkillPreviewSource::decl(&config),
         SkillPreviewInfo::decl(&config),
+        PluginListParams::decl(&config),
+        PluginReadParams::decl(&config),
+        PluginInspectParams::decl(&config),
+        PluginPreviewInstallParams::decl(&config),
+        PluginEnableParams::decl(&config),
+        PluginActivateParams::decl(&config),
+        PluginUninstallResult::decl(&config),
+        PluginComponentInfo::decl(&config),
+        PluginUiContributionInfo::decl(&config),
+        PluginPermissionInfo::decl(&config),
+        PluginPermissionDecision::decl(&config),
+        PluginPermissionSetParams::decl(&config),
+        PluginPermissionGrantInfo::decl(&config),
+        PluginMarketSourceAddParams::decl(&config),
+        PluginMarketSourceParams::decl(&config),
+        PluginMarketListParams::decl(&config),
+        PluginMarketInspectParams::decl(&config),
+        PluginMarketSourceInfo::decl(&config),
+        PluginMarketReleaseInfo::decl(&config),
+        PluginVersionInfo::decl(&config),
+        PluginInfo::decl(&config),
+        PluginPreviewInfo::decl(&config),
         AgentListParams::decl(&config),
         AgentReadParams::decl(&config),
         AgentMessageParams::decl(&config),
@@ -212,6 +241,20 @@ export interface RpcMethodMap {{
   "skill.uninstall": {{ params: SkillReadParams; result: {{ deleted: boolean }} }}
   "skill.inspect": {{ params: SkillInspectParams; result: SkillPreviewInfo }}
   "skill.install_preview": {{ params: SkillPreviewInstallParams; result: SkillInfo }}
+  "plugin.list": {{ params: PluginListParams; result: PluginInfo[] }}
+  "plugin.read": {{ params: PluginReadParams; result: PluginInfo }}
+  "plugin.inspect": {{ params: PluginInspectParams; result: PluginPreviewInfo }}
+  "plugin.install_preview": {{ params: PluginPreviewInstallParams; result: PluginInfo }}
+  "plugin.enable": {{ params: PluginEnableParams; result: PluginInfo }}
+  "plugin.activate": {{ params: PluginActivateParams; result: PluginInfo }}
+  "plugin.uninstall": {{ params: PluginReadParams; result: PluginUninstallResult }}
+  "plugin.permissions.set": {{ params: PluginPermissionSetParams; result: PluginInfo }}
+  "plugin.market.source.list": {{ params: PluginListParams; result: PluginMarketSourceInfo[] }}
+  "plugin.market.source.add": {{ params: PluginMarketSourceAddParams; result: PluginMarketSourceInfo }}
+  "plugin.market.source.remove": {{ params: PluginMarketSourceParams; result: {{ deleted: boolean }} }}
+  "plugin.market.source.refresh": {{ params: PluginMarketSourceParams; result: PluginMarketSourceInfo }}
+  "plugin.market.list": {{ params: PluginMarketListParams; result: PluginMarketReleaseInfo[] }}
+  "plugin.market.inspect": {{ params: PluginMarketInspectParams; result: PluginPreviewInfo }}
   "agent.list": {{ params: AgentListParams; result: AgentThreadInfo[] }}
   "agent.read": {{ params: AgentReadParams; result: AgentThreadInfo }}
   "agent.interrupt": {{ params: AgentReadParams; result: AgentThreadInfo }}
@@ -274,7 +317,12 @@ export class MonAgentRpcClient {{
   private listeners = new Map<string, Set<(params: unknown) => void>>()
   private closeListeners = new Set<() => void>()
 
-  async connect(url: string, capabilityToken: string, clientVersion = "dev"): Promise<InitializeResult> {{
+  async connect(
+    url: string,
+    capabilityToken: string,
+    clientVersion = "dev",
+    runtimeOrigin: RuntimeOrigin = "mon",
+  ): Promise<InitializeResult> {{
     if (this.socket) throw new Error("MonAgent RPC client is already connected")
     const socket = new WebSocket(url, [
       MON_AGENT_WEBSOCKET_PROTOCOL,
@@ -292,6 +340,7 @@ export class MonAgentRpcClient {{
       clientName: "mon-agent-web",
       clientVersion,
       capabilities: ["session-events"],
+      runtimeOrigin,
     }})
   }}
 

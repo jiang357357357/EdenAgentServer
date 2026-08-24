@@ -253,10 +253,7 @@ pub enum PackageError {
 
 #[must_use]
 pub fn current_platform() -> String {
-    let os = match std::env::consts::OS {
-        "macos" => "macos",
-        value => value,
-    };
+    let os = std::env::consts::OS;
     let arch = match std::env::consts::ARCH {
         "x86_64" => "x64",
         "aarch64" => "arm64",

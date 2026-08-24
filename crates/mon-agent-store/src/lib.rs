@@ -2,8 +2,10 @@
 
 mod host;
 mod legacy_import;
+mod plugins;
 pub use host::*;
 pub use legacy_import::*;
+pub use plugins::*;
 
 use mon_agent_domain::{
     AgentId, BlobId, OperationId, PermissionRequestId, QuestionRequestId, SessionId, TurnId,
@@ -55,6 +57,8 @@ pub enum StoreError {
     AgentNotMutable(AgentId),
     #[error("invalid value: {0}")]
     InvalidValue(String),
+    #[error("plugin does not exist: {0}")]
+    PluginNotFound(String),
 }
 
 #[derive(Clone)]
@@ -112,6 +116,7 @@ pub struct SessionRecord {
     pub title: String,
     pub title_source: String,
     pub status: SessionStatus,
+    pub runtime_origin: SessionRuntimeOrigin,
     #[serde(default)]
     pub participants: Vec<Value>,
     #[serde(default)]
@@ -120,6 +125,31 @@ pub struct SessionRecord {
     pub context_usage: Option<Value>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRuntimeOrigin {
+    #[default]
+    Mon,
+    Local,
+}
+
+impl SessionRuntimeOrigin {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mon => "mon",
+            Self::Local => "local",
+        }
+    }
+
+    fn parse(value: &str) -> Self {
+        match value {
+            "local" => Self::Local,
+            _ => Self::Mon,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -348,13 +378,14 @@ impl Store {
             .foreign_keys(true)
             .journal_mode(SqliteJournalMode::Wal)
             .busy_timeout(Duration::from_secs(5));
-        // SQLite permits only one writer. A multi-connection pool can deadlock
-        // deferred transactions when one connection reads before upgrading to
-        // a write while a background worker has already acquired the writer.
-        // One shared connection preserves deterministic transaction ordering;
-        // WAL still protects crash recovery and external readers.
+        // WAL allows readers to continue while one writer is active. Explicit
+        // transactions use BEGIN IMMEDIATE throughout this crate so writers
+        // queue before doing any reads instead of deadlocking during a deferred
+        // read-to-write upgrade. Keeping several connections prevents a slow
+        // background transaction from starving read-only UI requests.
         let pool = SqlitePoolOptions::new()
-            .max_connections(1)
+            .max_connections(8)
+            .acquire_timeout(Duration::from_secs(5))
             .connect_with(options)
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
@@ -388,7 +419,7 @@ impl Store {
 
     pub async fn expire_pending_interactions(&self) -> Result<u64, StoreError> {
         let now = now_ms();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut count = 0;
         count += sqlx::query(
             "UPDATE permission_requests SET state='expired', resolved_at=? WHERE state='pending'",
@@ -526,7 +557,7 @@ impl Store {
         session_id: SessionId,
         path: &str,
     ) -> Result<WorkspaceStateRecord, StoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         ensure_session(&mut transaction, session_id).await?;
         let row = sqlx::query(
             "SELECT current_path, pending_path, pending_session_id, requested_at, updated_at
@@ -587,7 +618,7 @@ impl Store {
         &self,
         expected_path: &str,
     ) -> Result<WorkspaceStateRecord, StoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query(
             "SELECT current_path, pending_path, pending_session_id, requested_at, updated_at
              FROM workspace_state WHERE singleton = 1",
@@ -637,7 +668,7 @@ impl Store {
         expected_path: &str,
         error: &str,
     ) -> Result<WorkspaceStateRecord, StoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query(
             "SELECT pending_session_id FROM workspace_state
              WHERE singleton = 1 AND pending_path = ?",
@@ -699,6 +730,22 @@ impl Store {
         participants: Vec<Value>,
         environment: Value,
     ) -> Result<SessionRecord, StoreError> {
+        self.create_session_with_runtime_origin(
+            title,
+            participants,
+            environment,
+            SessionRuntimeOrigin::Mon,
+        )
+        .await
+    }
+
+    pub async fn create_session_with_runtime_origin(
+        &self,
+        title: impl Into<String>,
+        participants: Vec<Value>,
+        environment: Value,
+        runtime_origin: SessionRuntimeOrigin,
+    ) -> Result<SessionRecord, StoreError> {
         if !environment.is_object() {
             return Err(StoreError::InvalidValue(
                 "session environment must be an object".to_owned(),
@@ -722,6 +769,7 @@ impl Store {
             title,
             title_source,
             status: SessionStatus::Active,
+            runtime_origin,
             participants,
             environment,
             context_usage: None,
@@ -730,14 +778,15 @@ impl Store {
         };
         sqlx::query(
             "INSERT INTO sessions(
-                id, title, title_source, status, participants_json,
+                id, title, title_source, status, runtime_origin, participants_json,
                 environment_json, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(record.id.to_string())
         .bind(&record.title)
         .bind(&record.title_source)
         .bind(record.status.as_str())
+        .bind(record.runtime_origin.as_str())
         .bind(serde_json::to_string(&record.participants)?)
         .bind(serde_json::to_string(&record.environment)?)
         .bind(record.created_at)
@@ -749,7 +798,7 @@ impl Store {
 
     pub async fn get_session(&self, session_id: SessionId) -> Result<SessionRecord, StoreError> {
         let row = sqlx::query(
-            "SELECT id, title, title_source, status, participants_json, environment_json, context_usage_json,
+            "SELECT id, title, title_source, status, runtime_origin, participants_json, environment_json, context_usage_json,
                     created_at, updated_at FROM sessions WHERE id = ?",
         )
         .bind(session_id.to_string())
@@ -761,7 +810,7 @@ impl Store {
 
     pub async fn list_sessions(&self) -> Result<Vec<SessionRecord>, StoreError> {
         let rows = sqlx::query(
-            "SELECT id, title, title_source, status, participants_json, environment_json, context_usage_json,
+            "SELECT id, title, title_source, status, runtime_origin, participants_json, environment_json, context_usage_json,
                     created_at, updated_at FROM sessions
              WHERE status = 'active' ORDER BY updated_at DESC, id",
         )
@@ -772,9 +821,27 @@ impl Store {
 
     pub async fn list_sessions_including_closed(&self) -> Result<Vec<SessionRecord>, StoreError> {
         let rows = sqlx::query(
-            "SELECT id, title, title_source, status, participants_json, environment_json, context_usage_json,
+            "SELECT id, title, title_source, status, runtime_origin, participants_json, environment_json, context_usage_json,
                     created_at, updated_at FROM sessions ORDER BY updated_at DESC, id",
         )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(session_from_row).collect()
+    }
+
+    pub async fn list_sessions_for_runtime_origin(
+        &self,
+        runtime_origin: SessionRuntimeOrigin,
+        include_closed: bool,
+    ) -> Result<Vec<SessionRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, title, title_source, status, runtime_origin, participants_json, environment_json, context_usage_json,
+                    created_at, updated_at FROM sessions
+             WHERE runtime_origin = ? AND (? OR status = 'active')
+             ORDER BY updated_at DESC, id",
+        )
+        .bind(runtime_origin.as_str())
+        .bind(include_closed)
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(session_from_row).collect()
@@ -792,7 +859,7 @@ impl Store {
             ));
         }
         let title = normalize_session_title(title)?;
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let current_source: Option<String> =
             sqlx::query_scalar("SELECT title_source FROM sessions WHERE id = ?")
                 .bind(session_id.to_string())
@@ -854,7 +921,7 @@ impl Store {
     }
 
     pub async fn delete_session(&self, session_id: SessionId) -> Result<bool, StoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let next_seq: Option<i64> =
             sqlx::query_scalar("SELECT next_seq FROM sessions WHERE id = ?")
                 .bind(session_id.to_string())
@@ -905,7 +972,7 @@ impl Store {
     /// sub-agent is queued/running. Returns true when an active session was
     /// transitioned to closed and therefore must be restored on remote failure.
     pub async fn begin_session_deletion(&self, session_id: SessionId) -> Result<bool, StoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         // Acquire SQLite's writer lock before the idle checks. A concurrent
         // enqueue can then only proceed before this transaction (and be seen)
         // or after the session has been closed (and be rejected).
@@ -992,7 +1059,7 @@ impl Store {
                 "session environment exceeds 16 KiB".to_owned(),
             ));
         }
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         ensure_session(&mut transaction, session_id).await?;
         let current: String =
             sqlx::query_scalar("SELECT environment_json FROM sessions WHERE id = ?")
@@ -1038,7 +1105,7 @@ impl Store {
         &self,
         session_id: SessionId,
     ) -> Result<(), StoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("UPDATE sessions SET updated_at = updated_at WHERE id = ?")
             .bind(session_id.to_string())
             .execute(&mut *transaction)
@@ -1074,7 +1141,7 @@ impl Store {
         let actor_runtime_info = host::sanitize_model_runtime_info(&actor_runtime_info);
         let now = now_ms();
         let session_key = session_id.to_string();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("UPDATE sessions SET updated_at = updated_at WHERE id = ?")
             .bind(&session_key)
             .execute(&mut *transaction)
@@ -1265,7 +1332,7 @@ impl Store {
         participants: Vec<Value>,
     ) -> Result<SessionRecord, StoreError> {
         let now = now_ms();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("UPDATE sessions SET updated_at = updated_at WHERE id = ?")
             .bind(session_id.to_string())
             .execute(&mut *transaction)
@@ -1330,7 +1397,7 @@ impl Store {
         turn_id: TurnId,
         payload: Value,
     ) -> Result<EnqueuedInput, StoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         ensure_session(&mut transaction, session_id).await?;
         let input = InputRecord {
             id: OperationId::new(),
@@ -1378,7 +1445,7 @@ impl Store {
         job_id: Uuid,
         payload: Value,
     ) -> Result<Option<EnqueuedInput>, StoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         ensure_session(&mut transaction, session_id).await?;
         let existing = sqlx::query(
             "SELECT id, session_id, turn_id, payload_json, state, created_at, claimed_at, completed_at
@@ -1465,7 +1532,7 @@ impl Store {
         &self,
         session_id: SessionId,
     ) -> Result<Option<InputRecord>, StoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let handoff_pending: i64 = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM jobs WHERE session_id = ? AND kind = 'assistant.handoff' AND state IN ('scheduled', 'claimed'))",
         )
@@ -1538,7 +1605,7 @@ impl Store {
     }
 
     pub async fn complete_input(&self, input: &InputRecord) -> Result<EventRecord, StoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let completed_at = now_ms();
         sqlx::query("UPDATE session_inputs SET state = 'completed', completed_at = ? WHERE id = ? AND state = 'claimed'")
             .bind(completed_at)
@@ -1563,7 +1630,7 @@ impl Store {
         input: &InputRecord,
         reason: impl Into<String>,
     ) -> Result<EventRecord, StoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let completed_at = now_ms();
         sqlx::query(
             "UPDATE session_inputs SET state = 'interrupted', completed_at = ? WHERE id = ? AND state = 'claimed'",
@@ -1601,7 +1668,7 @@ impl Store {
         event_type: impl Into<String>,
         payload: Value,
     ) -> Result<EventRecord, StoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         ensure_session(&mut transaction, session_id).await?;
         let event = append_event_tx(
             &mut transaction,
@@ -1784,7 +1851,7 @@ impl Store {
         let capability = capability.into();
         let resource = resource.into();
         let created_at = now_ms();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         ensure_session(&mut transaction, session_id).await?;
         sqlx::query(
             "INSERT INTO permission_requests(
@@ -1833,7 +1900,7 @@ impl Store {
         decision_name: &str,
         decision: Value,
     ) -> Result<PermissionMutation, StoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query(
             "SELECT id, session_id, turn_id, operation_id, capability, resource, state,
                     request_json, decision_json, created_at, resolved_at
@@ -1920,7 +1987,7 @@ impl Store {
         questions: Value,
     ) -> Result<QuestionMutation, StoreError> {
         let created_at = now_ms();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         ensure_session(&mut transaction, session_id).await?;
         sqlx::query(
             "INSERT INTO question_requests(id, session_id, turn_id, state, questions_json, created_at)
@@ -1964,7 +2031,7 @@ impl Store {
         questions: Value,
     ) -> Result<Option<QuestionMutation>, StoreError> {
         let created_at = now_ms();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         ensure_session(&mut transaction, session_id).await?;
         let inserted = sqlx::query(
             "INSERT OR IGNORE INTO question_requests(
@@ -2011,7 +2078,7 @@ impl Store {
         id: QuestionRequestId,
         answers: Value,
     ) -> Result<QuestionMutation, StoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query(
             "SELECT id, session_id, turn_id, state, questions_json, answers_json, created_at, resolved_at
              FROM question_requests WHERE id = ?",
@@ -2054,7 +2121,7 @@ impl Store {
         &self,
         id: QuestionRequestId,
     ) -> Result<QuestionMutation, StoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query(
             "SELECT id, session_id, turn_id, state, questions_json, answers_json, created_at, resolved_at
              FROM question_requests WHERE id = ?",
@@ -2151,7 +2218,7 @@ impl Store {
         deadline_at: Option<i64>,
         coordination_batch_id: Option<String>,
     ) -> Result<AgentThreadRecord, StoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         ensure_session(&mut transaction, session_id).await?;
         let now = now_ms();
         let record = AgentThreadRecord {
@@ -2357,7 +2424,7 @@ impl Store {
         error: impl Into<String>,
     ) -> Result<AgentThreadRecord, StoreError> {
         let error = error.into();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let changed = sqlx::query(
             "UPDATE agent_threads SET status = 'failed', error = ?, updated_at = ?, completed_at = ?
              WHERE id = ? AND status IN ('queued', 'running')",
@@ -2389,7 +2456,7 @@ impl Store {
         &self,
         id: AgentId,
     ) -> Result<AgentThreadRecord, StoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let now = now_ms();
         let changed = sqlx::query(
             "UPDATE agent_threads SET status = 'interrupted', updated_at = ?, completed_at = ?
@@ -2424,7 +2491,7 @@ impl Store {
     ) -> Result<AgentThreadRecord, StoreError> {
         let prompt = prompt.into();
         let now = now_ms();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let changed = sqlx::query(
             "UPDATE agent_threads SET status = 'queued', prompt = ?, result_json = NULL, error = NULL,
                     updated_at = ?, started_at = NULL, completed_at = NULL
@@ -2475,7 +2542,7 @@ impl Store {
             created_at: now_ms(),
             consumed_at: None,
         };
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         ensure_session(&mut transaction, session_id).await?;
         sqlx::query(
             "INSERT INTO agent_mailbox(
@@ -2529,7 +2596,7 @@ impl Store {
         if ids.is_empty() {
             return Ok(());
         }
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         for id in ids {
             sqlx::query(
                 "UPDATE agent_mailbox SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL",
@@ -2553,7 +2620,7 @@ impl Store {
         required_status: &str,
     ) -> Result<AgentThreadRecord, StoreError> {
         let now = now_ms();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let changed = sqlx::query(
             "UPDATE agent_threads SET status = ?, context_json = COALESCE(?, context_json),
                     result_json = COALESCE(?, result_json), updated_at = ?,
@@ -2906,6 +2973,7 @@ fn session_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord, Stor
         title: row.try_get("title")?,
         title_source: row.try_get("title_source")?,
         status: SessionStatus::parse(row.try_get("status")?),
+        runtime_origin: SessionRuntimeOrigin::parse(row.try_get("runtime_origin")?),
         participants: serde_json::from_str(&row.try_get::<String, _>("participants_json")?)?,
         environment: serde_json::from_str(&row.try_get::<String, _>("environment_json")?)?,
         context_usage: row
@@ -3079,6 +3147,35 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn file_store_reads_are_not_starved_by_an_active_writer() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(directory.path().join("store.db"))
+            .await
+            .expect("store");
+        store
+            .initialize_workspace_state("/workspace")
+            .await
+            .expect("workspace state");
+
+        let mut writer = store
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .expect("writer transaction");
+        sqlx::query("UPDATE workspace_state SET updated_at = updated_at + 1 WHERE singleton = 1")
+            .execute(&mut *writer)
+            .await
+            .expect("writer update");
+
+        let state = tokio::time::timeout(Duration::from_secs(1), store.workspace_state())
+            .await
+            .expect("read should not wait for the writer")
+            .expect("workspace state");
+        assert_eq!(state.current_path, "/workspace");
+        writer.rollback().await.expect("rollback");
+    }
 
     #[tokio::test]
     async fn input_is_durable_before_it_can_be_claimed() {

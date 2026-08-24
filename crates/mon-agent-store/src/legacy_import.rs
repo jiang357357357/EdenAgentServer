@@ -179,7 +179,7 @@ impl Store {
             legacy.title.trim()
         };
 
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "INSERT INTO sessions(
                 id, title, title_source, status, next_seq, participants_json, created_at, updated_at
@@ -332,7 +332,7 @@ impl Store {
         .bind(&target_session_id)
         .bind(legacy.user_id)
         .bind(i64::try_from(messages.len()).unwrap_or(i64::MAX))
-        .bind(i64::try_from(now_ms()).unwrap_or(i64::MAX))
+        .bind(now_ms())
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -516,7 +516,7 @@ async fn import_memories(
                 "metadata":parse_json(row.try_get::<Option<String>,_>("metadata")?.as_deref()),
             }
         });
-        let mut transaction = store.pool.begin().await?;
+        let mut transaction = store.pool.begin_with("BEGIN IMMEDIATE").await?;
         let target_id: i64 = sqlx::query_scalar(
             "INSERT INTO memories(
                 content, kind, scope_type, scope_key, source_session_id,
@@ -608,7 +608,7 @@ async fn import_work_memories(
             "characterId":character_id,
             "userId":user_id,
         }});
-        let mut transaction = store.pool.begin().await?;
+        let mut transaction = store.pool.begin_with("BEGIN IMMEDIATE").await?;
         let target_id: i64 = sqlx::query_scalar(
             "INSERT INTO memories(
                 content, kind, scope_type, scope_key, source_session_id,
@@ -696,7 +696,7 @@ async fn import_memos(
                 "metadata":parse_json(row.try_get::<Option<String>,_>("metadata")?.as_deref()),
             }
         });
-        let mut transaction = store.pool.begin().await?;
+        let mut transaction = store.pool.begin_with("BEGIN IMMEDIATE").await?;
         let target_id: i64 = sqlx::query_scalar(
             "INSERT INTO memos(
                 title, content, kind, status, priority, remind_at, due_at, repeat_rule,
@@ -773,7 +773,7 @@ async fn import_permission_mode(
         "legacyUserId":row.try_get::<i64,_>("user_id")?,
         "updatedAt":positive_time(row.try_get("updated_at_ms")?),
     });
-    let mut transaction = store.pool.begin().await?;
+    let mut transaction = store.pool.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query(
         "INSERT INTO app_config(key, value_json, updated_at) VALUES ('legacy.permission.mode', ?, ?)
          ON CONFLICT(key) DO NOTHING",
@@ -857,7 +857,7 @@ async fn target_session_for_user(store: &Store, user_id: i64) -> Result<String, 
     }
     let session_id = Uuid::new_v4().to_string();
     let now = now_i64();
-    let mut transaction = store.pool.begin().await?;
+    let mut transaction = store.pool.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query(
         "INSERT INTO sessions(
             id, title, title_source, status, next_seq, participants_json, created_at, updated_at
@@ -976,7 +976,7 @@ async fn import_self_awake(
         } else {
             source_error.or_else(|| Some(format!("legacy status: {source_status}")))
         };
-        let mut transaction = store.pool.begin().await?;
+        let mut transaction = store.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "INSERT INTO jobs(
                 id, kind, session_id, due_at, payload_json, state, attempts,
@@ -1225,7 +1225,7 @@ async fn import_director_runs(
         let error: Option<String> = row.try_get("error")?;
         let created_at = positive_time(row.try_get("created_at_ms")?);
         let updated_at = positive_time(row.try_get("updated_at_ms")?).max(created_at);
-        let mut transaction = store.pool.begin().await?;
+        let mut transaction = store.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut next_seq: i64 = sqlx::query_scalar("SELECT next_seq FROM sessions WHERE id=?")
             .bind(&session_id)
             .fetch_one(&mut *transaction)
@@ -1347,7 +1347,7 @@ async fn import_connectors(
         };
         let created_at = positive_time(row.try_get("created_at_ms")?);
         let updated_at = positive_time(row.try_get("updated_at_ms")?).max(created_at);
-        let mut transaction = store.pool.begin().await?;
+        let mut transaction = store.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "INSERT INTO connectors(
                 id, connector_key, identity_key, display_name, desired_state, runtime_state,
@@ -1474,7 +1474,7 @@ async fn import_skill_installations(
             row.try_get::<Option<String>, _>("manifest_snapshot")?
                 .as_deref(),
         ));
-        let mut transaction = store.pool.begin().await?;
+        let mut transaction = store.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "INSERT INTO legacy_skill_installations(
                 id, legacy_key, skill_name, display_name, description, scope,
@@ -1528,7 +1528,7 @@ fn redact_legacy_secrets(value: Value) -> Value {
             object
                 .into_iter()
                 .map(|(key, value)| {
-                    let normalized = key.to_ascii_lowercase().replace('-', "").replace('_', "");
+                    let normalized = key.to_ascii_lowercase().replace(['-', '_'], "");
                     let value = if [
                         "apikey",
                         "token",
@@ -1568,7 +1568,7 @@ fn redact_source_uri(value: &str) -> String {
 }
 
 fn now_i64() -> i64 {
-    i64::try_from(now_ms()).unwrap_or(i64::MAX)
+    now_ms()
 }
 
 async fn load_legacy_messages(
@@ -1625,11 +1625,7 @@ async fn append_imported_event(
 }
 
 fn positive_time(value: i64) -> i64 {
-    if value > 0 {
-        value
-    } else {
-        i64::try_from(now_ms()).unwrap_or(i64::MAX)
-    }
+    if value > 0 { value } else { now_ms() }
 }
 
 fn legacy_participants(session: &LegacySession) -> Vec<Value> {

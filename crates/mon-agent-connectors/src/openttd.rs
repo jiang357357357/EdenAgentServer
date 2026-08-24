@@ -1,4 +1,3 @@
-use mon_agent_store::{ConnectorRecord, Store};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 #[cfg(target_os = "linux")]
@@ -54,6 +53,26 @@ pub struct Command {
     pub action: String,
     pub payload: Value,
     pub reply: oneshot::Sender<Result<Value, String>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub identity_key: String,
+    pub settings: Value,
+    pub credential_environment: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum Event {
+    Status {
+        state: String,
+        detail: Option<String>,
+    },
+    Published {
+        external_id: String,
+        event_type: String,
+        payload: Value,
+    },
 }
 
 #[derive(Clone)]
@@ -120,17 +139,20 @@ type SharedState = Arc<Mutex<State>>;
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>;
 
 pub async fn run(
-    connector: ConnectorRecord,
-    store: Store,
+    config: Config,
     cancellation: CancellationToken,
     mut commands: mpsc::Receiver<Command>,
+    events: mpsc::Sender<Event>,
 ) -> Result<(), String> {
-    store
-        .report_connector_state(connector.id, "connecting", None)
+    events
+        .send(Event::Status {
+            state: "connecting".to_owned(),
+            detail: None,
+        })
         .await
-        .map_err(|error| error.to_string())?;
-    let instance = load_instance(&connector).await?;
-    let password = password(&connector)?;
+        .map_err(|_| "OpenTTD event receiver closed".to_owned())?;
+    let instance = load_instance(&config).await?;
+    let password = password(&config)?;
     let stream = TcpStream::connect((&*instance.host, instance.admin_port))
         .await
         .map_err(|error| format!("OpenTTD Admin Port connection failed: {error}"))?;
@@ -156,8 +178,7 @@ pub async fn run(
         pending.clone(),
         ready.clone(),
         state_updated.clone(),
-        store.clone(),
-        connector.id,
+        events,
     ));
     loop {
         tokio::select! {
@@ -375,8 +396,7 @@ async fn read_loop(
     pending: Pending,
     ready: Arc<Notify>,
     state_updated: Arc<Notify>,
-    store: Store,
-    connector_id: Uuid,
+    events: mpsc::Sender<Event>,
 ) -> Result<(), String> {
     let result = read_loop_inner(
         &mut reader,
@@ -385,8 +405,7 @@ async fn read_loop(
         pending.clone(),
         ready,
         state_updated,
-        store,
-        connector_id,
+        events,
     )
     .await;
     if let Err(error) = result.as_ref() {
@@ -406,8 +425,7 @@ async fn read_loop_inner(
     pending: Pending,
     ready: Arc<Notify>,
     state_updated: Arc<Notify>,
-    store: Store,
-    connector_id: Uuid,
+    events: mpsc::Sender<Event>,
 ) -> Result<(), String> {
     let mut sequence = 0_u32;
     let mut inbound = Vec::<u8>::new();
@@ -448,10 +466,13 @@ async fn read_loop_inner(
                     .server
                     .insert("admin_protocol_version".to_owned(), protocol_version.into());
             }
-            store
-                .report_connector_state(connector_id, "connected", None)
+            events
+                .send(Event::Status {
+                    state: "connected".to_owned(),
+                    detail: None,
+                })
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|_| "OpenTTD event receiver closed".to_owned())?;
             ready.notify_one();
             poll_state(&writer).await?;
             probe_gameplay_bridge(&writer, &state).await?;
@@ -476,15 +497,14 @@ async fn read_loop_inner(
                 probe_gameplay_bridge(&writer, &state).await?;
             }
             if actionable {
-                store
-                    .publish_connector_event(
-                        connector_id,
-                        &format!("openttd:{}", Uuid::now_v7()),
-                        &event_type,
-                        event_payload,
-                    )
+                events
+                    .send(Event::Published {
+                        external_id: format!("openttd:{}", Uuid::now_v7()),
+                        event_type,
+                        payload: event_payload,
+                    })
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|_| "OpenTTD event receiver closed".to_owned())?;
             }
         }
     }
@@ -757,21 +777,21 @@ fn snapshot(state: &State) -> Value {
     })
 }
 
-async fn load_instance(connector: &ConnectorRecord) -> Result<Instance, String> {
-    let configured_host = connector.settings.get("host").and_then(Value::as_str);
-    let configured_admin_port = connector.settings.get("adminPort").and_then(Value::as_u64);
+async fn load_instance(config: &Config) -> Result<Instance, String> {
+    let configured_host = config.settings.get("host").and_then(Value::as_str);
+    let configured_admin_port = config.settings.get("adminPort").and_then(Value::as_u64);
     if configured_host.is_some() || configured_admin_port.is_some() {
         let host = configured_host.ok_or("host is required when adminPort is configured")?;
         let admin_port =
             configured_admin_port.ok_or("adminPort is required when host is configured")?;
-        let game_port = connector
+        let game_port = config
             .settings
             .get("gamePort")
             .and_then(Value::as_u64)
             .unwrap_or(3979);
         return validate_instance(
             Instance {
-                instance_id: connector.identity_key.clone(),
+                instance_id: config.identity_key.clone(),
                 host: host.to_owned(),
                 game_port: u16::try_from(game_port)
                     .map_err(|_| "gamePort is out of range".to_owned())?,
@@ -788,10 +808,10 @@ async fn load_instance(connector: &ConnectorRecord) -> Result<Instance, String> 
             false,
         );
     }
-    let path = connector
+    let path = config
         .settings
         .get("instanceRegistry")
-        .or_else(|| connector.settings.get("instance_registry"))
+        .or_else(|| config.settings.get("instance_registry"))
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .unwrap_or_else(default_registry);
@@ -912,7 +932,7 @@ fn validate_managed_process_identity(instance: &Instance) -> Result<(), String> 
             .split(|byte| *byte == 0)
             .filter(|argument| !argument.is_empty())
             .map(std::ffi::OsStr::from_bytes)
-            .map(|argument| Path::new(argument))
+            .map(Path::new)
             .filter(|argument| argument.is_absolute())
             .filter_map(|argument| argument.canonicalize().ok())
             .any(|argument| argument == launch_target);
@@ -938,7 +958,7 @@ fn linux_process_start_ticks(pid: i64) -> Result<String, String> {
 }
 
 #[cfg(target_os = "linux")]
-fn absolute_path<'a>(value: Option<&'a Path>, label: &str) -> Result<PathBuf, String> {
+fn absolute_path(value: Option<&Path>, label: &str) -> Result<PathBuf, String> {
     let value = value
         .filter(|path| path.is_absolute())
         .ok_or_else(|| format!("{label} must be absolute"))?;
@@ -1004,20 +1024,24 @@ fn openttd_password_environment(identity_key: &str) -> Result<String, String> {
     Ok(format!("MON_CONNECTOR_OPENTTD_{identity}"))
 }
 
-fn openttd_password_variable(connector: &ConnectorRecord) -> Result<String, String> {
-    let default_variable = openttd_password_environment(&connector.identity_key)?;
-    Ok(connector
+fn openttd_password_variable(config: &Config) -> Result<String, String> {
+    let default_variable = config
+        .credential_environment
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(|| openttd_password_environment(&config.identity_key))?;
+    Ok(config
         .settings
         .get("passwordEnv")
-        .or_else(|| connector.settings.get("password_env"))
+        .or_else(|| config.settings.get("password_env"))
         .and_then(Value::as_str)
         .filter(|variable| !variable.trim().is_empty())
         .unwrap_or(&default_variable)
         .to_owned())
 }
 
-fn password(connector: &ConnectorRecord) -> Result<String, String> {
-    let variable = openttd_password_variable(connector)?;
+fn password(config: &Config) -> Result<String, String> {
+    let variable = openttd_password_variable(config)?;
     std::env::var(&variable)
         .map_err(|_| format!("missing OpenTTD Admin Port credential: {variable}"))
         .and_then(|value| {
@@ -1092,18 +1116,11 @@ impl<'a> PacketReader<'a> {
 mod tests {
     use super::*;
 
-    fn connector(identity_key: &str, settings: Value) -> ConnectorRecord {
-        ConnectorRecord {
-            id: Uuid::now_v7(),
-            connector_key: "openttd".to_owned(),
+    fn connector(identity_key: &str, settings: Value) -> Config {
+        Config {
             identity_key: identity_key.to_owned(),
-            display_name: "OpenTTD".to_owned(),
-            desired_state: "connected".to_owned(),
-            runtime_state: "offline".to_owned(),
             settings,
-            last_error: None,
-            created_at: 0,
-            updated_at: 0,
+            credential_environment: None,
         }
     }
 

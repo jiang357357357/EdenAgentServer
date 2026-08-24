@@ -1,4 +1,4 @@
-use mon_agent_connector_package::PackageCatalog;
+use mon_agent_connector_package::{LoadedPackage, PackageCatalog};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -34,6 +34,7 @@ pub struct ConnectorManifest {
 pub struct ManifestCatalog {
     root: Arc<PathBuf>,
     packages: Option<PackageCatalog>,
+    plugin_packages: Arc<RwLock<BTreeMap<String, Vec<LoadedPackage>>>>,
     state: Arc<RwLock<CatalogState>>,
 }
 
@@ -45,19 +46,23 @@ struct CatalogState {
 
 impl ManifestCatalog {
     pub fn load(root: PathBuf) -> Result<Self, String> {
-        let state = read_catalog(&root, None)?;
+        let plugin_packages = BTreeMap::new();
+        let state = read_catalog(&root, None, &plugin_packages)?;
         Ok(Self {
             root: Arc::new(root),
             packages: None,
+            plugin_packages: Arc::new(RwLock::new(plugin_packages)),
             state: Arc::new(RwLock::new(state)),
         })
     }
 
     pub fn load_with_packages(root: PathBuf, packages: PackageCatalog) -> Result<Self, String> {
-        let state = read_catalog(&root, Some(&packages))?;
+        let plugin_packages = BTreeMap::new();
+        let state = read_catalog(&root, Some(&packages), &plugin_packages)?;
         Ok(Self {
             root: Arc::new(root),
             packages: Some(packages),
+            plugin_packages: Arc::new(RwLock::new(plugin_packages)),
             state: Arc::new(RwLock::new(state)),
         })
     }
@@ -66,7 +71,12 @@ impl ManifestCatalog {
         if let Some(packages) = &self.packages {
             packages.refresh().map_err(|error| error.to_string())?;
         }
-        let refreshed = read_catalog(&self.root, self.packages.as_ref())?;
+        let plugin_packages = self
+            .plugin_packages
+            .read()
+            .unwrap_or_else(|value| value.into_inner())
+            .clone();
+        let refreshed = read_catalog(&self.root, self.packages.as_ref(), &plugin_packages)?;
         let mut current = self
             .state
             .write()
@@ -76,6 +86,81 @@ impl ManifestCatalog {
         }
         *current = refreshed;
         Ok(true)
+    }
+
+    pub fn set_plugin_packages(
+        &self,
+        plugin_id: &str,
+        packages: Vec<LoadedPackage>,
+    ) -> Result<bool, String> {
+        if plugin_id.trim().is_empty() {
+            return Err("plugin ID cannot be empty".to_owned());
+        }
+        let mut plugin_packages = self
+            .plugin_packages
+            .read()
+            .unwrap_or_else(|value| value.into_inner())
+            .clone();
+        plugin_packages.insert(plugin_id.to_owned(), packages);
+        self.publish_plugin_packages(plugin_packages)
+    }
+
+    pub fn remove_plugin_packages(&self, plugin_id: &str) -> Result<bool, String> {
+        let mut plugin_packages = self
+            .plugin_packages
+            .read()
+            .unwrap_or_else(|value| value.into_inner())
+            .clone();
+        if plugin_packages.remove(plugin_id).is_none() {
+            return Ok(false);
+        }
+        self.publish_plugin_packages(plugin_packages)
+    }
+
+    fn publish_plugin_packages(
+        &self,
+        plugin_packages: BTreeMap<String, Vec<LoadedPackage>>,
+    ) -> Result<bool, String> {
+        let refreshed = read_catalog(&self.root, self.packages.as_ref(), &plugin_packages)?;
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|value| value.into_inner());
+        let changed = *state != refreshed;
+        *state = refreshed;
+        *self
+            .plugin_packages
+            .write()
+            .unwrap_or_else(|value| value.into_inner()) = plugin_packages;
+        Ok(changed)
+    }
+
+    pub fn package(&self, key: &str) -> Option<LoadedPackage> {
+        self.plugin_packages
+            .read()
+            .unwrap_or_else(|value| value.into_inner())
+            .values()
+            .flatten()
+            .find(|package| package.manifest.id == key)
+            .cloned()
+            .or_else(|| {
+                self.packages
+                    .as_ref()
+                    .and_then(|packages| packages.get(key))
+            })
+    }
+
+    pub fn plugin_owner(&self, key: &str) -> Option<String> {
+        self.plugin_packages
+            .read()
+            .unwrap_or_else(|value| value.into_inner())
+            .iter()
+            .find_map(|(plugin_id, packages)| {
+                packages
+                    .iter()
+                    .any(|package| package.manifest.id == key)
+                    .then(|| plugin_id.clone())
+            })
     }
 
     pub fn contains(&self, key: &str) -> bool {
@@ -314,7 +399,11 @@ fn capability(id: &str, kind: &str, direction: &str, value: &Value) -> Value {
     })
 }
 
-fn read_catalog(root: &Path, packages: Option<&PackageCatalog>) -> Result<CatalogState, String> {
+fn read_catalog(
+    root: &Path,
+    packages: Option<&PackageCatalog>,
+    plugin_packages: &BTreeMap<String, Vec<LoadedPackage>>,
+) -> Result<CatalogState, String> {
     let mut paths = fs::read_dir(root)
         .map_err(|error| {
             format!(
@@ -330,6 +419,7 @@ fn read_catalog(root: &Path, packages: Option<&PackageCatalog>) -> Result<Catalo
         .collect::<Vec<_>>();
     paths.sort();
     let mut manifests = BTreeMap::new();
+    let mut standalone_package_revisions = BTreeMap::new();
     let mut digest = Sha256::new();
     for path in paths {
         let bytes = fs::read(&path).map_err(|error| error.to_string())?;
@@ -372,11 +462,47 @@ fn read_catalog(root: &Path, packages: Option<&PackageCatalog>) -> Result<Catalo
                 queries: package.manifest.queries.clone(),
                 actions: package.manifest.actions.clone(),
             };
-            manifests.insert(manifest.key.clone(), manifest);
+            if manifests.insert(manifest.key.clone(), manifest).is_some() {
+                return Err(format!(
+                    "duplicate connector package ID: {}",
+                    package.manifest.id
+                ));
+            }
+            standalone_package_revisions
+                .insert(package.manifest.id.clone(), package.revision.clone());
         }
     }
-    if manifests.is_empty() {
-        return Err("no connector manifests were found".to_owned());
+    digest.update(b"plugin-connector-packages");
+    for (plugin_id, packages) in plugin_packages {
+        digest.update(plugin_id.as_bytes());
+        for package in packages {
+            digest.update(package.manifest.id.as_bytes());
+            digest.update(package.revision.as_bytes());
+            let manifest = ConnectorManifest {
+                schema_version: package.manifest.schema_version,
+                key: package.manifest.id.clone(),
+                name: package.manifest.name.clone(),
+                description: package.manifest.description.clone(),
+                icon: package.manifest.icon.clone(),
+                version: package.manifest.version.clone(),
+                runtime: "external-worker".to_owned(),
+                settings_schema: package.manifest.settings_schema.clone(),
+                events: package.manifest.events.clone(),
+                queries: package.manifest.queries.clone(),
+                actions: package.manifest.actions.clone(),
+            };
+            if manifests.insert(manifest.key.clone(), manifest).is_some() {
+                let same_compatibility_package = standalone_package_revisions
+                    .remove(&package.manifest.id)
+                    .is_some_and(|revision| revision == package.revision);
+                if !same_compatibility_package {
+                    return Err(format!(
+                        "plugin {plugin_id} declares duplicate connector package ID: {}",
+                        package.manifest.id
+                    ));
+                }
+            }
+        }
     }
     let revision = digest
         .finalize()
@@ -552,6 +678,15 @@ mod tests {
     }
 
     #[test]
+    fn empty_catalog_starts_closed_and_accepts_later_plugin_packages() {
+        let root = tempfile::tempdir().expect("manifest root");
+        let catalog = ManifestCatalog::load(root.path().to_owned()).expect("empty catalog");
+        assert!(!catalog.contains("unknown"));
+        assert!(catalog.validate_settings("unknown", &json!({})).is_err());
+        assert!(!catalog.refresh().expect("stable empty refresh"));
+    }
+
+    #[test]
     fn catalog_reloads_valid_manifests_and_keeps_unknown_types_closed() {
         let root = tempfile::tempdir().expect("manifest root");
         let path = root.path().join("demo.json");
@@ -583,5 +718,122 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&manifest("2")).expect("json")).expect("update");
         assert!(catalog.refresh().expect("refresh"));
         assert!(!catalog.refresh().expect("stable refresh"));
+    }
+
+    #[test]
+    fn plugin_connector_packages_are_atomic_and_collision_checked() {
+        let root = tempfile::tempdir().expect("manifest root");
+        fs::write(
+            root.path().join("demo.json"),
+            serde_json::to_vec(&json!({
+                "schemaVersion":1,
+                "key":"demo",
+                "name":"Demo",
+                "description":"Demo connector",
+                "icon":"cable",
+                "version":"1",
+                "runtime":"test",
+                "settingsSchema":{"type":"object","additionalProperties":false},
+                "events":{},"queries":{},"actions":{}
+            }))
+            .expect("base manifest"),
+        )
+        .expect("base manifest");
+        let catalog = ManifestCatalog::load(root.path().to_owned()).expect("catalog");
+        let package_root = tempfile::tempdir().expect("package");
+        fs::write(package_root.path().join("worker"), b"worker").expect("worker");
+        let write_package = |id: &str| {
+            fs::write(
+                package_root.path().join("connector.json"),
+                serde_json::to_vec(&json!({
+                    "schemaVersion":1,
+                    "id":id,
+                    "name":"Plugin Worker",
+                    "description":"plugin worker",
+                    "version":"1.0.0",
+                    "protocolVersion":1,
+                    "icon":"cable",
+                    "entrypoints":{
+                        mon_agent_connector_package::current_platform():{
+                            "path":"worker","args":[]
+                        }
+                    },
+                    "settingsSchema":{"type":"object","properties":{},"additionalProperties":false},
+                    "events":{},"queries":{},"actions":{}
+                }))
+                .expect("package manifest"),
+            )
+            .expect("package manifest");
+            LoadedPackage::load(
+                package_root.path(),
+                mon_agent_connector_package::LoadPolicy::Development,
+            )
+            .expect("loaded package")
+        };
+
+        let package = write_package("plugin-worker");
+        assert!(
+            catalog
+                .set_plugin_packages("mon.plugin", vec![package])
+                .expect("plugin package")
+        );
+        assert!(catalog.contains("plugin-worker"));
+        assert!(catalog.package("plugin-worker").is_some());
+
+        let collision = write_package("demo");
+        assert!(
+            catalog
+                .set_plugin_packages("mon.collision", vec![collision])
+                .is_err()
+        );
+        assert!(catalog.contains("plugin-worker"));
+        assert!(
+            catalog
+                .remove_plugin_packages("mon.plugin")
+                .expect("remove")
+        );
+        assert!(!catalog.contains("plugin-worker"));
+    }
+
+    #[test]
+    fn identical_plugin_bundle_can_shadow_its_standalone_compatibility_package() {
+        let manifests = tempfile::tempdir().expect("manifest root");
+        let packages_root = tempfile::tempdir().expect("packages root");
+        let package_root = packages_root.path().join("dual");
+        fs::create_dir(&package_root).expect("package root");
+        fs::write(package_root.join("worker"), b"worker").expect("worker");
+        fs::write(
+            package_root.join("connector.json"),
+            serde_json::to_vec(&json!({
+                "schemaVersion":1,"id":"dual","name":"Dual","description":"dual bundle",
+                "version":"1.0.0","protocolVersion":1,"icon":"cable",
+                "entrypoints":{mon_agent_connector_package::current_platform():{"path":"worker","args":[]}},
+                "settingsSchema":{"type":"object","additionalProperties":false},
+                "events":{},"queries":{},"actions":{}
+            }))
+            .expect("manifest"),
+        )
+        .expect("manifest");
+        let packages = PackageCatalog::load(
+            packages_root.path().to_path_buf(),
+            mon_agent_connector_package::LoadPolicy::Development,
+        )
+        .expect("package catalog");
+        let catalog = ManifestCatalog::load_with_packages(manifests.path().to_path_buf(), packages)
+            .expect("manifest catalog");
+        let same = LoadedPackage::load(
+            &package_root,
+            mon_agent_connector_package::LoadPolicy::Development,
+        )
+        .expect("same package");
+        assert!(
+            catalog
+                .set_plugin_packages("official.dual", vec![same])
+                .expect("identical plugin overlay")
+        );
+        assert_eq!(
+            catalog.plugin_owner("dual").as_deref(),
+            Some("official.dual")
+        );
     }
 }

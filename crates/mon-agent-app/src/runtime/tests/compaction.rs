@@ -90,7 +90,7 @@ async fn manual_compaction_failure_interrupts_the_input_without_a_false_completi
         .compact(session.id, "keep project paths".to_owned())
         .await
         .expect("queue compaction");
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(TEST_EVENT_TIMEOUT, async {
         loop {
             let event = notifications.recv().await.expect("runtime event");
             if event.turn_id == Some(input.input.turn_id) && event.event_type == "input.interrupted"

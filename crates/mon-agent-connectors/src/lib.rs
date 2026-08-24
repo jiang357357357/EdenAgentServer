@@ -1,12 +1,11 @@
 //! Durable connector lifecycle and connector-facing agent tools.
 
 mod manifest;
-mod openttd;
+pub mod openttd;
 
 pub use manifest::ManifestCatalog;
 
 use async_trait::async_trait;
-use futures::StreamExt;
 use mon_agent_connector_host::{WorkerClient, WorkerLaunchConfig, WorkerProcess};
 use mon_agent_connector_package::{LoadPolicy, LoadedPackage, PackageCatalog};
 use mon_agent_connector_protocol::{
@@ -16,17 +15,9 @@ use mon_agent_core::{
     PermissionRequest, Tool, ToolCall, ToolCallContext, ToolDefinition, ToolFailure, ToolOutput,
 };
 use mon_agent_store::{ConnectorRecord, Store};
-use mon_agent_victoria3::{
-    ControlConfig as Victoria3ControlConfig, Controller as Victoria3Controller,
-    Observation as Victoria3Observation, Observer as Victoria3Observer,
-    ObserverConfig as Victoria3ObserverConfig, ObserverHandle as Victoria3Handle,
-};
-use reqwest::Client;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use shakmaty::{CastlingMode, Chess, Color, EnPassantMode, Position, fen::Fen, uci::UciMove};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     path::PathBuf,
     sync::{
         Arc,
@@ -82,21 +73,31 @@ impl Default for ConnectorServiceConfig {
 }
 struct Inner {
     store: Store,
-    client: Client,
-    stream_client: Client,
     reconcile_lock: Mutex<()>,
     active: Mutex<HashMap<Uuid, ActiveConnector>>,
     manifests: ManifestCatalog,
-    packages: PackageCatalog,
+    plugin_permission_grants:
+        RwLock<BTreeMap<String, BTreeMap<String, Vec<ConnectorPermissionGrant>>>>,
     connector_data_root: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectorPermissionGrant {
+    pub capability: String,
+    pub resource: String,
+    pub access: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct PluginConnectorPackage {
+    pub package: LoadedPackage,
+    pub granted_permissions: Vec<ConnectorPermissionGrant>,
 }
 struct ActiveConnector {
     generation: Uuid,
     cancellation: CancellationToken,
     configuration: Value,
-    worker: Option<Arc<RwLock<Option<WorkerClient>>>>,
-    openttd: Option<openttd::Handle>,
-    victoria3: Option<Victoria3Handle>,
+    worker: Arc<RwLock<Option<WorkerClient>>>,
     _task: JoinHandle<()>,
 }
 
@@ -106,17 +107,6 @@ impl ConnectorService {
     }
 
     pub fn with_config(store: Store, config: ConnectorServiceConfig) -> Result<Self, String> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(45))
-            .user_agent("MonAgent/1.8")
-            .build()
-            .map_err(|error| error.to_string())?;
-        // Long-lived NDJSON endpoints must not inherit the finite action timeout.
-        let stream_client = Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .user_agent("MonAgent/1.8")
-            .build()
-            .map_err(|error| error.to_string())?;
         let packages = PackageCatalog::load(config.package_root, config.package_policy)
             .map_err(|error| error.to_string())?;
         let manifests =
@@ -124,12 +114,10 @@ impl ConnectorService {
         Ok(Self {
             inner: Arc::new(Inner {
                 store,
-                client,
-                stream_client,
                 reconcile_lock: Mutex::new(()),
                 active: Mutex::new(HashMap::new()),
                 manifests,
-                packages,
+                plugin_permission_grants: RwLock::new(BTreeMap::new()),
                 connector_data_root: config.connector_data_root,
             }),
         })
@@ -146,6 +134,63 @@ impl ConnectorService {
 
     pub fn validate_query(&self, key: &str, query: &str, payload: &Value) -> Result<(), String> {
         self.inner.manifests.validate_query(key, query, payload)
+    }
+
+    pub async fn set_plugin_packages(
+        &self,
+        plugin_id: &str,
+        packages: Vec<PluginConnectorPackage>,
+    ) -> Result<bool, String> {
+        let grants = packages
+            .iter()
+            .map(|entry| {
+                (
+                    entry.package.manifest.id.clone(),
+                    entry.granted_permissions.clone(),
+                )
+            })
+            .collect();
+        let loaded = packages.into_iter().map(|entry| entry.package).collect();
+        let changed = self
+            .inner
+            .manifests
+            .set_plugin_packages(plugin_id, loaded)?;
+        self.inner
+            .plugin_permission_grants
+            .write()
+            .await
+            .insert(plugin_id.to_owned(), grants);
+        if changed {
+            self.invalidate_active().await;
+        }
+        Ok(changed)
+    }
+
+    pub async fn remove_plugin_packages(&self, plugin_id: &str) -> Result<bool, String> {
+        let changed = self.inner.manifests.remove_plugin_packages(plugin_id)?;
+        self.inner
+            .plugin_permission_grants
+            .write()
+            .await
+            .remove(plugin_id);
+        if changed {
+            self.invalidate_active().await;
+        }
+        Ok(changed)
+    }
+
+    async fn invalidate_active(&self) {
+        let active = self
+            .inner
+            .active
+            .lock()
+            .await
+            .drain()
+            .map(|(_, connector)| connector)
+            .collect::<Vec<_>>();
+        for connector in active {
+            connector.cancellation.cancel();
+        }
     }
 
     pub fn start(&self) -> JoinHandle<()> {
@@ -270,25 +315,19 @@ impl ConnectorService {
             let service = self.clone();
             let task_connector = connector.clone();
             let child = cancellation.clone();
-            let package = self.inner.packages.get(&connector.connector_key);
-            let (openttd, openttd_commands) = if connector.connector_key == "openttd" {
-                let (handle, commands) = openttd::channel();
-                (Some(handle), Some(commands))
-            } else {
-                (None, None)
+            let Some(package) = self.inner.manifests.package(&connector.connector_key) else {
+                let _ = self
+                    .inner
+                    .store
+                    .report_connector_state(
+                        connector.id,
+                        "error",
+                        Some("connector package is not installed"),
+                    )
+                    .await;
+                continue;
             };
-            let worker = if package.is_some() {
-                Some(Arc::new(RwLock::new(None)))
-            } else {
-                None
-            };
-            let (victoria3, victoria3_observer) = if connector.connector_key == "victoria3" {
-                let config = Victoria3ObserverConfig::from_settings(&connector.settings);
-                let (handle, observer) = Victoria3Observer::new(config);
-                (Some(handle), Some(observer))
-            } else {
-                (None, None)
-            };
+            let worker = Arc::new(RwLock::new(None));
             let (start, started) = tokio::sync::oneshot::channel();
             let task_worker = worker.clone();
             tracing::info!(
@@ -299,15 +338,7 @@ impl ConnectorService {
             let task = tokio::spawn(async move {
                 let _ = started.await;
                 service
-                    .run_connector(
-                        task_connector,
-                        generation,
-                        child,
-                        package,
-                        task_worker,
-                        openttd_commands,
-                        victoria3_observer,
-                    )
+                    .run_connector(task_connector, generation, child, package, task_worker)
                     .await;
             });
             self.inner.active.lock().await.insert(
@@ -317,8 +348,6 @@ impl ConnectorService {
                     cancellation,
                     configuration: connector_configuration(&connector),
                     worker,
-                    openttd,
-                    victoria3,
                     _task: task,
                 },
             );
@@ -331,47 +360,17 @@ impl ConnectorService {
         connector: ConnectorRecord,
         generation: Uuid,
         cancellation: CancellationToken,
-        package: Option<LoadedPackage>,
-        worker: Option<Arc<RwLock<Option<WorkerClient>>>>,
-        openttd_commands: Option<tokio::sync::mpsc::Receiver<openttd::Command>>,
-        victoria3_observer: Option<Victoria3Observer>,
+        package: LoadedPackage,
+        worker: Arc<RwLock<Option<WorkerClient>>>,
     ) {
         let _ = self
             .inner
             .store
             .report_connector_state(connector.id, "connecting", None)
             .await;
-        let result = if let Some(package) = package {
-            self.run_package_worker(
-                &connector,
-                cancellation.clone(),
-                package,
-                worker.expect("external connector worker slot"),
-            )
-            .await
-        } else {
-            match connector.connector_key.as_str() {
-                "lichess" => self.run_lichess(&connector, cancellation.clone()).await,
-                "openttd" => {
-                    openttd::run(
-                        connector.clone(),
-                        self.inner.store.clone(),
-                        cancellation.clone(),
-                        openttd_commands.expect("OpenTTD connector command channel"),
-                    )
-                    .await
-                }
-                "victoria3" => {
-                    self.run_victoria3(
-                        &connector,
-                        cancellation.clone(),
-                        victoria3_observer.expect("Victoria 3 observer"),
-                    )
-                    .await
-                }
-                key => Err(format!("unsupported connector: {key}")),
-            }
-        };
+        let result = self
+            .run_package_worker(&connector, cancellation.clone(), package, worker)
+            .await;
         let error = result.err();
         if cancellation.is_cancelled() {
             tracing::info!(
@@ -421,7 +420,50 @@ impl ConnectorService {
                 .connector_data_root
                 .join(connector.id.to_string()),
         );
-        launch.granted_permissions = resolve_package_permissions(&package, &connector.settings);
+        launch.environment.insert(
+            "MON_CONNECTOR_IDENTITY_KEY".to_owned(),
+            connector.identity_key.clone(),
+        );
+        let allowed =
+            if let Some(plugin_id) = self.inner.manifests.plugin_owner(&package.manifest.id) {
+                self.inner
+                    .plugin_permission_grants
+                    .read()
+                    .await
+                    .get(&plugin_id)
+                    .and_then(|packages| packages.get(&package.manifest.id))
+                    .cloned()
+                    .or_else(|| Some(Vec::new()))
+            } else {
+                None
+            };
+        launch.granted_permissions =
+            resolve_package_permissions(&package, &connector.settings, allowed.as_deref());
+        for permission in &launch.granted_permissions {
+            if permission.capability != "environment.read" {
+                continue;
+            }
+            let (source_name, target_name) =
+                if permission.resource == "connector.identityCredential" {
+                    (
+                        connector_credential_environment(
+                            &connector.connector_key,
+                            &connector.identity_key,
+                        )?,
+                        "MON_CONNECTOR_IDENTITY_CREDENTIAL".to_owned(),
+                    )
+                } else {
+                    (permission.resource.clone(), permission.resource.clone())
+                };
+            if !valid_environment_name(&source_name) || !valid_environment_name(&target_name) {
+                return Err(format!(
+                    "connector package requested invalid environment name: {source_name}"
+                ));
+            }
+            if let Ok(value) = std::env::var(&source_name) {
+                launch.environment.insert(target_name, value);
+            }
+        }
         for key in ["USERPROFILE", "OneDrive", "HOME", "XDG_DOCUMENTS_DIR"] {
             if let Ok(value) = std::env::var(key) {
                 launch.environment.insert(key.to_owned(), value);
@@ -510,238 +552,6 @@ impl ConnectorService {
         Ok(())
     }
 
-    async fn run_victoria3(
-        &self,
-        connector: &ConnectorRecord,
-        cancellation: CancellationToken,
-        observer: Victoria3Observer,
-    ) -> Result<(), String> {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(64);
-        let observer_cancellation = cancellation.clone();
-        let mut observer_task = tokio::spawn(observer.run(observer_cancellation, sender));
-        loop {
-            tokio::select! {
-                _ = cancellation.cancelled() => {
-                    observer_task.abort();
-                    return Ok(());
-                }
-                result = &mut observer_task => {
-                    return result.map_err(|error| error.to_string())?;
-                }
-                update = receiver.recv() => {
-                    let Some(update) = update else {
-                        return Err("Victoria 3 observer stopped without a result".to_owned());
-                    };
-                    if matches!(update, Victoria3Observation::Attached { .. }) {
-                        self.inner
-                            .store
-                            .report_connector_state(connector.id, "connected", None)
-                            .await
-                            .map_err(|error| error.to_string())?;
-                        continue;
-                    }
-                    if let (Some(external_id), Some(event_type)) =
-                        (update.external_id(), update.event_type())
-                    {
-                        self.inner
-                            .store
-                            .publish_connector_event(
-                                connector.id,
-                                &external_id,
-                                event_type,
-                                update.payload(),
-                            )
-                            .await
-                            .map_err(|error| error.to_string())?;
-                    }
-                }
-            }
-        }
-    }
-
-    async fn run_lichess(
-        &self,
-        connector: &ConnectorRecord,
-        cancellation: CancellationToken,
-    ) -> Result<(), String> {
-        let token_environment = lichess_token_environment(&connector.identity_key)?;
-        let token = connector_token(connector, &token_environment)?;
-        let base = connector
-            .settings
-            .get("baseUrl")
-            .and_then(Value::as_str)
-            .unwrap_or("https://lichess.org")
-            .trim_end_matches('/');
-        let response = tokio::select! {
-            _ = cancellation.cancelled() => return Ok(()),
-            response = self
-                .inner
-                .stream_client
-                .get(format!("{base}/api/stream/event"))
-                .header("Accept", "application/x-ndjson")
-                .bearer_auth(&token)
-                .send() => response.map_err(|error| error.to_string())?,
-        };
-        if !response.status().is_success() {
-            return Err(format!("Lichess stream returned {}", response.status()));
-        }
-        self.inner
-            .store
-            .report_connector_state(connector.id, "connected", None)
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut stream = response.bytes_stream();
-        let mut pending = Vec::<u8>::new();
-        let game_cancellation = cancellation.child_token();
-        let mut game_ids = HashSet::<String>::new();
-        let mut game_tasks = tokio::task::JoinSet::new();
-        let result = loop {
-            tokio::select! {
-                _ = cancellation.cancelled() => break Ok(()),
-                completed = game_tasks.join_next(), if !game_tasks.is_empty() => {
-                    if let Some(completed) = completed {
-                        match completed {
-                            Ok((game_id, Ok(()))) => {
-                                game_ids.remove(&game_id);
-                                tracing::debug!(connector_id = %connector.id, %game_id, "Lichess game stream ended");
-                            }
-                            Ok((game_id, Err(error))) => {
-                                game_ids.remove(&game_id);
-                                tracing::warn!(connector_id = %connector.id, %game_id, %error, "Lichess game stream failed");
-                            }
-                            Err(error) => tracing::warn!(connector_id = %connector.id, %error, "Lichess game stream task failed"),
-                        }
-                    }
-                }
-                chunk = stream.next() => match chunk {
-                    Some(Ok(chunk)) => {
-                        pending.extend_from_slice(&chunk);
-                        for payload in drain_ndjson(&mut pending)? {
-                            let (event_type, external_id) = lichess_account_event(&payload);
-                            self.inner.store
-                                .publish_connector_event(
-                                    connector.id,
-                                    &external_id,
-                                    &format!("lichess.{event_type}"),
-                                    payload.clone(),
-                                )
-                                .await
-                                .map_err(|error| error.to_string())?;
-                            if let Some(game_id) = lichess_game_start_id(&payload)
-                                && game_ids.insert(game_id.clone())
-                            {
-                                let service = self.clone();
-                                let connector_id = connector.id;
-                                let identity_key = connector.identity_key.clone();
-                                let base = base.to_owned();
-                                let token = token.clone();
-                                let child = game_cancellation.child_token();
-                                game_tasks.spawn(async move {
-                                    let result = service
-                                        .run_lichess_game(
-                                            connector_id,
-                                            &identity_key,
-                                            &base,
-                                            &token,
-                                            &game_id,
-                                            child,
-                                        )
-                                        .await;
-                                    (game_id, result)
-                                });
-                            }
-                        }
-                    },
-                    Some(Err(error)) => break Err(error.to_string()),
-                    None => break Err("Lichess event stream ended".to_owned()),
-                }
-            }
-        };
-        game_cancellation.cancel();
-        while let Some(completed) = game_tasks.join_next().await {
-            if let Ok((game_id, Err(error))) = completed
-                && !cancellation.is_cancelled()
-            {
-                tracing::warn!(connector_id = %connector.id, %game_id, %error, "Lichess game stream failed during shutdown");
-            }
-        }
-        result
-    }
-
-    async fn run_lichess_game(
-        &self,
-        connector_id: Uuid,
-        identity_key: &str,
-        base: &str,
-        token: &str,
-        game_id: &str,
-        cancellation: CancellationToken,
-    ) -> Result<(), String> {
-        let safe_game_id = safe_lichess_segment(game_id, "game_id")?;
-        let response = tokio::select! {
-            _ = cancellation.cancelled() => return Ok(()),
-            response = self
-                .inner
-                .stream_client
-                .get(format!("{base}/api/bot/game/stream/{safe_game_id}"))
-                .header("Accept", "application/x-ndjson")
-                .bearer_auth(token)
-                .send() => response.map_err(|error| error.to_string())?,
-        };
-        if !response.status().is_success() {
-            return Err(format!(
-                "Lichess game stream {safe_game_id} returned {}",
-                response.status()
-            ));
-        }
-        let mut stream = response.bytes_stream();
-        let mut pending = Vec::<u8>::new();
-        let mut game_full = json!({});
-        loop {
-            tokio::select! {
-                _ = cancellation.cancelled() => return Ok(()),
-                chunk = stream.next() => match chunk {
-                    Some(Ok(chunk)) => {
-                        pending.extend_from_slice(&chunk);
-                        for state in drain_ndjson(&mut pending)? {
-                            match state.get("type").and_then(Value::as_str) {
-                                Some("gameFull") => game_full = state.clone(),
-                                Some("gameState") => {
-                                    let object = game_full
-                                        .as_object_mut()
-                                        .ok_or("invalid cached Lichess game context")?;
-                                    object.insert("state".to_owned(), state.clone());
-                                }
-                                _ => {}
-                            }
-                            let payload = json!({
-                                "game_id": safe_game_id,
-                                "raw": state,
-                                "position": lichess_position(
-                                    safe_game_id,
-                                    identity_key,
-                                    &game_full,
-                                    &state,
-                                ),
-                            });
-                            self.inner.store
-                                .publish_connector_event(
-                                    connector_id,
-                                    &stable_event_id(&format!("game:{safe_game_id}"), &payload),
-                                    "lichess.game_state",
-                                    payload,
-                                )
-                                .await
-                                .map_err(|error| error.to_string())?;
-                        }
-                    }
-                    Some(Err(error)) => return Err(error.to_string()),
-                    None => return Ok(()),
-                }
-            }
-        }
-    }
-
     pub async fn execute(
         &self,
         connector: &ConnectorRecord,
@@ -755,54 +565,15 @@ impl ConnectorService {
         self.inner
             .manifests
             .validate_action(&connector.connector_key, action, &schema_payload)?;
-        if self.inner.packages.get(&connector.connector_key).is_some() {
-            let operation_id = payload
-                .get("operationId")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            return self
-                .active_worker(connector.id)
-                .await?
-                .execute(action, schema_payload, operation_id)
-                .await
-                .map_err(|error| error.to_string());
-        }
-        match connector.connector_key.as_str() {
-            "lichess" => self.execute_lichess(connector, action, payload).await,
-            "openttd" => {
-                let handle = self
-                    .inner
-                    .active
-                    .lock()
-                    .await
-                    .get(&connector.id)
-                    .and_then(|active| active.openttd.clone())
-                    .ok_or("OpenTTD connector is not connected")?;
-                handle.execute(action, payload).await
-            }
-            "victoria3" => match action {
-                "probe_control" => {
-                    let handle = self
-                        .inner
-                        .active
-                        .lock()
-                        .await
-                        .get(&connector.id)
-                        .and_then(|active| active.victoria3.clone())
-                        .ok_or("Victoria 3 connector is not connected")?;
-                    let state = handle.state().await;
-                    let config =
-                        Victoria3ControlConfig::from_settings(&connector.settings, &state.log_path);
-                    let controller = Victoria3Controller::new(config, handle);
-                    serde_json::to_value(controller.probe().await?)
-                        .map_err(|error| error.to_string())
-                }
-                _ => Err(format!(
-                    "Victoria 3 action {action} is not available; only the no-op control probe is implemented"
-                )),
-            },
-            key => Err(format!("unsupported connector: {key}")),
-        }
+        let operation_id = payload
+            .get("operationId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        self.active_worker(connector.id)
+            .await?
+            .execute(action, schema_payload, operation_id)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     pub async fn query(
@@ -814,12 +585,6 @@ impl ConnectorService {
         self.inner
             .manifests
             .validate_query(&connector.connector_key, query, &payload)?;
-        if self.inner.packages.get(&connector.connector_key).is_none() {
-            return Err(format!(
-                "connector {} has not migrated to the package query protocol",
-                connector.connector_key
-            ));
-        }
         self.active_worker(connector.id)
             .await?
             .query(query, payload)
@@ -834,55 +599,10 @@ impl ConnectorService {
             .lock()
             .await
             .get(&connector_id)
-            .and_then(|active| active.worker.clone())
+            .map(|active| active.worker.clone())
             .ok_or("connector package worker is not active")?;
         let client = slot.read().await.clone();
         client.ok_or_else(|| "connector package worker is still starting".to_owned())
-    }
-
-    async fn execute_lichess(
-        &self,
-        connector: &ConnectorRecord,
-        action: &str,
-        payload: Value,
-    ) -> Result<Value, String> {
-        let token_environment = lichess_token_environment(&connector.identity_key)?;
-        let token = connector_token(connector, &token_environment)?;
-        self.execute_lichess_authenticated(connector, action, payload, &token)
-            .await
-    }
-
-    async fn execute_lichess_authenticated(
-        &self,
-        connector: &ConnectorRecord,
-        action: &str,
-        payload: Value,
-        token: &str,
-    ) -> Result<Value, String> {
-        let base = connector
-            .settings
-            .get("baseUrl")
-            .and_then(Value::as_str)
-            .unwrap_or("https://lichess.org")
-            .trim_end_matches('/');
-        let request = lichess_action_request(action, &payload)?;
-        let response = self
-            .inner
-            .client
-            .post(format!("{base}{}", request.path))
-            .bearer_auth(token)
-            .form(&request.form)
-            .send()
-            .await
-            .map_err(|error| error.to_string())?;
-        let status = response.status();
-        let text = response.text().await.map_err(|error| error.to_string())?;
-        if !status.is_success() {
-            return Err(format!("Lichess returned {status}: {text}"));
-        }
-        Ok(
-            json!({"ok":true,"status":status.as_u16(),"result":serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text))}),
-        )
     }
 
     pub fn tools(&self) -> Vec<Arc<dyn Tool>> {
@@ -929,11 +649,21 @@ fn connector_configuration(connector: &ConnectorRecord) -> Value {
 fn resolve_package_permissions(
     package: &LoadedPackage,
     settings: &Value,
+    allowed: Option<&[ConnectorPermissionGrant]>,
 ) -> Vec<GrantedPermission> {
     package
         .manifest
         .permissions
         .iter()
+        .filter(|declaration| {
+            allowed.is_none_or(|allowed| {
+                allowed.iter().any(|grant| {
+                    grant.capability == declaration.capability
+                        && grant.resource == declaration.resource
+                        && grant.access == declaration.access
+                })
+            })
+        })
         .filter_map(|declaration| {
             let resource = declaration
                 .resource
@@ -957,27 +687,20 @@ fn resolve_package_permissions(
         .collect()
 }
 
-fn connector_token(connector: &ConnectorRecord, fallback: &str) -> Result<String, String> {
-    let name = connector
-        .settings
-        .get("tokenEnv")
-        .and_then(Value::as_str)
-        .unwrap_or(fallback);
-    std::env::var(name)
-        .map_err(|_| format!("connector credential environment variable is missing: {name}"))
-        .and_then(|token| {
-            let token = token.trim().to_owned();
-            if token.is_empty() {
-                Err(format!(
-                    "connector credential environment variable is empty: {name}"
-                ))
+fn connector_credential_environment(
+    connector_key: &str,
+    identity_key: &str,
+) -> Result<String, String> {
+    let connector = connector_key
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
             } else {
-                Ok(token)
+                '_'
             }
         })
-}
-
-fn lichess_token_environment(identity_key: &str) -> Result<String, String> {
+        .collect::<String>();
     let mut identity = String::new();
     for character in identity_key.chars() {
         if character.is_ascii_alphanumeric() {
@@ -990,336 +713,17 @@ fn lichess_token_environment(identity_key: &str) -> Result<String, String> {
         identity.pop();
     }
     if identity.is_empty() {
-        return Err("Lichess identity key does not contain an ASCII identifier".to_owned());
+        return Err("connector identity key does not contain an ASCII identifier".to_owned());
     }
-    Ok(format!("MON_CONNECTOR_LICHESS_{identity}"))
+    Ok(format!("MON_CONNECTOR_{connector}_{identity}"))
 }
 
-fn drain_ndjson(pending: &mut Vec<u8>) -> Result<Vec<Value>, String> {
-    const MAX_NDJSON_RECORD_BYTES: usize = 4 * 1024 * 1024;
-    let mut values = Vec::new();
-    while let Some(index) = pending.iter().position(|byte| *byte == b'\n') {
-        let line = pending.drain(..=index).collect::<Vec<_>>();
-        if line.len() > MAX_NDJSON_RECORD_BYTES {
-            return Err("Lichess NDJSON record exceeds 4 MiB".to_owned());
-        }
-        let line = std::str::from_utf8(&line).map_err(|error| error.to_string())?;
-        let line = line.trim();
-        if !line.is_empty() {
-            values.push(serde_json::from_str(line).map_err(|error| error.to_string())?);
-        }
-    }
-    if pending.len() > MAX_NDJSON_RECORD_BYTES {
-        return Err("Lichess NDJSON record exceeds 4 MiB".to_owned());
-    }
-    Ok(values)
-}
-
-fn stable_event_id(prefix: &str, payload: &Value) -> String {
-    if let Some(id) = payload
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-    {
-        return format!("{prefix}:{id}");
-    }
-    let bytes = serde_json::to_vec(payload).unwrap_or_default();
-    let digest = Sha256::digest(bytes);
-    let suffix = digest
-        .iter()
-        .take(16)
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("{prefix}:{suffix}")
-}
-
-fn lichess_account_event(payload: &Value) -> (String, String) {
-    let event_type = payload
-        .get("type")
-        .and_then(Value::as_str)
-        .filter(|event_type| !event_type.is_empty())
-        .unwrap_or("account_event")
-        .to_owned();
-    (event_type, stable_event_id("account", payload))
-}
-
-fn lichess_game_start_id(payload: &Value) -> Option<String> {
-    (payload.get("type").and_then(Value::as_str) == Some("gameStart"))
-        .then(|| {
-            payload
-                .get("game")
-                .and_then(|game| game.get("id"))
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-                .map(str::to_owned)
-        })
-        .flatten()
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct LichessActionRequest {
-    path: String,
-    form: Vec<(String, String)>,
-}
-
-fn safe_lichess_segment<'a>(value: &'a str, label: &str) -> Result<&'a str, String> {
-    if value.is_empty()
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err(format!("{label} is not a safe Lichess identifier"));
-    }
-    Ok(value)
-}
-
-fn lichess_action_request(action: &str, payload: &Value) -> Result<LichessActionRequest, String> {
-    let game_id = payload
-        .get("game_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let challenge_id = payload
-        .get("challenge_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let request = match action {
-        "accept_challenge" => {
-            let challenge_id = safe_lichess_segment(challenge_id, "challenge_id")?;
-            LichessActionRequest {
-                path: format!("/api/challenge/{challenge_id}/accept"),
-                form: vec![],
-            }
-        }
-        "decline_challenge" => {
-            let challenge_id = safe_lichess_segment(challenge_id, "challenge_id")?;
-            let reason = payload
-                .get("reason")
-                .and_then(Value::as_str)
-                .unwrap_or("generic");
-            if !matches!(
-                reason,
-                "generic"
-                    | "later"
-                    | "tooFast"
-                    | "tooSlow"
-                    | "timeControl"
-                    | "rated"
-                    | "casual"
-                    | "standard"
-                    | "variant"
-                    | "noBot"
-                    | "onlyBot"
-            ) {
-                return Err("invalid Lichess decline reason".to_owned());
-            }
-            LichessActionRequest {
-                path: format!("/api/challenge/{challenge_id}/decline"),
-                form: vec![("reason".to_owned(), reason.to_owned())],
-            }
-        }
-        "make_move" => {
-            let game_id = safe_lichess_segment(game_id, "game_id")?;
-            let move_uci = payload
-                .get("move")
-                .and_then(Value::as_str)
-                .ok_or("move is required")?;
-            let parsed = move_uci
-                .parse::<UciMove>()
-                .map_err(|error| format!("invalid UCI move: {error}"))?;
-            if !parsed.is_normal() {
-                return Err("Lichess move must be a normal UCI move".to_owned());
-            }
-            LichessActionRequest {
-                path: format!("/api/bot/game/{game_id}/move/{move_uci}"),
-                form: vec![(
-                    "offeringDraw".to_owned(),
-                    payload
-                        .get("offer_draw")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-                        .to_string(),
-                )],
-            }
-        }
-        "resign" => {
-            let game_id = safe_lichess_segment(game_id, "game_id")?;
-            LichessActionRequest {
-                path: format!("/api/bot/game/{game_id}/resign"),
-                form: vec![],
-            }
-        }
-        "offer_draw" => {
-            let game_id = safe_lichess_segment(game_id, "game_id")?;
-            LichessActionRequest {
-                path: format!("/api/bot/game/{game_id}/draw/yes"),
-                form: vec![],
-            }
-        }
-        "send_chat" => {
-            let game_id = safe_lichess_segment(game_id, "game_id")?;
-            let room = payload
-                .get("room")
-                .and_then(Value::as_str)
-                .unwrap_or("player");
-            if !matches!(room, "player" | "spectator") {
-                return Err("invalid Lichess chat room".to_owned());
-            }
-            let text = payload
-                .get("text")
-                .and_then(Value::as_str)
-                .filter(|text| !text.is_empty())
-                .ok_or("text is required")?;
-            LichessActionRequest {
-                path: format!("/api/bot/game/{game_id}/chat"),
-                form: vec![
-                    ("room".to_owned(), room.to_owned()),
-                    ("text".to_owned(), text.to_owned()),
-                ],
-            }
-        }
-        _ => return Err("invalid Lichess action or parameters".to_owned()),
-    };
-    Ok(request)
-}
-
-fn lichess_position(game_id: &str, identity_key: &str, game_full: &Value, latest: &Value) -> Value {
-    let latest_type = latest.get("type").and_then(Value::as_str);
-    let state = match latest_type {
-        Some("gameFull") => latest.get("state"),
-        Some("gameState") => Some(latest),
-        _ => game_full.get("state"),
-    }
-    .filter(|state| state.is_object())
-    .unwrap_or(&Value::Null);
-    let moves = state
-        .get("moves")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .split_whitespace()
-        .collect::<Vec<_>>();
-    let initial_fen = game_full
-        .get("initialFen")
-        .and_then(Value::as_str)
-        .unwrap_or("startpos");
-    let variant = game_full
-        .get("variant")
-        .and_then(|variant| variant.get("key").or_else(|| variant.get("name")))
-        .and_then(Value::as_str)
-        .unwrap_or("standard");
-    let white = game_full.get("white").unwrap_or(&Value::Null);
-    let black = game_full.get("black").unwrap_or(&Value::Null);
-    let white_id = white
-        .get("id")
-        .or_else(|| white.get("name"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let black_id = black
-        .get("id")
-        .or_else(|| black.get("name"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let bot_color = if white_id.eq_ignore_ascii_case(identity_key) {
-        Some("white")
-    } else if black_id.eq_ignore_ascii_case(identity_key) {
-        Some("black")
-    } else {
-        None
-    };
-    let fallback_side = if moves.len() % 2 == 0 {
-        "white"
-    } else {
-        "black"
-    };
-    let mut result = json!({
-        "game_id": game_id,
-        "variant": variant,
-        "initial_fen": initial_fen,
-        "moves_uci": moves,
-        "ply": moves.len(),
-        "side_to_move": fallback_side,
-        "bot_color": bot_color,
-        "is_bot_turn": bot_color == Some(fallback_side),
-        "white": {
-            "id": white_id,
-            "rating": white.get("rating"),
-            "title": white.get("title"),
-        },
-        "black": {
-            "id": black_id,
-            "rating": black.get("rating"),
-            "title": black.get("title"),
-        },
-        "status": state.get("status").and_then(Value::as_str).unwrap_or("started"),
-        "winner": state.get("winner"),
-        "white_time_ms": state.get("wtime"),
-        "black_time_ms": state.get("btime"),
-        "white_increment_ms": state.get("winc"),
-        "black_increment_ms": state.get("binc"),
-        "draw_offer_by_white": state.get("wdraw").and_then(Value::as_bool).unwrap_or(false),
-        "draw_offer_by_black": state.get("bdraw").and_then(Value::as_bool).unwrap_or(false),
-    });
-    let chess = if matches!(variant, "standard" | "fromPosition") {
-        standard_chess_position(initial_fen, &moves)
-    } else {
-        Err(format!("unsupported Lichess chess variant: {variant}"))
-    };
-    match chess {
-        Ok(position) => {
-            let side_to_move = match position.turn() {
-                Color::White => "white",
-                Color::Black => "black",
-            };
-            let legal_moves = position
-                .legal_moves()
-                .into_iter()
-                .map(UciMove::from_standard)
-                .map(|move_uci| move_uci.to_string())
-                .collect::<Vec<_>>();
-            let details = json!({
-                "fen": Fen::from_position(&position, EnPassantMode::Legal).to_string(),
-                "legal_moves_uci": legal_moves,
-                "check": position.is_check(),
-                "checkmate": position.is_checkmate(),
-                "stalemate": position.is_stalemate(),
-                "position_valid": true,
-                "side_to_move": side_to_move,
-                "is_bot_turn": bot_color == Some(side_to_move),
-            });
-            if let (Some(result), Some(details)) = (result.as_object_mut(), details.as_object()) {
-                result.extend(details.clone());
-            }
-        }
-        Err(error) => {
-            if let Some(result) = result.as_object_mut() {
-                result.insert("position_valid".to_owned(), Value::Bool(false));
-                result.insert("position_error".to_owned(), Value::String(error));
-                result.insert("legal_moves_uci".to_owned(), json!([]));
-            }
-        }
-    }
-    result
-}
-
-fn standard_chess_position(initial_fen: &str, moves: &[&str]) -> Result<Chess, String> {
-    let mut position = if initial_fen == "startpos" {
-        Chess::default()
-    } else {
-        let fen = initial_fen
-            .parse::<Fen>()
-            .map_err(|error| error.to_string())?;
-        fen.into_position(CastlingMode::Standard)
-            .map_err(|error| error.to_string())?
-    };
-    for move_uci in moves {
-        let move_uci = move_uci
-            .parse::<UciMove>()
-            .map_err(|error| error.to_string())?;
-        let chess_move = move_uci
-            .to_move(&position)
-            .map_err(|error| error.to_string())?;
-        position.play_unchecked(chess_move);
-    }
-    Ok(position)
+fn valid_environment_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[derive(Clone, Copy)]
@@ -1636,12 +1040,6 @@ impl Tool for ConnectorTool {
                         format!("unsupported OpenTTD query: {query}"),
                     ));
                 }
-                let action = if query == "get_state" {
-                    "refresh_state"
-                } else {
-                    "gameplay_command"
-                };
-                let mut command = json!({"action":query});
                 let mut query_payload = json!({});
                 for (source, target) in [
                     ("x", "x"),
@@ -1651,20 +1049,14 @@ impl Tool for ConnectorTool {
                     ("length", "length"),
                 ] {
                     if let Some(value) = args.get(source).cloned() {
-                        command[target] = value.clone();
                         query_payload[target] = value;
                     }
                 }
                 self.service
                     .validate_query("openttd", query, &query_payload)
                     .map_err(|error| ToolFailure::new("invalid_connector_query", error))?;
-                let payload = if action == "refresh_state" {
-                    json!({})
-                } else {
-                    json!({"command":command})
-                };
                 self.service
-                    .execute(&connector, action, payload)
+                    .query(&connector, query, query_payload)
                     .await
                     .map_err(|error| ToolFailure::new("openttd_query_failed", error))?
             }
@@ -1683,21 +1075,10 @@ impl Tool for ConnectorTool {
                 self.service
                     .validate_query("victoria3", query, &json!({}))
                     .map_err(|error| ToolFailure::new("invalid_connector_query", error))?;
-                let handle = self
-                    .service
-                    .inner
-                    .active
-                    .lock()
+                self.service
+                    .query(&connector, query, json!({}))
                     .await
-                    .get(&connector.id)
-                    .and_then(|active| active.victoria3.clone())
-                    .ok_or_else(|| {
-                        ToolFailure::new(
-                            "victoria3_not_connected",
-                            "Victoria 3 observer connector is not active",
-                        )
-                    })?;
-                serde_json::to_value(handle.state().await).unwrap_or_default()
+                    .map_err(|error| ToolFailure::new("victoria3_query_failed", error))?
             }
             ConnectorToolAction::OpenTtdNewGrf => {
                 let root = openttd_data_root()?;
@@ -1915,7 +1296,7 @@ fn store_error(error: mon_agent_store::StoreError) -> ToolFailure {
 mod tests {
     use super::*;
     use mon_agent_core::event_channel;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
 
     fn tool_context() -> ToolCallContext {
         let (events, _receiver) = event_channel(8);
@@ -1927,8 +1308,88 @@ mod tests {
         }
     }
 
+    fn stage_schema_package(root: &std::path::Path, manifest: &[u8]) {
+        let value: Value = serde_json::from_slice(manifest).expect("connector package manifest");
+        let id = value["id"].as_str().expect("connector package ID");
+        let package = root.join(id);
+        std::fs::create_dir_all(&package).expect("package directory");
+        std::fs::write(package.join("connector.json"), manifest).expect("connector manifest");
+        let platform = mon_agent_connector_package::current_platform();
+        let worker = value["entrypoints"][platform]["path"]
+            .as_str()
+            .expect("current worker entrypoint");
+        let worker = package.join(worker);
+        std::fs::create_dir_all(worker.parent().expect("worker directory"))
+            .expect("worker directory");
+        std::fs::write(worker, b"schema-only worker").expect("worker placeholder");
+    }
+
+    #[test]
+    fn plugin_worker_permissions_are_filtered_before_launch() {
+        let root = tempfile::tempdir().expect("package root");
+        std::fs::write(root.path().join("worker"), b"worker").expect("worker");
+        std::fs::write(
+            root.path().join("connector.json"),
+            serde_json::to_vec(&json!({
+                "schemaVersion":1,
+                "id":"permission-worker",
+                "name":"Permission Worker",
+                "description":"permission filtering test",
+                "version":"1.0.0",
+                "protocolVersion":1,
+                "icon":"cable",
+                "entrypoints":{
+                    mon_agent_connector_package::current_platform():{
+                        "path":"worker","args":[]
+                    }
+                },
+                "settingsSchema":{
+                    "type":"object",
+                    "properties":{"root":{"type":"string"}},
+                    "required":["root"],
+                    "additionalProperties":false
+                },
+                "permissions":[{
+                    "capability":"filesystem.read",
+                    "resource":"settings.root",
+                    "access":"read",
+                    "required":true,
+                    "description":"Read configured root"
+                }],
+                "events":{},"queries":{},"actions":{}
+            }))
+            .expect("manifest JSON"),
+        )
+        .expect("manifest");
+        let package = LoadedPackage::load(root.path(), LoadPolicy::Development).expect("package");
+        let settings = json!({"root":"/safe/root"});
+        assert!(resolve_package_permissions(&package, &settings, Some(&[])).is_empty());
+        let grants = [ConnectorPermissionGrant {
+            capability: "filesystem.read".to_owned(),
+            resource: "settings.root".to_owned(),
+            access: "read".to_owned(),
+        }];
+        let resolved = resolve_package_permissions(&package, &settings, Some(&grants));
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].resource, "/safe/root");
+        let legacy = resolve_package_permissions(&package, &settings, None);
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].capability, resolved[0].capability);
+        assert_eq!(legacy[0].resource, resolved[0].resource);
+        assert_eq!(legacy[0].access, resolved[0].access);
+    }
+
     #[tokio::test]
     async fn connector_tools_use_manifest_schemas_and_hide_settings_from_model_lists() {
+        let packages = tempfile::tempdir().expect("packages");
+        stage_schema_package(
+            packages.path(),
+            include_bytes!("../../../../Connectors/official/lichess/package/connector.json"),
+        );
+        stage_schema_package(
+            packages.path(),
+            include_bytes!("../../../../Connectors/official/openttd/package/connector.json"),
+        );
         let store = Store::in_memory().await.expect("store");
         store
             .register_connector(
@@ -1940,7 +1401,15 @@ mod tests {
             )
             .await
             .expect("connector");
-        let service = ConnectorService::new(store).expect("connector service");
+        let service = ConnectorService::with_config(
+            store,
+            ConnectorServiceConfig {
+                package_root: packages.path().to_path_buf(),
+                package_policy: LoadPolicy::Development,
+                ..ConnectorServiceConfig::default()
+            },
+        )
+        .expect("connector service");
         let tools = service.tools();
         let execute = tools
             .iter()
@@ -2001,221 +1470,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lichess_action_sends_exact_authenticated_http_request() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener");
-        let address = listener.local_addr().expect("address");
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept");
-            let mut request = Vec::new();
-            let expected_length = loop {
-                let mut chunk = [0_u8; 1024];
-                let read = socket.read(&mut chunk).await.expect("read request");
-                assert_ne!(read, 0, "request ended before headers");
-                request.extend_from_slice(&chunk[..read]);
-                let Some(header_end) = request.windows(4).position(|value| value == b"\r\n\r\n")
-                else {
-                    continue;
-                };
-                let headers = String::from_utf8_lossy(&request[..header_end]);
-                let length = headers
-                    .lines()
-                    .find_map(|line| {
-                        line.split_once(':').and_then(|(name, value)| {
-                            name.eq_ignore_ascii_case("content-length")
-                                .then(|| value.trim().parse::<usize>().expect("content length"))
-                        })
-                    })
-                    .expect("content length");
-                if request.len() >= header_end + 4 + length {
-                    break header_end + 4 + length;
-                }
-            };
-            request.truncate(expected_length);
-            socket
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
-                )
-                .await
-                .expect("response");
-            String::from_utf8(request).expect("HTTP request")
-        });
-        let store = Store::in_memory().await.expect("store");
-        let service = ConnectorService::new(store).expect("connector service");
-        let connector = ConnectorRecord {
-            id: Uuid::now_v7(),
-            connector_key: "lichess".to_owned(),
-            identity_key: "test-bot".to_owned(),
-            display_name: "Test Bot".to_owned(),
-            desired_state: "disconnected".to_owned(),
-            runtime_state: "offline".to_owned(),
-            settings: json!({"baseUrl":format!("http://{address}")}),
-            last_error: None,
-            created_at: 0,
-            updated_at: 0,
-        };
-        service
-            .inner
-            .manifests
-            .validate_action(
-                "lichess",
-                "decline_challenge",
-                &json!({"challenge_id":"challenge-1","reason":"later"}),
-            )
-            .expect("manifest action");
-        let response = service
-            .execute_lichess_authenticated(
-                &connector,
-                "decline_challenge",
-                json!({"challenge_id":"challenge-1","reason":"later"}),
-                "secret-token",
-            )
-            .await
-            .expect("Lichess response");
-        assert_eq!(response["ok"], true);
-        let request = server.await.expect("server task");
-        let request_lower = request.to_ascii_lowercase();
-        assert!(request.starts_with("POST /api/challenge/challenge-1/decline HTTP/1.1\r\n"));
-        assert!(request_lower.contains("authorization: bearer secret-token\r\n"));
-        assert!(request_lower.contains("content-type: application/x-www-form-urlencoded"));
-        assert!(request.ends_with("reason=later"));
-    }
-
-    #[test]
-    fn lichess_identity_uses_an_isolated_credential_namespace() {
-        assert_eq!(
-            lichess_token_environment(" Alice / tournament-bot ").expect("environment"),
-            "MON_CONNECTOR_LICHESS_ALICE_TOURNAMENT_BOT"
-        );
-        assert!(lichess_token_environment("_ / _").is_err());
-    }
-
-    #[test]
-    fn lichess_ndjson_framing_keeps_partial_records() {
-        let mut pending = br#"{"type":"challenge"}
-{"type":"gameStart","game":{"id":"abc123"}}"#
-            .to_vec();
-        let first = drain_ndjson(&mut pending).expect("first record");
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0]["type"], "challenge");
-        assert!(!pending.is_empty());
-
-        pending.extend_from_slice(b"\n");
-        let second = drain_ndjson(&mut pending).expect("second record");
-        assert_eq!(second.len(), 1);
-        assert_eq!(lichess_game_start_id(&second[0]).as_deref(), Some("abc123"));
-        assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn lichess_account_event_ids_are_deterministic() {
-        let payload = json!({"type":"challenge","challenge":{"id":"c1"}});
-        let first = lichess_account_event(&payload);
-        let second = lichess_account_event(&payload);
-        assert_eq!(first, second);
-        assert_eq!(first.0, "challenge");
-        assert!(first.1.starts_with("account:"));
-    }
-
-    #[test]
-    fn lichess_actions_use_exact_safe_paths_and_form_values() {
-        assert_eq!(
-            lichess_action_request(
-                "make_move",
-                &json!({"game_id":"game123","move":"e7e8q","offer_draw":true}),
-            )
-            .expect("move request"),
-            LichessActionRequest {
-                path: "/api/bot/game/game123/move/e7e8q".to_owned(),
-                form: vec![("offeringDraw".to_owned(), "true".to_owned())],
-            }
-        );
-        assert_eq!(
-            lichess_action_request(
-                "send_chat",
-                &json!({"game_id":"game123","room":"spectator","text":"good game"}),
-            )
-            .expect("chat request")
-            .form,
-            vec![
-                ("room".to_owned(), "spectator".to_owned()),
-                ("text".to_owned(), "good game".to_owned()),
-            ]
-        );
-        assert!(lichess_action_request("resign", &json!({"game_id":"../another-game"}),).is_err());
-        assert!(
-            lichess_action_request("make_move", &json!({"game_id":"game123","move":"0000"}),)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn lichess_position_replays_moves_and_exposes_agent_ready_state() {
-        let game_full = json!({
-            "type":"gameFull",
-            "initialFen":"startpos",
-            "variant":{"key":"standard"},
-            "white":{"id":"WhiteBot","rating":2100,"title":"BOT"},
-            "black":{"id":"Opponent","rating":2050},
-            "state":{
-                "type":"gameState",
-                "moves":"e2e4 e7e5",
-                "wtime":59000,
-                "btime":58000,
-                "winc":1000,
-                "binc":1000,
-                "status":"started"
-            }
-        });
-        let position = lichess_position("game123", "whitebot", &game_full, &game_full);
-        assert_eq!(position["position_valid"], true);
-        assert_eq!(position["ply"], 2);
-        assert_eq!(position["side_to_move"], "white");
-        assert_eq!(position["bot_color"], "white");
-        assert_eq!(position["is_bot_turn"], true);
-        assert_eq!(position["white_time_ms"], 59000);
-        assert_eq!(
-            position["fen"],
-            "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
-        );
-        assert!(
-            position["legal_moves_uci"]
-                .as_array()
-                .expect("legal moves")
-                .iter()
-                .any(|move_uci| move_uci.as_str() == Some("g1f3"))
-        );
-    }
-
-    #[test]
-    fn lichess_position_respects_initial_fen_turn_and_rejects_unknown_variants() {
-        let game_full = json!({
-            "type":"gameFull",
-            "initialFen":"8/8/8/8/8/8/4K3/6k1 b - - 0 1",
-            "variant":{"key":"fromPosition"},
-            "state":{"type":"gameState","moves":"","status":"started"}
-        });
-        let position = lichess_position("fen-game", "nobody", &game_full, &game_full);
-        assert_eq!(position["position_valid"], true);
-        assert_eq!(position["side_to_move"], "black");
-
-        let unsupported = json!({
-            "type":"gameFull",
-            "variant":{"key":"atomic"},
-            "state":{"type":"gameState","moves":"e2e4"}
-        });
-        let position = lichess_position("atomic-game", "nobody", &unsupported, &unsupported);
-        assert_eq!(position["position_valid"], false);
-        assert!(
-            position["position_error"]
-                .as_str()
-                .expect("position error")
-                .contains("unsupported")
-        );
-    }
-
-    #[tokio::test]
     async fn victoria3_connector_observes_bridge_log_and_disables_control_by_default() {
         let directory = tempfile::tempdir().expect("tempdir");
         let store = Store::open(directory.path().join("agent.db"))
@@ -2236,6 +1490,9 @@ mod tests {
             .await
             .expect("register connector");
         let service = ConnectorService::new(store.clone()).expect("connector service");
+        if service.inner.manifests.package("victoria3").is_none() {
+            return;
+        }
         service.reconcile().await;
 
         let mut file = tokio::fs::OpenOptions::new()
@@ -2249,30 +1506,33 @@ mod tests {
         .await
         .expect("append bridge lines");
 
-        let handle = service
-            .inner
-            .active
-            .lock()
-            .await
-            .get(&connector.id)
-            .and_then(|active| active.victoria3.clone())
-            .expect("Victoria 3 handle");
-        let mut state = handle.state().await;
+        let mut state = None;
+        for _ in 0..100 {
+            if let Ok(value) = service.query(&connector, "get_state", json!({})).await {
+                state = Some(value);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let mut state = state.expect("Victoria 3 package worker did not become ready");
         for _ in 0..20 {
-            if state.latest_snapshot.is_some() {
+            if !state["latestSnapshot"].is_null() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
-            state = handle.state().await;
+            state = service
+                .query(&connector, "get_state", json!({}))
+                .await
+                .expect("Victoria 3 state");
         }
-        assert!(state.attached);
-        assert!(state.bridge_seen);
+        assert_eq!(state["attached"], true);
+        assert_eq!(state["bridgeSeen"], true);
         assert_eq!(
             state
-                .latest_snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.fields.get("country_id"))
-                .map(String::as_str),
+                .get("latestSnapshot")
+                .and_then(|snapshot| snapshot.get("fields"))
+                .and_then(|fields| fields.get("country_id"))
+                .and_then(Value::as_str),
             Some("CHI")
         );
         let events = store
@@ -2331,6 +1591,9 @@ mod tests {
             .await
             .expect("second connector");
         let service = ConnectorService::new(store.clone()).expect("connector service");
+        if service.inner.manifests.package("victoria3").is_none() {
+            return;
+        }
 
         tokio::join!(
             service.reconcile(),

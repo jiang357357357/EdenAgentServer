@@ -204,16 +204,76 @@ fn identity_section(
     };
 
     if let Some(character) = character {
+        if let Some(aliases) = string_list(character, &["aliases"]) {
+            lines.push(format!("别名与昵称：{}", aliases.join("、")));
+        }
         for (keys, label) in [
             (&["signature"][..], "角色签名"),
             (&["description"][..], "角色描述"),
+            (&["pronouns"][..], "代词与性别称谓"),
+            (&["age"][..], "年龄或生命阶段"),
+            (&["species"][..], "种族或存在形式"),
+            (&["occupation"][..], "职业与身份"),
             (&["personality"][..], "性格内核"),
+            (&["values"][..], "价值观"),
+            (&["likes"][..], "喜好"),
+            (&["dislikes"][..], "厌恶"),
+            (&["strengths"][..], "优势"),
+            (&["weaknesses"][..], "弱点"),
+            (&["fears"][..], "恐惧与敏感点"),
+            (&["habits"][..], "习惯与小动作"),
+            (&["emotional_style", "emotionalStyle"][..], "情绪表达"),
+            (
+                &["user_relationship", "userRelationship"][..],
+                "与用户的关系",
+            ),
+            (&["user_address", "userAddress"][..], "对用户的称呼"),
+            (&["self_address", "selfAddress"][..], "角色自称"),
+            (
+                &["relationship_history", "relationshipHistory"][..],
+                "关系历史",
+            ),
             (&["social_relations", "socialRelations"][..], "社会关系"),
+            (
+                &["relationship_boundaries", "relationshipBoundaries"][..],
+                "关系与互动边界",
+            ),
             (
                 &["background", "setting_summary", "settingSummary"][..],
                 "角色背景",
             ),
             (&["appearance"][..], "角色外貌"),
+            (&["current_situation", "currentSituation"][..], "当前处境"),
+            (&["goals"][..], "核心目标"),
+            (&["responsibilities"][..], "职责与工作范围"),
+            (
+                &["decision_principles", "decisionPrinciples"][..],
+                "决策原则",
+            ),
+            (&["initiative_level", "initiativeLevel"][..], "主动程度"),
+            (&["initiative_rules", "initiativeRules"][..], "主动行为规则"),
+            (&["autonomy"][..], "自主权与授权范围"),
+            (&["conflict_style", "conflictStyle"][..], "冲突处理方式"),
+            (&["memory_preferences", "memoryPreferences"][..], "记忆偏好"),
+            (&["behavioral_rules", "behavioralRules"][..], "固定行为规则"),
+            (
+                &["forbidden_behaviors", "forbiddenBehaviors"][..],
+                "禁止行为",
+            ),
+            (&["speech_style", "speechStyle"][..], "表达风格"),
+            (
+                &["language_preference", "languagePreference"][..],
+                "首选语言",
+            ),
+            (&["response_length", "responseLength"][..], "默认回复篇幅"),
+            (&["formality"][..], "正式程度"),
+            (&["humor_style", "humorStyle"][..], "幽默方式"),
+            (&["catchphrases"][..], "口头禅与惯用语"),
+            (&["emoji_usage", "emojiUsage"][..], "表情符号使用"),
+            (&["example_dialogue", "exampleDialogue"][..], "示例对话"),
+            (&["forbidden_phrases", "forbiddenPhrases"][..], "禁用措辞"),
+            (&["voice_style", "voiceStyle"][..], "声音风格"),
+            (&["voice_emotion", "voiceEmotion"][..], "声音情绪"),
             (&["system_prompt", "systemPrompt"][..], "角色补充提示"),
         ] {
             if let Some(value) = text(character, keys) {
@@ -608,9 +668,19 @@ mod tests {
                 "character": {
                     "id": 7,
                     "name": "普拉娜",
+                    "aliases": ["普拉娜", "黑色阿罗娜"],
                     "signature": "冷静而可靠",
                     "description": "来自什亭之箱的少女。",
                     "personality": {"core": "克制、认真"},
+                    "user_relationship": "把用户视为重要的老师。",
+                    "user_address": "老师",
+                    "goals": "保护老师并完成共同目标。",
+                    "decision_principles": "先核实事实，再采取行动。",
+                    "initiative_level": "主动型",
+                    "memory_preferences": "记住老师明确确认的长期偏好。",
+                    "speech_style": "简洁、克制，偶尔流露关心。",
+                    "voice_style": "低声、平稳、语速稍慢。",
+                    "forbidden_behaviors": "不得虚构已经完成的行动。",
                     "system_prompt": "保持角色连续性。",
                     "visual_actions": [{"name":"微笑","intent":"高兴"}]
                 }
@@ -630,6 +700,14 @@ mod tests {
         );
         assert!(prompt.contains("你是「普拉娜」"));
         assert!(prompt.contains("克制、认真"));
+        assert!(prompt.contains("别名与昵称：普拉娜、黑色阿罗娜"));
+        assert!(prompt.contains("对用户的称呼：老师"));
+        assert!(prompt.contains("核心目标：保护老师并完成共同目标"));
+        assert!(prompt.contains("决策原则：先核实事实，再采取行动"));
+        assert!(prompt.contains("记忆偏好：记住老师明确确认的长期偏好"));
+        assert!(prompt.contains("表达风格：简洁、克制，偶尔流露关心"));
+        assert!(prompt.contains("声音风格：低声、平稳、语速稍慢"));
+        assert!(prompt.contains("禁止行为：不得虚构已经完成的行动"));
         assert!(prompt.contains("把用户视为重要的老师"));
         assert!(prompt.contains("默认使用中文"));
         assert!(prompt.contains("说话者身份由宿主界面展示"));

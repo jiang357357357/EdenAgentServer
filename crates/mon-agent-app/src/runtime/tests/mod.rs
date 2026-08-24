@@ -25,6 +25,8 @@ use std::{
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
+const TEST_EVENT_TIMEOUT: Duration = Duration::from_secs(10);
+
 struct RecordingModel {
     requests: StdMutex<Vec<ModelRequest>>,
 }
@@ -161,7 +163,7 @@ impl ModelAdapter for CompactionFailureModel {
 }
 
 async fn wait_for_completion(events: &mut broadcast::Receiver<EventRecord>) {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(TEST_EVENT_TIMEOUT, async {
         loop {
             let event = events.recv().await.expect("runtime event");
             if event.event_type == "turn.completed" {

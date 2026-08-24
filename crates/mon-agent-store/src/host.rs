@@ -497,7 +497,7 @@ impl Store {
     ) -> Result<Vec<CoreSyncOutboxRecord>, StoreError> {
         let now = now_ms();
         let expired = now.saturating_sub(lease_ms.max(1));
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "UPDATE core_sync_outbox SET state='queued', claimed_at=NULL, updated_at=?
              WHERE state='claimed' AND claimed_at < ?",
@@ -1073,7 +1073,7 @@ impl Store {
     ) -> Result<JobRecord, StoreError> {
         let id = Uuid::now_v7();
         let now = now_ms();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("INSERT INTO jobs(id, kind, session_id, due_at, payload_json, state, idempotency_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?, ?) ON CONFLICT(idempotency_key) DO UPDATE SET due_at=excluded.due_at, payload_json=excluded.payload_json, state='scheduled', updated_at=excluded.updated_at WHERE jobs.state IN ('scheduled', 'failed')")
             .bind(id.to_string()).bind(kind).bind(session_id.map(|value| value.to_string())).bind(due_at)
             .bind(serde_json::to_string(&payload)?).bind(idempotency_key).bind(now).bind(now).execute(&mut *transaction).await?;
@@ -1138,7 +1138,7 @@ impl Store {
         let id = Uuid::now_v7();
         let now = now_ms();
         let session_key = session_id.to_string();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         ensure_session(&mut transaction, session_id).await?;
         let inserted = sqlx::query(
             "INSERT INTO jobs(
@@ -1210,7 +1210,7 @@ impl Store {
         lease_ms: i64,
     ) -> Result<Vec<JobRecord>, StoreError> {
         let now = now_ms();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let rows = sqlx::query("SELECT id FROM jobs WHERE (state='scheduled' OR (state='claimed' AND lease_until < ?)) AND due_at <= ? ORDER BY due_at, id LIMIT ?")
             .bind(now).bind(now).bind(i64::from(limit.clamp(1, 100))).fetch_all(&mut *transaction).await?;
         let ids = rows
@@ -1372,7 +1372,7 @@ impl Store {
         next_wake: Option<(i64, Value, String)>,
     ) -> Result<Option<JobRecord>, StoreError> {
         let now = now_ms();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "UPDATE self_awake_runs SET status='completed', decision_json=?, completed_at=?, updated_at=?
              WHERE id=? AND status!='completed'",
@@ -1754,7 +1754,7 @@ impl Store {
     ) -> Result<Vec<ConnectorEventRecord>, StoreError> {
         let now = now_ms();
         let operation_id = Uuid::now_v7();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let rows = sqlx::query("SELECT id FROM connector_events WHERE connector_id=? AND (status='pending' OR (status='claimed' AND lease_until < ?)) ORDER BY created_at, id LIMIT ?")
             .bind(connector_id.to_string()).bind(now).bind(i64::from(limit.clamp(1, 100))).fetch_all(&mut *transaction).await?;
         let ids = rows
@@ -1782,7 +1782,7 @@ impl Store {
         ids: &[Uuid],
         retry: bool,
     ) -> Result<(), StoreError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         for id in ids {
             sqlx::query("UPDATE connector_events SET status=?, operation_id=NULL, lease_until=NULL, updated_at=? WHERE id=? AND status='claimed'")
             .bind(if retry { "pending" } else { "completed" }).bind(now_ms()).bind(id.to_string()).execute(&mut *transaction).await?;
@@ -1805,7 +1805,7 @@ impl Store {
         }
         let id = Uuid::now_v7();
         let now = now_ms();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         ensure_session(&mut transaction, session_id).await?;
         sqlx::query("INSERT INTO media_requests(id,session_id,turn_id,kind,state,request_json,created_at) VALUES (?,?,?,?,'pending',?,?)")
             .bind(id.to_string()).bind(session_id.to_string()).bind(turn_id.to_string()).bind(kind)
@@ -1865,7 +1865,7 @@ impl Store {
         error: Option<String>,
     ) -> Result<MediaRequestRecord, StoreError> {
         let now = now_ms();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let changed=sqlx::query("UPDATE media_requests SET state=?,result_json=?,error=?,resolved_at=? WHERE id=? AND state='pending'")
             .bind(if result.is_some(){"answered"}else{"rejected"}).bind(result.as_ref().map(serde_json::to_string).transpose()?)
             .bind(&error).bind(now).bind(id.to_string()).execute(&mut *transaction).await?;
