@@ -1483,6 +1483,127 @@ pub struct DirectorRunInfo {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GsvTtsConfig {
+    pub provider: String,
+    pub service_url: String,
+    pub version: String,
+    pub world: String,
+    pub role: String,
+    pub role_id: String,
+    pub emotion: String,
+    pub text_language: String,
+    pub speed: f64,
+    pub timeout_seconds: u32,
+    pub top_k: u32,
+    pub top_p: f64,
+    pub temperature: f64,
+    pub sample_steps: u32,
+    pub pause_seconds: f64,
+    pub cut_method: String,
+    pub super_resolution: bool,
+    pub reference_free: bool,
+    pub freeze: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GsvSttConfig {
+    pub provider: String,
+    pub service_url: String,
+    pub language: String,
+    pub model_type: String,
+    pub model_size: String,
+    pub precision: String,
+    pub timeout_seconds: u32,
+    pub retry_count: u32,
+    pub end_silence_ms: u32,
+    pub session_end_silence_ms: u32,
+    pub auto_finish: bool,
+    pub auto_send: bool,
+    pub min_speech_duration_ms: u32,
+    pub speech_noise_threshold: f64,
+    pub preroll_ms: u32,
+    pub chunk_ms: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceRuntimeConfig {
+    pub tts: GsvTtsConfig,
+    pub stt: GsvSttConfig,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum GsvDiscoveryStage {
+    All,
+    Catalog,
+    Worlds,
+    Roles,
+    Emotions,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GsvDiscoveryParams {
+    pub config: GsvTtsConfig,
+    pub stage: GsvDiscoveryStage,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GsvOption {
+    pub id: String,
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GsvDiscoveryResult {
+    pub ok: bool,
+    pub latency_ms: u32,
+    pub versions: Vec<GsvOption>,
+    pub worlds: Vec<GsvOption>,
+    pub roles: Vec<GsvOption>,
+    pub emotions: Vec<GsvOption>,
+    pub selected_role_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GsvPreviewParams {
+    pub config: GsvTtsConfig,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GsvPreviewResult {
+    pub ok: bool,
+    pub audio_blob_id: BlobId,
+    pub mime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    pub latency_ms: u32,
+    pub role_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GsvSttTestParams {
+    pub config: GsvSttConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GsvConnectionTestResult {
+    pub ok: bool,
+    pub latency_ms: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VoiceTtsSynthesizeParams {
     pub session_id: SessionId,
     pub message_id: String,
@@ -1625,6 +1746,12 @@ pub struct ProtocolSchemaCatalog {
     pub tool_info: ToolInfo,
     pub self_awake_list: SelfAwakeListParams,
     pub director_list: DirectorListParams,
+    pub gsv_tts_config: GsvTtsConfig,
+    pub gsv_stt_config: GsvSttConfig,
+    pub voice_runtime_config: VoiceRuntimeConfig,
+    pub gsv_discovery: GsvDiscoveryParams,
+    pub gsv_preview: GsvPreviewParams,
+    pub gsv_stt_test: GsvSttTestParams,
     pub voice_tts_synthesize: VoiceTtsSynthesizeParams,
     pub voice_speech_segment_list: VoiceSpeechSegmentListParams,
 }

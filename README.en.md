@@ -21,6 +21,7 @@
 The Server owns process boundaries and external side effects:
 
 - SQLite persistence for events, sessions, jobs, and extension state
+- SQLite-backed GSV TTS/STT configuration, hot updates, discovery, and previews
 - OpenAI-compatible model providers and streaming responses
 - Permission approval, capability tokens, and OS sandboxing
 - Workspace, Blob, skills, plugins, MCP, and multi-agent orchestration
@@ -77,17 +78,21 @@ For desktop use, local model configuration is normally managed through **Configu
 | `EDEN_AGENT_DATABASE` | SQLite database path |
 | `EDEN_AGENT_BLOB_ROOT` | Blob storage directory |
 | `EDEN_AGENT_WORKSPACE_ROOT` | Default workspace root |
-| `EDEN_AGENT_CAPABILITY_TOKEN` | Client capability token; written to a token file when omitted |
+| `EDEN_AGENT_CAPABILITY_TOKEN` | Client capability token; always synchronized to a `0600` token file |
 | `MON_CORE_BASE_URL` / `MON_CORE_TOKEN` | Enable Mon business tools |
 | `EDEN_AGENT_SANDBOX_EXECUTABLE` | Select an external command sandbox |
 
 Never commit real credentials to source files, example configuration, test fixtures, or runtime logs.
+
+**Configuration → Voice Configuration** writes GSV TTS/STT settings to Server SQLite over JSON-RPC. Changes apply to the next synthesis request or transcription connection without restarting the Server. Legacy `EDEN_AGENT_TTS_*` and `EDEN_AGENT_STT_*` variables are used only for a one-time compatibility import when the database has no voice configuration. Device-specific microphone, speaker, and playback-volume settings remain client-local.
 
 ## Protocol
 
 - `/rpc`: WebSocket JSON-RPC
 - `/blobs`: Blob upload and retrieval
 - `/readyz`: service health check
+
+Voice configuration RPC methods include `voice.config.read`, `voice.tts.config.update`, `voice.stt.config.update`, `voice.gsv.discover`, `voice.gsv.preview`, and `voice.stt.test`. Preview audio is returned through the Blob endpoint instead of inline Base64 in an RPC message.
 
 There is no legacy REST/SSE compatibility layer. Regenerate the client after changing `eden-agent-api` types:
 

@@ -4,7 +4,9 @@ use eden_agent_api::{
     ConnectorCapabilityInvocation, ConnectorCatalogEntry, ConnectorCatalogError,
     ConnectorCatalogInfo, ConnectorCreateParams, ConnectorInfo, ConnectorUpdateParams,
     DirectorBeatInfo, DirectorExecutionInfo, DirectorListParams, DirectorRunInfo,
-    DirectorRunStatus, DirectorSceneInfo, EventListParams, EventPage, InitializeParams,
+    DirectorRunStatus, DirectorSceneInfo, EventListParams, EventPage, GsvConnectionTestResult,
+    GsvDiscoveryParams, GsvDiscoveryResult, GsvDiscoveryStage, GsvOption, GsvPreviewParams,
+    GsvPreviewResult, GsvSttConfig, GsvSttTestParams, GsvTtsConfig, InitializeParams,
     InitializeResult, MediaListParams, MediaRequestInfo, MediaResolveParams, MemoCreateParams,
     MemoIdParams, MemoInfo, MemoListParams, MemoUpdateParams, MessageListParams,
     ModelCatalogParams, ModelReadParams, ModelSelectParams, OperationDecision, OperationInfo,
@@ -26,10 +28,10 @@ use eden_agent_api::{
     SkillInfo, SkillInspectParams, SkillInstallParams, SkillListParams, SkillPreviewInfo,
     SkillPreviewInstallParams, SkillPreviewSource, SkillReadParams, TokenBreakdown,
     ToolExecutionModeInfo, ToolExposureInfo, ToolInfo, TurnAccepted, TurnQueueParams,
-    TurnQueueResult, TurnStartParams, VoiceSpeechSegmentInfo, VoiceSpeechSegmentListParams,
-    VoiceTtsMode, VoiceTtsSynthesizeParams, VoiceTtsSynthesizeResult, WorkspaceDirectoryInfo,
-    WorkspaceEntryInfo, WorkspaceEntryKind, WorkspaceFileInfo, WorkspaceInfo, WorkspacePathParams,
-    WorkspaceSwitchParams, WorkspaceSwitchResult,
+    TurnQueueResult, TurnStartParams, VoiceRuntimeConfig, VoiceSpeechSegmentInfo,
+    VoiceSpeechSegmentListParams, VoiceTtsMode, VoiceTtsSynthesizeParams, VoiceTtsSynthesizeResult,
+    WorkspaceDirectoryInfo, WorkspaceEntryInfo, WorkspaceEntryKind, WorkspaceFileInfo,
+    WorkspaceInfo, WorkspacePathParams, WorkspaceSwitchParams, WorkspaceSwitchResult,
 };
 use eden_agent_domain::{
     AgentId, BlobId, ItemId, OperationId, PermissionRequestId, QuestionRequestId, SessionId,
@@ -80,6 +82,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         TokenBreakdown::decl(&config),
         AttachmentRef::decl(&config),
         BlobInfo::decl(&config),
+        GsvTtsConfig::decl(&config),
+        GsvSttConfig::decl(&config),
+        VoiceRuntimeConfig::decl(&config),
+        GsvDiscoveryStage::decl(&config),
+        GsvDiscoveryParams::decl(&config),
+        GsvOption::decl(&config),
+        GsvDiscoveryResult::decl(&config),
+        GsvPreviewParams::decl(&config),
+        GsvPreviewResult::decl(&config),
+        GsvSttTestParams::decl(&config),
+        GsvConnectionTestResult::decl(&config),
         ModelCatalogParams::decl(&config),
         ModelReadParams::decl(&config),
         ModelSelectParams::decl(&config),
@@ -279,6 +292,12 @@ export interface RpcMethodMap {{
   "model.select": {{ params: ModelSelectParams; result: RuntimeModelCatalogInfo }}
   "media.list": {{ params: MediaListParams; result: MediaRequestInfo[] }}
   "media.resolve": {{ params: MediaResolveParams; result: MediaRequestInfo }}
+  "voice.config.read": {{ params: Record<string, never>; result: VoiceRuntimeConfig }}
+  "voice.tts.config.update": {{ params: GsvTtsConfig; result: VoiceRuntimeConfig }}
+  "voice.stt.config.update": {{ params: GsvSttConfig; result: VoiceRuntimeConfig }}
+  "voice.gsv.discover": {{ params: GsvDiscoveryParams; result: GsvDiscoveryResult }}
+  "voice.gsv.preview": {{ params: GsvPreviewParams; result: GsvPreviewResult }}
+  "voice.stt.test": {{ params: GsvSttTestParams; result: GsvConnectionTestResult }}
   "voice.tts.synthesize": {{ params: VoiceTtsSynthesizeParams; result: VoiceTtsSynthesizeResult }}
   "voice.tts.list_segments": {{ params: VoiceSpeechSegmentListParams; result: VoiceSpeechSegmentInfo[] }}
   "self_awake.list": {{ params: SelfAwakeListParams; result: SelfAwakePage }}

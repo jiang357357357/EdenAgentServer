@@ -21,6 +21,7 @@
 Server 负责所有进程边界和外部副作用：
 
 - SQLite 事件、会话、作业和扩展状态持久化
+- SQLite GSV TTS/STT 配置、热更新、目录发现与试听音频
 - OpenAI 兼容模型供应商与流式响应
 - 权限审批、能力令牌和操作系统沙箱
 - 工作区、Blob、技能、插件、MCP 与多智能体
@@ -77,17 +78,21 @@ curl http://127.0.0.1:40092/readyz
 | `EDEN_AGENT_DATABASE` | SQLite 数据库路径 |
 | `EDEN_AGENT_BLOB_ROOT` | Blob 存储目录 |
 | `EDEN_AGENT_WORKSPACE_ROOT` | 默认工作区根目录 |
-| `EDEN_AGENT_CAPABILITY_TOKEN` | 客户端能力令牌；未提供时写入令牌文件 |
+| `EDEN_AGENT_CAPABILITY_TOKEN` | 客户端能力令牌；始终同步到权限为 `0600` 的令牌文件 |
 | `MON_CORE_BASE_URL` / `MON_CORE_TOKEN` | 启用 Mon 业务工具 |
 | `EDEN_AGENT_SANDBOX_EXECUTABLE` | 指定外部命令隔离器 |
 
 不要把真实密钥提交到仓库、示例配置、测试夹具或运行日志。
+
+GSV TTS/STT 配置由 **配置 → 语音配置** 通过 JSON-RPC 写入 Server SQLite，并在下一次合成或转录连接时立即生效，无需重启。旧版 `EDEN_AGENT_TTS_*`、`EDEN_AGENT_STT_*` 环境变量仅在数据库尚无语音配置时执行一次兼容迁移；麦克风、扬声器和播放音量等设备设置仍保留在客户端。
 
 ## 协议
 
 - `/rpc`：WebSocket JSON-RPC
 - `/blobs`：Blob 上传与读取
 - `/readyz`：服务健康检查
+
+语音配置 RPC 包括 `voice.config.read`、`voice.tts.config.update`、`voice.stt.config.update`、`voice.gsv.discover`、`voice.gsv.preview` 与 `voice.stt.test`。试听音频通过 Blob 端点返回，不以内联 Base64 写入 RPC 消息。
 
 本项目不提供旧 REST/SSE 兼容层。修改 `eden-agent-api` 类型后需重新生成客户端：
 
