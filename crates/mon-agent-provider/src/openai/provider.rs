@@ -145,7 +145,7 @@ impl ModelAdapter for OpenAiCompatibleProvider {
                         if let Some(message) = failure.reset_message {
                             events
                                 .emit(AgentEvent::StreamReset {
-                                    message,
+                                    message: *message,
                                     reason: failure.error.message.clone(),
                                 })
                                 .await

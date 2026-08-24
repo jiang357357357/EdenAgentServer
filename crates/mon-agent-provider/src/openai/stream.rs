@@ -32,7 +32,7 @@ pub(super) struct StreamAccumulator {
 
 pub(super) struct StreamFailure {
     pub(super) error: ModelError,
-    pub(super) reset_message: Option<AssistantMessage>,
+    pub(super) reset_message: Option<Box<AssistantMessage>>,
     pub(super) tool_calls_started: bool,
 }
 
@@ -168,12 +168,14 @@ impl StreamAccumulator {
 
     fn failure(&self, model: &ModelSpec, error: ModelError) -> StreamFailure {
         let reset_message = self.started.then(|| {
-            let mut message = StreamAccumulator::default().message(model);
-            message.stop_reason = "stream_reset".to_owned();
-            message
-                .extra
-                .insert("streamReset".to_owned(), Value::Bool(true));
-            message
+            Box::new({
+                let mut message = StreamAccumulator::default().message(model);
+                message.stop_reason = "stream_reset".to_owned();
+                message
+                    .extra
+                    .insert("streamReset".to_owned(), Value::Bool(true));
+                message
+            })
         });
         StreamFailure {
             error,
@@ -207,12 +209,14 @@ impl ResponsesAccumulator {
 
     fn failure(&self, model: &ModelSpec, error: ModelError) -> StreamFailure {
         let reset_message = self.stream.started.then(|| {
-            let mut message = ResponsesAccumulator::default().message(model);
-            message.stop_reason = "stream_reset".to_owned();
-            message
-                .extra
-                .insert("streamReset".to_owned(), Value::Bool(true));
-            message
+            Box::new({
+                let mut message = ResponsesAccumulator::default().message(model);
+                message.stop_reason = "stream_reset".to_owned();
+                message
+                    .extra
+                    .insert("streamReset".to_owned(), Value::Bool(true));
+                message
+            })
         });
         StreamFailure {
             error,
