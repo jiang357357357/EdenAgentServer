@@ -1,4 +1,4 @@
-# MonAgent Victoria 3 Observer Bridge
+# Eden Agent Victoria 3 Observer Bridge
 
 This directory contains the Victoria 3 side of the integration. The
 source tree under `mod/` is deployed as a local Victoria 3 mod; do not copy its
@@ -15,5 +15,5 @@ waits for a matching ACK in `debug.log`. Control is disabled by default and no
 construction, production, diplomacy, save, speed, or pause action exists yet.
 
 Use `Script/Cmd/Win/InstallVictoria3Observer.ps1` to deploy the development mod,
-then enable **MonAgent Victoria 3 Observer Bridge** in a launcher playset and
+then enable **Eden Agent Victoria 3 Observer Bridge** in a launcher playset and
 start Victoria 3 in Debug Mode.

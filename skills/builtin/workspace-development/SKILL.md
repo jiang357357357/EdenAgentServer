@@ -2,7 +2,7 @@
 name: workspace-development
 description: 在当前工作区修改代码、构建、测试和执行开发命令。
 metadata:
-  monagent:
+  edenagent:
     display_name: 工作区开发与操作
     version: 2.0.0
     tools: [read, ls, grep, find, get_diff, write, edit, apply_patch, bash, powershell, write_stdin, switch_workspace, external_ls, external_read, external_find, external_grep]

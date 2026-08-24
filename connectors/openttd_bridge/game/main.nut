@@ -1,9 +1,9 @@
-class MonAgentBridge extends GSController {
+class EdenAgentBridge extends GSController {
     function Save() { return { bridge_version = 6 }; }
     function Load(version, data) {}
 
     function Start() {
-        GSLog.Info("MonAgentBridge started");
+        GSLog.Info("EdenAgentBridge started");
         GSAdmin.Send({ type = "bridge_ready", bridge_version = 6 });
         while (true) {
             while (GSEventController.IsEventWaiting()) {
@@ -12,7 +12,7 @@ class MonAgentBridge extends GSController {
                     try {
                         this.HandleCommand(GSEventAdminPort.Convert(event).GetObject());
                     } catch (error) {
-                        GSLog.Error("MonAgentBridge event failed: " + error.tostring());
+                        GSLog.Error("EdenAgentBridge event failed: " + error.tostring());
                     }
                 }
             }

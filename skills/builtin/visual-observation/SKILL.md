@@ -2,7 +2,7 @@
 name: visual-observation
 description: 分析附件、本地图片，观察当前桌面屏幕，或拍摄摄像头单帧了解现实环境。
 metadata:
-  monagent:
+  edenagent:
     display_name: 图片、屏幕与摄像头观察
     version: 1.0.0
     tools: [analyze_image, analyze_screen, capture_camera]

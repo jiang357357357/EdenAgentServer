@@ -2,7 +2,7 @@
 name: external-connectors
 description: 自主使用当前用户共享的 Lichess、OpenTTD、Hearts of Iron IV、Victoria 3 等外部服务，领取事件、观察状态并执行允许的动作。
 metadata:
-  monagent:
+  edenagent:
     display_name: 外部连接器
     version: 1.1.0
     tools: [web, list_connectors, describe_connector, register_connector, set_connector_state, claim_connector_events, finish_connector_events, execute_connector_action, query_connector, query_openttd, query_victoria3, openttd_newgrf]

@@ -1,0 +1,22 @@
+[package]
+name = "eden-agent-workspace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+eden-agent-core = { path = "../../../AgentCore/crates/eden-agent-core" }
+eden-agent-domain = { path = "../../../AgentCore/crates/eden-agent-domain" }
+eden-agent-store = { path = "../eden-agent-store" }
+eden-agent-tools = { path = "../../../AgentCore/crates/eden-agent-tools" }
+regex.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio-util.workspace = true

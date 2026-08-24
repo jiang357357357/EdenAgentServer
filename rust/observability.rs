@@ -6,7 +6,7 @@ use std::{
 };
 use tracing_subscriber::EnvFilter;
 
-const LOG_FILE_NAME: &str = "mon-agent.log";
+const LOG_FILE_NAME: &str = "eden-agent.log";
 
 #[derive(Clone)]
 struct SafeLogWriter {
@@ -235,7 +235,7 @@ pub fn initialize(
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("mon_agent_server=info")),
+                .unwrap_or_else(|_| EnvFilter::new("eden_agent_server=info")),
         )
         .with_ansi(false)
         .with_writer(writer)

@@ -2,7 +2,7 @@
 name: self-awake
 description: 让当前角色在没有用户新消息时自主观察、行动、联系用户或安排后续醒来。
 metadata:
-  monagent:
+  edenagent:
     display_name: 后台自醒与连续观察
     version: 1.0.0
     tools: [get_self_awake_state, list_self_awake_diaries, read_self_awake_diary, set_self_awake_timer]

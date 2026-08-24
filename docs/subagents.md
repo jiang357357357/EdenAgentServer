@@ -1,13 +1,13 @@
 # 子智能体配置
 
-MonAgent 内置 `general`、`researcher`、`coder`、`reviewer` 四个任务角色。它们是后台任务配置，不是伊芙、莉莉安等聊天角色。
+Eden Agent 内置 `general`、`researcher`、`coder`、`reviewer` 四个任务角色。它们是后台任务配置，不是伊芙、莉莉安等聊天角色。
 
 可以在以下目录新增或覆盖角色：
 
-1. 用户级：`~/.monagent/agents/*.toml`
-2. 项目级：`<workspace>/.monagent/agents/*.toml`
+1. 用户级：`~/.edenagent/agents/*.toml`
+2. 项目级：`<workspace>/.edenagent/agents/*.toml`
 
-项目级配置优先于用户级配置，用户级配置优先于内置配置。服务启动时会校验所有文件；修改配置后需要重启 MonAgent Server。
+项目级配置优先于用户级配置，用户级配置优先于内置配置。服务启动时会校验所有文件；修改配置后需要重启 Eden Agent Server。
 
 ```toml
 name = "security-reviewer"
@@ -54,7 +54,7 @@ timeout_seconds = 1800
 
 ## 独立线程持久化
 
-子智能体的线程数据默认保存在 `<workspace>/Data/AgentThreads`。可以通过 `MON_AGENT_THREAD_STORE_DIR` 修改位置；相对路径以工作区为基准。
+子智能体的线程数据默认保存在 `<workspace>/Data/AgentThreads`。可以通过 `EDEN_AGENT_THREAD_STORE_DIR` 修改位置；相对路径以工作区为基准。
 
 每条线程分别保存：
 
@@ -72,7 +72,7 @@ timeout_seconds = 1800
 
 以下环境变量用于限制子智能体资源占用，非法值会回退默认值，过大或过小的值会被限制在安全范围内：
 
-- `MON_AGENT_SUBAGENT_MAX_THREADS`：单个根会话最多保留的线程数，默认 `64`。
-- `MON_AGENT_SUBAGENT_MAX_CONCURRENT_PER_SESSION`：单个根会话同时运行数，默认 `4`。
-- `MON_AGENT_SUBAGENT_MAX_CONCURRENT_GLOBAL`：当前 Server 内所有会话合计的模型执行并发，默认 `8`。
-- `MON_AGENT_SUBAGENT_MAX_DEPTH`：子智能体嵌套深度，默认 `2`，最高 `8`。
+- `EDEN_AGENT_SUBAGENT_MAX_THREADS`：单个根会话最多保留的线程数，默认 `64`。
+- `EDEN_AGENT_SUBAGENT_MAX_CONCURRENT_PER_SESSION`：单个根会话同时运行数，默认 `4`。
+- `EDEN_AGENT_SUBAGENT_MAX_CONCURRENT_GLOBAL`：当前 Server 内所有会话合计的模型执行并发，默认 `8`。
+- `EDEN_AGENT_SUBAGENT_MAX_DEPTH`：子智能体嵌套深度，默认 `2`，最高 `8`。

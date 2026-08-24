@@ -3,7 +3,7 @@ name: due-reminder-dispatch
 description: 供系统到期事件检查、通知并收尾已到时间的提醒。
 disable-model-invocation: true
 metadata:
-  monagent:
+  edenagent:
     display_name: 到期提醒派发
     version: 1.0.0
     tools: [list_due_memos, dispatch_due_memos, get_next_memo_wake, contact_user, mark_memo_triggered]

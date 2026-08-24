@@ -2,7 +2,7 @@
 name: memo-management
 description: 创建、查询、完成、归档或推迟备忘录、待办和用户提醒。
 metadata:
-  monagent:
+  edenagent:
     display_name: 备忘录与待办管理
     version: 1.0.0
     tools: [create_memo, create_reminder, list_memos, list_due_memos, dispatch_due_memos, get_next_memo_wake, complete_memo, archive_memo, snooze_memo, mark_memo_triggered]

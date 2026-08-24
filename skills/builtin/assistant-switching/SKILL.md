@@ -2,7 +2,7 @@
 name: assistant-switching
 description: 查看可用助手，或在当前根回合结束后将会话可靠地交接给指定助手。
 metadata:
-  monagent:
+  edenagent:
     display_name: 助手查看与会话切换
     version: 1.2.0
     tools: [list_assistants, switch_session_assistant]

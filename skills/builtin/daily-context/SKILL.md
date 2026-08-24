@@ -2,7 +2,7 @@
 name: daily-context
 description: 查询节日、农历、特殊日期、实时天气和出行影响。
 metadata:
-  monagent:
+  edenagent:
     display_name: 日历天气与生活环境
     version: 1.0.0
     tools: [get_calendar_context, get_weather]

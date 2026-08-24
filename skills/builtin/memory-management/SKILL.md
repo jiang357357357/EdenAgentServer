@@ -2,7 +2,7 @@
 name: memory-management
 description: 搜索、写入、修正或删除当前角色自己的长期记忆。
 metadata:
-  monagent:
+  edenagent:
     display_name: 长期记忆
     version: 1.0.0
     tools: [remember_memory, search_memories, update_memory, forget_memory]

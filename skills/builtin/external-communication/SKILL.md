@@ -2,7 +2,7 @@
 name: external-communication
 description: 自主选择 QQ 私信或邮件联系当前用户，也可向明确指定的已批准目标发送消息。
 metadata:
-  monagent:
+  edenagent:
     display_name: 对外联系
     version: 1.0.0
     tools: [contact_user, qq_bot_list, qq_bot_targets, read_qq_messages, send_qq_message, external_email_status, send_external_email]

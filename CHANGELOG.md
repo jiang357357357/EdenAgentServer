@@ -1,6 +1,6 @@
 # 更新日志
 
-本文件记录 MonAgent Server 的显著变化。
+本文件记录 Eden Agent Server 的显著变化。
 
 ## [Unreleased]
 

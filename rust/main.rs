@@ -14,8 +14,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use clap::Parser;
-use futures::{SinkExt, StreamExt};
-use mon_agent_api::{
+use eden_agent_api::{
     AgentListParams, AgentMessageParams, AgentReadParams, AgentThreadInfo, AgentThreadResultInfo,
     AgentThreadStatus, BlobInfo, ConnectorCatalogInfo, ConnectorCreateParams, ConnectorInfo,
     ConnectorUpdateParams, DirectorBeatInfo, DirectorExecutionInfo, DirectorListParams,
@@ -44,40 +43,41 @@ use mon_agent_api::{
     WorkspaceEntryInfo, WorkspaceEntryKind, WorkspaceFileInfo, WorkspaceInfo, WorkspacePathParams,
     WorkspaceSwitchParams,
 };
-use mon_agent_app::SessionRuntime;
-use mon_agent_blob::BlobService;
-use mon_agent_connector_package::{
+use eden_agent_app::SessionRuntime;
+use eden_agent_blob::BlobService;
+use eden_agent_connector_package::{
     LoadPolicy as ConnectorPackageLoadPolicy, LoadedPackage as LoadedConnectorPackage,
 };
-use mon_agent_connectors::{ConnectorPermissionGrant, ConnectorService, PluginConnectorPackage};
-use mon_agent_core::{ModelAdapter, SessionId, ToolDefinition, ToolExecutionMode, ToolRegistry};
-use mon_agent_core_sync::{CoreSyncError, CoreSyncService};
-use mon_agent_host::HostServices;
-use mon_agent_interaction::{MediaService, QuestionService};
-use mon_agent_market::{
+use eden_agent_connectors::{ConnectorPermissionGrant, ConnectorService, PluginConnectorPackage};
+use eden_agent_core::{ModelAdapter, SessionId, ToolDefinition, ToolExecutionMode, ToolRegistry};
+use eden_agent_core_sync::{CoreSyncError, CoreSyncService};
+use eden_agent_host::HostServices;
+use eden_agent_interaction::{MediaService, QuestionService};
+use eden_agent_market::{
     MarketIndexEnvelope, MarketRevocation, MarketplaceClient, VerifiedMarketIndex, verify_index,
 };
-use mon_agent_mcp::{McpComponentConfig, McpManager, McpRuntimeKind};
-use mon_agent_multiagent::{MultiAgentService, SubagentCatalog};
-use mon_agent_plugins::{
+use eden_agent_mcp::{McpComponentConfig, McpManager, McpRuntimeKind};
+use eden_agent_multiagent::{MultiAgentService, SubagentCatalog};
+use eden_agent_plugins::{
     LoadPolicy as PluginLoadPolicy, LoadedPlugin, ManagedInstallPreview, PluginInstaller,
     PluginManifest, RuntimeKind,
 };
-use mon_agent_provider::{CoreModelClient, DynamicModelProvider};
+use eden_agent_provider::{CoreModelClient, DynamicModelProvider};
 #[cfg(test)]
-use mon_agent_provider::{UnavailableProvider, model_spec_from_env};
-use mon_agent_sandbox::{
+use eden_agent_provider::{UnavailableProvider, model_spec_from_env};
+use eden_agent_sandbox::{
     ApprovalDecision, ApprovalService, PermissionMode as SandboxPermissionMode, PermissionPolicy,
     PolicyEffect,
 };
-use mon_agent_skills::{SkillCatalog, SkillDefinition};
-use mon_agent_store::{
+use eden_agent_skills::{SkillCatalog, SkillDefinition};
+use eden_agent_store::{
     EventRecord, PluginInstallRecord, PluginMarketRevocationInput, PluginMarketSourceRecord,
     PluginPermissionGrantInput, PluginPermissionGrantRecord, PluginRecord, SessionRecord,
     SessionRuntimeOrigin, Store,
 };
-use mon_agent_tools::ProcessSandbox;
-use mon_agent_workspace::WorkspaceService;
+use eden_agent_tools::ProcessSandbox;
+use eden_agent_workspace::WorkspaceService;
+use futures::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -100,59 +100,63 @@ use uuid::Uuid;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "mon-agent-server",
+    name = "eden-agent-server",
     version,
-    about = "MonAgent local Rust server"
+    about = "Eden Agent local Rust server"
 )]
 struct Args {
-    #[arg(long, env = "MON_AGENT_BIND", default_value = "127.0.0.1:40092")]
+    #[arg(long, env = "EDEN_AGENT_BIND", default_value = "127.0.0.1:40092")]
     bind: SocketAddr,
 
-    #[arg(long, env = "MON_AGENT_CAPABILITY_TOKEN")]
+    #[arg(long, env = "EDEN_AGENT_CAPABILITY_TOKEN")]
     capability_token: Option<String>,
 
     #[arg(
         long,
-        env = "MON_AGENT_TOKEN_FILE",
+        env = "EDEN_AGENT_TOKEN_FILE",
         default_value = "Data/server-capability.token"
     )]
     token_file: PathBuf,
 
-    #[arg(long, env = "MON_AGENT_DATABASE", default_value = "Data/mon-agent.db")]
+    #[arg(
+        long,
+        env = "EDEN_AGENT_DATABASE",
+        default_value = "Data/eden-agent.db"
+    )]
     database: PathBuf,
 
-    #[arg(long, env = "MON_AGENT_LOG_DIRECTORY", default_value = "Data/logs")]
+    #[arg(long, env = "EDEN_AGENT_LOG_DIRECTORY", default_value = "Data/logs")]
     log_directory: PathBuf,
 
     #[arg(
         long,
-        env = "MON_AGENT_LOG_MAX_BYTES",
+        env = "EDEN_AGENT_LOG_MAX_BYTES",
         default_value_t = 10 * 1024 * 1024
     )]
     log_max_bytes: u64,
 
-    #[arg(long, env = "MON_AGENT_LOG_MAX_FILES", default_value_t = 5)]
+    #[arg(long, env = "EDEN_AGENT_LOG_MAX_FILES", default_value_t = 5)]
     log_max_files: usize,
 
     #[arg(
         long,
-        env = "MON_AGENT_LEGACY_CORE_DATABASE",
+        env = "EDEN_AGENT_LEGACY_CORE_DATABASE",
         default_value = "../Core/Data/DB/SQLite/db.sqlite3"
     )]
     legacy_core_database: PathBuf,
 
-    #[arg(long, env = "MON_AGENT_BLOB_ROOT", default_value = "Data/blobs")]
+    #[arg(long, env = "EDEN_AGENT_BLOB_ROOT", default_value = "Data/blobs")]
     blob_root: PathBuf,
 
-    #[arg(long, env = "MON_AGENT_MAX_BLOB_BYTES", default_value_t = 32 * 1024 * 1024)]
+    #[arg(long, env = "EDEN_AGENT_MAX_BLOB_BYTES", default_value_t = 32 * 1024 * 1024)]
     max_blob_bytes: usize,
 
-    #[arg(long, env = "MON_AGENT_WORKSPACE_ROOT", default_value = ".")]
+    #[arg(long, env = "EDEN_AGENT_WORKSPACE_ROOT", default_value = ".")]
     workspace_root: PathBuf,
 
     #[arg(
         long,
-        env = "MON_AGENT_SKILL_ROOTS",
+        env = "EDEN_AGENT_SKILL_ROOTS",
         value_delimiter = ',',
         default_value = "Server/skills/builtin,.agents/skills"
     )]
@@ -160,15 +164,15 @@ struct Args {
 
     #[arg(
         long,
-        env = "MON_AGENT_SKILL_INSTALL_ROOT",
+        env = "EDEN_AGENT_SKILL_INSTALL_ROOT",
         default_value = "Data/skills"
     )]
     skill_install_root: PathBuf,
 
-    #[arg(long, env = "MON_AGENT_PLUGIN_ROOT", default_value = "Data/plugins")]
+    #[arg(long, env = "EDEN_AGENT_PLUGIN_ROOT", default_value = "Data/plugins")]
     plugin_root: PathBuf,
 
-    #[arg(long, env = "MON_AGENT_SANDBOX_EXECUTABLE")]
+    #[arg(long, env = "EDEN_AGENT_SANDBOX_EXECUTABLE")]
     sandbox_executable: Option<PathBuf>,
 
     #[arg(long, env = "MON_CORE_BASE_URL")]
@@ -179,9 +183,9 @@ struct Args {
 
     #[arg(
         long,
-        env = "MON_AGENT_ALLOWED_ORIGINS",
+        env = "EDEN_AGENT_ALLOWED_ORIGINS",
         value_delimiter = ',',
-        default_value = "http://127.0.0.1:40091,http://localhost:40091,monagent://app"
+        default_value = "http://127.0.0.1:40091,http://localhost:40091,edenagent://app"
     )]
     allowed_origins: Vec<String>,
 
@@ -264,13 +268,13 @@ impl LocalGsvTtsConfig {
             })
         }
 
-        let provider = text("MON_AGENT_TTS_PROVIDER", "gsv");
+        let provider = text("EDEN_AGENT_TTS_PROVIDER", "gsv");
         if provider != "gsv" {
             return Err(RpcFailure::application(format!(
                 "unsupported local TTS provider: {provider}"
             )));
         }
-        let service_url = text("MON_AGENT_TTS_SERVICE_URL", "http://127.0.0.1:40302")
+        let service_url = text("EDEN_AGENT_TTS_SERVICE_URL", "http://127.0.0.1:40302")
             .trim_end_matches('/')
             .to_owned();
         let parsed = reqwest::Url::parse(&service_url)
@@ -278,31 +282,31 @@ impl LocalGsvTtsConfig {
         if !matches!(parsed.scheme(), "http" | "https") {
             return Err(RpcFailure::application("GSV 服务地址只支持 HTTP 或 HTTPS"));
         }
-        let role_id = std::env::var("MON_AGENT_TTS_ROLE_ID")
+        let role_id = std::env::var("EDEN_AGENT_TTS_ROLE_ID")
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
         Ok(Self {
             service_url,
-            version: text("MON_AGENT_TTS_VERSION", "v2ProPlus"),
-            world: text("MON_AGENT_TTS_WORLD", "Default"),
-            role: text("MON_AGENT_TTS_ROLE", "阿罗娜"),
+            version: text("EDEN_AGENT_TTS_VERSION", "v2ProPlus"),
+            world: text("EDEN_AGENT_TTS_WORLD", "Default"),
+            role: text("EDEN_AGENT_TTS_ROLE", "阿罗娜"),
             role_id,
-            emotion: text("MON_AGENT_TTS_EMOTION", "平常"),
-            text_language: text("MON_AGENT_TTS_TEXT_LANGUAGE", "中文"),
-            speed: number::<f64>("MON_AGENT_TTS_SPEED", 1.0).clamp(0.5, 2.0),
+            emotion: text("EDEN_AGENT_TTS_EMOTION", "平常"),
+            text_language: text("EDEN_AGENT_TTS_TEXT_LANGUAGE", "中文"),
+            speed: number::<f64>("EDEN_AGENT_TTS_SPEED", 1.0).clamp(0.5, 2.0),
             timeout: Duration::from_secs(
-                number::<u64>("MON_AGENT_TTS_TIMEOUT_SECONDS", 60).clamp(5, 300),
+                number::<u64>("EDEN_AGENT_TTS_TIMEOUT_SECONDS", 60).clamp(5, 300),
             ),
-            top_k: number::<u32>("MON_AGENT_TTS_TOP_K", 20).clamp(1, 100),
-            top_p: number::<f64>("MON_AGENT_TTS_TOP_P", 0.6).clamp(0.0, 1.0),
-            temperature: number::<f64>("MON_AGENT_TTS_TEMPERATURE", 0.6).clamp(0.0, 2.0),
-            sample_steps: number::<u32>("MON_AGENT_TTS_SAMPLE_STEPS", 8).clamp(1, 100),
-            pause_seconds: number::<f64>("MON_AGENT_TTS_PAUSE_SECONDS", 0.3).clamp(0.0, 5.0),
-            cut_method: text("MON_AGENT_TTS_CUT_METHOD", "凑四句一切"),
-            super_resolution: boolean("MON_AGENT_TTS_SUPER_RESOLUTION"),
-            reference_free: boolean("MON_AGENT_TTS_REFERENCE_FREE"),
-            freeze: boolean("MON_AGENT_TTS_FREEZE"),
+            top_k: number::<u32>("EDEN_AGENT_TTS_TOP_K", 20).clamp(1, 100),
+            top_p: number::<f64>("EDEN_AGENT_TTS_TOP_P", 0.6).clamp(0.0, 1.0),
+            temperature: number::<f64>("EDEN_AGENT_TTS_TEMPERATURE", 0.6).clamp(0.0, 2.0),
+            sample_steps: number::<u32>("EDEN_AGENT_TTS_SAMPLE_STEPS", 8).clamp(1, 100),
+            pause_seconds: number::<f64>("EDEN_AGENT_TTS_PAUSE_SECONDS", 0.3).clamp(0.0, 5.0),
+            cut_method: text("EDEN_AGENT_TTS_CUT_METHOD", "凑四句一切"),
+            super_resolution: boolean("EDEN_AGENT_TTS_SUPER_RESOLUTION"),
+            reference_free: boolean("EDEN_AGENT_TTS_REFERENCE_FREE"),
+            freeze: boolean("EDEN_AGENT_TTS_FREEZE"),
         })
     }
 }
@@ -353,11 +357,11 @@ impl LocalGsvSttConfig {
             })
         }
 
-        let provider = text("MON_AGENT_STT_PROVIDER", "gsv");
+        let provider = text("EDEN_AGENT_STT_PROVIDER", "gsv");
         if provider != "gsv" {
             return Err(format!("unsupported local STT provider: {provider}"));
         }
-        let service_url = text("MON_AGENT_STT_SERVICE_URL", "http://127.0.0.1:40302")
+        let service_url = text("EDEN_AGENT_STT_SERVICE_URL", "http://127.0.0.1:40302")
             .trim_end_matches('/')
             .to_owned();
         let parsed = reqwest::Url::parse(&service_url)
@@ -367,25 +371,25 @@ impl LocalGsvSttConfig {
         }
         Ok(Self {
             service_url,
-            language: text("MON_AGENT_STT_LANGUAGE", "zh"),
-            model_type: text("MON_AGENT_STT_MODEL_TYPE", "funasr"),
-            model_size: text("MON_AGENT_STT_MODEL_SIZE", "large"),
-            precision: text("MON_AGENT_STT_PRECISION", "float32"),
+            language: text("EDEN_AGENT_STT_LANGUAGE", "zh"),
+            model_type: text("EDEN_AGENT_STT_MODEL_TYPE", "funasr"),
+            model_size: text("EDEN_AGENT_STT_MODEL_SIZE", "large"),
+            precision: text("EDEN_AGENT_STT_PRECISION", "float32"),
             timeout: Duration::from_secs(
-                number::<u64>("MON_AGENT_STT_TIMEOUT_SECONDS", 60).clamp(1, 300),
+                number::<u64>("EDEN_AGENT_STT_TIMEOUT_SECONDS", 60).clamp(1, 300),
             ),
-            retry_count: number::<u32>("MON_AGENT_STT_RETRY_COUNT", 3).clamp(0, 10),
-            end_silence_ms: number::<u32>("MON_AGENT_STT_END_SILENCE_MS", 1200).clamp(300, 5000),
-            session_end_silence_ms: number::<u32>("MON_AGENT_STT_SESSION_END_SILENCE_MS", 3000)
+            retry_count: number::<u32>("EDEN_AGENT_STT_RETRY_COUNT", 3).clamp(0, 10),
+            end_silence_ms: number::<u32>("EDEN_AGENT_STT_END_SILENCE_MS", 1200).clamp(300, 5000),
+            session_end_silence_ms: number::<u32>("EDEN_AGENT_STT_SESSION_END_SILENCE_MS", 3000)
                 .clamp(1000, 15000),
-            auto_finish: boolean("MON_AGENT_STT_AUTO_FINISH", true),
-            auto_send: boolean("MON_AGENT_STT_AUTO_SEND", false),
-            min_speech_duration_ms: number::<u32>("MON_AGENT_STT_MIN_SPEECH_DURATION_MS", 250)
+            auto_finish: boolean("EDEN_AGENT_STT_AUTO_FINISH", true),
+            auto_send: boolean("EDEN_AGENT_STT_AUTO_SEND", false),
+            min_speech_duration_ms: number::<u32>("EDEN_AGENT_STT_MIN_SPEECH_DURATION_MS", 250)
                 .clamp(100, 2000),
-            speech_noise_threshold: number::<f64>("MON_AGENT_STT_SPEECH_NOISE_THRESHOLD", 0.6)
+            speech_noise_threshold: number::<f64>("EDEN_AGENT_STT_SPEECH_NOISE_THRESHOLD", 0.6)
                 .clamp(0.1, 1.0),
-            preroll_ms: number::<u32>("MON_AGENT_STT_PREROLL_MS", 1200).clamp(0, 3000),
-            chunk_ms: number::<u32>("MON_AGENT_STT_CHUNK_MS", 200).clamp(100, 1000),
+            preroll_ms: number::<u32>("EDEN_AGENT_STT_PREROLL_MS", 1200).clamp(0, 3000),
+            chunk_ms: number::<u32>("EDEN_AGENT_STT_CHUNK_MS", 200).clamp(100, 1000),
         })
     }
 
@@ -506,7 +510,7 @@ impl WorkspaceSkillRoots {
                 if root.is_absolute() {
                     root.clone()
                 } else if root.components().next().is_some_and(|component| {
-                    matches!(component, Component::Normal(name) if name == ".agents" || name == ".monagent")
+                    matches!(component, Component::Normal(name) if name == ".agents" || name == ".edenagent")
                 }) {
                     workspace_root.join(root)
                 } else {
@@ -832,7 +836,7 @@ async fn main() -> Result<()> {
         tools.register(tool);
     }
     let registered_tool_definitions = tools.direct_definitions();
-    mon_agent_core::validate_tool_definitions(&registered_tool_definitions)
+    eden_agent_core::validate_tool_definitions(&registered_tool_definitions)
         .map_err(|error| anyhow::anyhow!("registered tool contract is invalid: {error}"))?;
     skills.set_known_tools(
         registered_tool_definitions
@@ -915,7 +919,7 @@ async fn main() -> Result<()> {
         token_file = %args.token_file.display(),
         database = %args.database.display(),
         workspace = %workspace_root.display(),
-        "MonAgent Rust server listening"
+        "Eden Agent Rust server listening"
     );
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -933,7 +937,7 @@ async fn main() -> Result<()> {
 
 fn skill_system_prompt(skills: &SkillCatalog) -> String {
     format!(
-        "You are MonAgent, a local assistant. Use tools carefully and explain consequential actions.{}",
+        "You are Eden Agent, a local assistant. Use tools carefully and explain consequential actions.{}",
         skills.inventory_prompt()
     )
 }
@@ -1352,7 +1356,7 @@ fn plugin_skill_roots(package: &LoadedPlugin) -> Result<Vec<PathBuf>, String> {
 }
 
 fn permission_is_allowed(
-    permission: &mon_agent_plugins::PermissionDeclaration,
+    permission: &eden_agent_plugins::PermissionDeclaration,
     revision: &str,
     grants: &[PluginPermissionGrantRecord],
 ) -> bool {
@@ -2431,7 +2435,7 @@ async fn local_realtime_stt(socket: WebSocket, config: LocalGsvSttConfig) {
     let connection = json!({
         "type": "connection",
         "status": "connected",
-        "message": "MonAgent 本地 GSV 实时 STT 已就绪",
+        "message": "Eden Agent 本地 GSV 实时 STT 已就绪",
     });
     if client_sender
         .send(Message::Text(connection.to_string().into()))
@@ -2660,7 +2664,7 @@ async fn cache_core_audio(
     state: &AppState,
     session_id: &str,
     source: &str,
-) -> Result<mon_agent_core::BlobId, RpcFailure> {
+) -> Result<eden_agent_core::BlobId, RpcFailure> {
     let (mime, bytes) = state
         .host_services
         .fetch_core_audio(session_id, source)
@@ -2857,7 +2861,7 @@ async fn health() -> impl IntoResponse {
     axum::Json(HealthResponse {
         status: "ok",
         server_version: env!("CARGO_PKG_VERSION"),
-        agent_core_version: mon_agent_core::VERSION,
+        agent_core_version: eden_agent_core::VERSION,
         protocol_version: PROTOCOL_VERSION,
     })
 }
@@ -3016,7 +3020,7 @@ async fn metrics(State(state): State<AppState>) -> Response {
         Err(error) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                format!("unable to collect MonAgent metrics: {error}\n"),
+                format!("unable to collect Eden Agent metrics: {error}\n"),
             )
                 .into_response();
         }
@@ -3037,7 +3041,7 @@ async fn metrics(State(state): State<AppState>) -> Response {
         Err(error) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                format!("unable to collect MonAgent migration metrics: {error}\n"),
+                format!("unable to collect Eden Agent migration metrics: {error}\n"),
             )
                 .into_response();
         }
@@ -3051,229 +3055,229 @@ async fn metrics(State(state): State<AppState>) -> Response {
         }};
     }
     metric!(
-        "mon_agent_active_sessions",
+        "eden_agent_active_sessions",
         "gauge",
         "Active durable sessions.",
         snapshot.active_sessions
     );
     metric!(
-        "mon_agent_input_queue",
+        "eden_agent_input_queue",
         "gauge",
         "Queued durable inputs.",
         snapshot.queued_inputs
     );
     metric!(
-        "mon_agent_inputs_active",
+        "eden_agent_inputs_active",
         "gauge",
         "Claimed durable inputs.",
         snapshot.claimed_inputs
     );
     metric!(
-        "mon_agent_subagents_active",
+        "eden_agent_subagents_active",
         "gauge",
         "Queued or running sub-agents.",
         snapshot.active_agents
     );
     metric!(
-        "mon_agent_jobs_scheduled",
+        "eden_agent_jobs_scheduled",
         "gauge",
         "Scheduled durable jobs.",
         snapshot.scheduled_jobs
     );
     metric!(
-        "mon_agent_jobs_claimed",
+        "eden_agent_jobs_claimed",
         "gauge",
         "Claimed durable jobs.",
         snapshot.claimed_jobs
     );
     metric!(
-        "mon_agent_connector_event_queue",
+        "eden_agent_connector_event_queue",
         "gauge",
         "Pending or claimed connector events.",
         snapshot.pending_connector_events
     );
     metric!(
-        "mon_agent_core_sync_queue",
+        "eden_agent_core_sync_queue",
         "gauge",
         "Queued or claimed Core projections.",
         snapshot.pending_core_sync
     );
     metric!(
-        "mon_agent_turns_started_total",
+        "eden_agent_turns_started_total",
         "counter",
         "Turns started since runtime metrics were installed.",
         snapshot.turns_started
     );
     metric!(
-        "mon_agent_turns_completed_total",
+        "eden_agent_turns_completed_total",
         "counter",
         "Turns completed since runtime metrics were installed.",
         snapshot.turns_completed
     );
     metric!(
-        "mon_agent_turns_failed_total",
+        "eden_agent_turns_failed_total",
         "counter",
         "Turns failed since runtime metrics were installed.",
         snapshot.turns_failed
     );
     metric!(
-        "mon_agent_provider_retries_total",
+        "eden_agent_provider_retries_total",
         "counter",
         "Provider retries since runtime metrics were installed.",
         snapshot.provider_retries
     );
     metric!(
-        "mon_agent_tool_calls_started_total",
+        "eden_agent_tool_calls_started_total",
         "counter",
         "Tool calls started since runtime metrics were installed.",
         snapshot.tool_calls_started
     );
     metric!(
-        "mon_agent_tool_calls_completed_total",
+        "eden_agent_tool_calls_completed_total",
         "counter",
         "Tool calls completed since runtime metrics were installed.",
         snapshot.tool_calls_completed
     );
     metric!(
-        "mon_agent_tool_calls_failed_total",
+        "eden_agent_tool_calls_failed_total",
         "counter",
         "Tool calls failed since runtime metrics were installed.",
         snapshot.tool_calls_failed
     );
     metric!(
-        "mon_agent_first_token_seconds_count",
+        "eden_agent_first_token_seconds_count",
         "counter",
         "First-token latency samples since runtime metrics were installed.",
         snapshot.first_token_samples
     );
     metric!(
-        "mon_agent_first_token_seconds_sum",
+        "eden_agent_first_token_seconds_sum",
         "counter",
         "Cumulative first-token latency in seconds.",
         snapshot.first_token_total_ms as f64 / 1_000.0
     );
     metric!(
-        "mon_agent_turn_duration_seconds_count",
+        "eden_agent_turn_duration_seconds_count",
         "counter",
         "Turn duration samples since runtime metrics were installed.",
         snapshot.turn_duration_samples
     );
     metric!(
-        "mon_agent_turn_duration_seconds_sum",
+        "eden_agent_turn_duration_seconds_sum",
         "counter",
         "Cumulative turn duration in seconds.",
         snapshot.turn_duration_total_ms as f64 / 1_000.0
     );
     metric!(
-        "mon_agent_tool_duration_seconds_count",
+        "eden_agent_tool_duration_seconds_count",
         "counter",
         "Tool duration samples since runtime metrics were installed.",
         snapshot.tool_duration_samples
     );
     metric!(
-        "mon_agent_tool_duration_seconds_sum",
+        "eden_agent_tool_duration_seconds_sum",
         "counter",
         "Cumulative tool duration in seconds.",
         snapshot.tool_duration_total_ms as f64 / 1_000.0
     );
     metric!(
-        "mon_agent_database_scrape_latency_seconds",
+        "eden_agent_database_scrape_latency_seconds",
         "gauge",
         "SQLite metrics query latency.",
         database_latency_seconds
     );
     metric!(
-        "mon_agent_worker_durable_jobs_heartbeat_age_seconds",
+        "eden_agent_worker_durable_jobs_heartbeat_age_seconds",
         "gauge",
         "Durable job scheduler heartbeat age.",
         worker_age(state.diagnostics.durable_jobs_heartbeat.as_ref())
     );
     metric!(
-        "mon_agent_worker_catalog_heartbeat_age_seconds",
+        "eden_agent_worker_catalog_heartbeat_age_seconds",
         "gauge",
         "Catalog worker heartbeat age.",
         worker_age(state.diagnostics.catalog_heartbeat.as_ref())
     );
     metric!(
-        "mon_agent_worker_core_sync_heartbeat_age_seconds",
+        "eden_agent_worker_core_sync_heartbeat_age_seconds",
         "gauge",
         "Core sync worker heartbeat age.",
         worker_age(state.diagnostics.core_sync_heartbeat.as_ref())
     );
     metric!(
-        "mon_agent_worker_connectors_heartbeat_age_seconds",
+        "eden_agent_worker_connectors_heartbeat_age_seconds",
         "gauge",
         "Connector supervisor heartbeat age.",
         worker_age(state.diagnostics.connector_heartbeat.as_ref())
     );
     metric!(
-        "mon_agent_model_available",
+        "eden_agent_model_available",
         "gauge",
         "Whether at least one usable model binding exists.",
         if models.is_ready() { 1 } else { 0 }
     );
     metric!(
-        "mon_agent_model_default_available",
+        "eden_agent_model_default_available",
         "gauge",
         "Whether the default model binding is usable.",
         if models.default_available { 1 } else { 0 }
     );
     metric!(
-        "mon_agent_model_session_bindings_available",
+        "eden_agent_model_session_bindings_available",
         "gauge",
         "Usable session model bindings.",
         models.available_session_bindings
     );
     metric!(
-        "mon_agent_model_session_bindings_unavailable",
+        "eden_agent_model_session_bindings_unavailable",
         "gauge",
         "Unusable session model bindings.",
         models.unavailable_session_bindings
     );
     metric!(
-        "mon_agent_model_actor_bindings_available",
+        "eden_agent_model_actor_bindings_available",
         "gauge",
         "Usable actor model bindings.",
         models.available_actor_bindings
     );
     metric!(
-        "mon_agent_model_actor_bindings_unavailable",
+        "eden_agent_model_actor_bindings_unavailable",
         "gauge",
         "Unusable actor model bindings.",
         models.unavailable_actor_bindings
     );
     metric!(
-        "mon_agent_legacy_sessions_imported",
+        "eden_agent_legacy_sessions_imported",
         "gauge",
         "Legacy MonCore sessions recorded as imported.",
         migration.imported_sessions
     );
     metric!(
-        "mon_agent_legacy_domain_items_imported",
+        "eden_agent_legacy_domain_items_imported",
         "gauge",
         "Legacy MonCore domain items recorded as imported.",
         migration.imported_domain_items
     );
     metric!(
-        "mon_agent_legacy_skill_reinstalls_pending",
+        "eden_agent_legacy_skill_reinstalls_pending",
         "gauge",
         "Legacy skills requiring explicit reinstall.",
         migration.skills_requiring_reinstall
     );
     metric!(
-        "mon_agent_legacy_connector_reconnects_pending",
+        "eden_agent_legacy_connector_reconnects_pending",
         "gauge",
         "Legacy connectors requiring explicit reconnect.",
         migration.connectors_requiring_reconnect
     );
     metric!(
-        "mon_agent_legacy_work_items_quarantined",
+        "eden_agent_legacy_work_items_quarantined",
         "gauge",
         "Legacy work items preserved without replay.",
         migration.quarantined_work_items
     );
     metric!(
-        "mon_agent_legacy_permission_reauthorization_required",
+        "eden_agent_legacy_permission_reauthorization_required",
         "gauge",
         "Whether a legacy elevated permission mode requires explicit reauthorization.",
         if migration.permission_reauthorization_required {
@@ -3283,7 +3287,7 @@ async fn metrics(State(state): State<AppState>) -> Response {
         }
     );
     metric!(
-        "mon_agent_process_uptime_seconds",
+        "eden_agent_process_uptime_seconds",
         "gauge",
         "Server process uptime.",
         now.saturating_sub(state.diagnostics.started_at).max(0) as f64 / 1_000.0
@@ -3525,9 +3529,9 @@ async fn process_client_text(
                         id,
                         InitializeResult {
                             protocol_version: PROTOCOL_VERSION,
-                            server_name: "mon-agent-server".to_owned(),
+                            server_name: "eden-agent-server".to_owned(),
                             server_version: env!("CARGO_PKG_VERSION").to_owned(),
-                            agent_core_version: mon_agent_core::VERSION.to_owned(),
+                            agent_core_version: eden_agent_core::VERSION.to_owned(),
                             capabilities: runtime_capabilities(origin),
                             runtime_origin: origin,
                         },
@@ -4617,7 +4621,7 @@ async fn execute_method_for_origin(
                 || params.key_id.trim().is_empty()
                 || params.key_id.len() > 160
                 || params.url.len() > 2_048
-                || mon_agent_market::validate_market_url(&params.url).is_err()
+                || eden_agent_market::validate_market_url(&params.url).is_err()
             {
                 return Err(RpcFailure::invalid_params(
                     "invalid plugin market source metadata",
@@ -4806,7 +4810,7 @@ async fn execute_method_for_origin(
             let params: MemoCreateParams = parse_params(params)?;
             let memo = state
                 .store
-                .create_memo(mon_agent_store::MemoInput {
+                .create_memo(eden_agent_store::MemoInput {
                     title: params.title,
                     content: params.content,
                     kind: params.kind,
@@ -4815,7 +4819,7 @@ async fn execute_method_for_origin(
                     remind_at: params.remind_at,
                     due_at: params.due_at,
                     repeat_rule: params.repeat_rule,
-                    source: "monagent".to_owned(),
+                    source: "edenagent".to_owned(),
                     related_session_id: params.related_session_id,
                     metadata: params.metadata,
                 })
@@ -5698,7 +5702,7 @@ async fn workspace_target(
     Ok((root, target))
 }
 
-fn memo_info(memo: mon_agent_store::MemoRecord) -> MemoInfo {
+fn memo_info(memo: eden_agent_store::MemoRecord) -> MemoInfo {
     MemoInfo {
         id: memo.id,
         title: memo.title,
@@ -5718,7 +5722,7 @@ fn memo_info(memo: mon_agent_store::MemoRecord) -> MemoInfo {
     }
 }
 
-fn connector_info(connector: mon_agent_store::ConnectorRecord) -> ConnectorInfo {
+fn connector_info(connector: eden_agent_store::ConnectorRecord) -> ConnectorInfo {
     ConnectorInfo {
         id: connector.id.to_string(),
         connector_key: connector.connector_key,
@@ -5733,7 +5737,7 @@ fn connector_info(connector: mon_agent_store::ConnectorRecord) -> ConnectorInfo 
     }
 }
 
-fn media_info(record: mon_agent_store::MediaRequestRecord) -> MediaRequestInfo {
+fn media_info(record: eden_agent_store::MediaRequestRecord) -> MediaRequestInfo {
     MediaRequestInfo {
         id: record.id.to_string(),
         session_id: record.session_id,
@@ -5773,8 +5777,8 @@ fn session_summary(record: SessionRecord) -> SessionSummary {
         title: record.title,
         title_source: record.title_source,
         status: match record.status {
-            mon_agent_store::SessionStatus::Active => SessionStatus::Active,
-            mon_agent_store::SessionStatus::Closed => SessionStatus::Closed,
+            eden_agent_store::SessionStatus::Active => SessionStatus::Active,
+            eden_agent_store::SessionStatus::Closed => SessionStatus::Closed,
         },
         runtime_origin,
         participants,
@@ -5786,7 +5790,7 @@ fn session_summary(record: SessionRecord) -> SessionSummary {
     }
 }
 
-fn session_event(event: mon_agent_store::EventRecord) -> SessionEvent {
+fn session_event(event: eden_agent_store::EventRecord) -> SessionEvent {
     SessionEvent {
         id: event.id.to_string(),
         session_id: event.session_id,
@@ -5798,7 +5802,7 @@ fn session_event(event: mon_agent_store::EventRecord) -> SessionEvent {
     }
 }
 
-fn permission_info(permission: mon_agent_store::PermissionRecord) -> PermissionRequestInfo {
+fn permission_info(permission: eden_agent_store::PermissionRecord) -> PermissionRequestInfo {
     PermissionRequestInfo {
         id: permission.id,
         session_id: permission.session_id,
@@ -5807,10 +5811,10 @@ fn permission_info(permission: mon_agent_store::PermissionRecord) -> PermissionR
         capability: permission.capability,
         resource: permission.resource,
         state: match permission.state {
-            mon_agent_store::PermissionState::Pending => "pending",
-            mon_agent_store::PermissionState::Allowed => "allowed",
-            mon_agent_store::PermissionState::Denied => "denied",
-            mon_agent_store::PermissionState::Expired => "expired",
+            eden_agent_store::PermissionState::Pending => "pending",
+            eden_agent_store::PermissionState::Allowed => "allowed",
+            eden_agent_store::PermissionState::Denied => "denied",
+            eden_agent_store::PermissionState::Expired => "expired",
         }
         .to_owned(),
         request: permission.request,
@@ -5818,7 +5822,7 @@ fn permission_info(permission: mon_agent_store::PermissionRecord) -> PermissionR
     }
 }
 
-fn operation_info(operation: mon_agent_store::OperationJournalRecord) -> OperationInfo {
+fn operation_info(operation: eden_agent_store::OperationJournalRecord) -> OperationInfo {
     OperationInfo {
         operation_id: operation.operation_id,
         session_id: operation.session_id,
@@ -5837,7 +5841,7 @@ fn operation_info(operation: mon_agent_store::OperationJournalRecord) -> Operati
 }
 
 fn question_info(
-    question: mon_agent_store::QuestionRecord,
+    question: eden_agent_store::QuestionRecord,
 ) -> Result<QuestionRequestInfo, RpcFailure> {
     let questions = serde_json::from_value(question.questions).map_err(|error| {
         RpcFailure::application(format!("invalid stored question payload: {error}"))
@@ -5847,10 +5851,10 @@ fn question_info(
         session_id: question.session_id,
         turn_id: question.turn_id,
         state: match question.state {
-            mon_agent_store::QuestionState::Pending => "pending",
-            mon_agent_store::QuestionState::Answered => "answered",
-            mon_agent_store::QuestionState::Rejected => "rejected",
-            mon_agent_store::QuestionState::Expired => "expired",
+            eden_agent_store::QuestionState::Pending => "pending",
+            eden_agent_store::QuestionState::Answered => "answered",
+            eden_agent_store::QuestionState::Rejected => "rejected",
+            eden_agent_store::QuestionState::Expired => "expired",
         }
         .to_owned(),
         questions,
@@ -5858,7 +5862,7 @@ fn question_info(
     })
 }
 
-fn agent_info(agent: mon_agent_store::AgentThreadRecord) -> Result<AgentThreadInfo, RpcFailure> {
+fn agent_info(agent: eden_agent_store::AgentThreadRecord) -> Result<AgentThreadInfo, RpcFailure> {
     let status = match agent.status.as_str() {
         "queued" => AgentThreadStatus::Queued,
         "running" => AgentThreadStatus::Running,
@@ -6207,7 +6211,7 @@ mod tests {
             .await
             .expect("health body");
         let value: Value = serde_json::from_slice(&bytes).expect("health JSON");
-        assert_eq!(value["agentCoreVersion"], mon_agent_core::VERSION);
+        assert_eq!(value["agentCoreVersion"], eden_agent_core::VERSION);
         assert_eq!(value["protocolVersion"], PROTOCOL_VERSION);
     }
 
@@ -6247,12 +6251,12 @@ mod tests {
             .await
             .expect("metrics body");
         let body = String::from_utf8(bytes.to_vec()).expect("metrics UTF-8");
-        assert!(body.contains("mon_agent_active_sessions"));
-        assert!(body.contains("mon_agent_first_token_seconds_sum"));
-        assert!(body.contains("mon_agent_provider_retries_total"));
-        assert!(body.contains("mon_agent_database_scrape_latency_seconds"));
-        assert!(body.contains("mon_agent_legacy_skill_reinstalls_pending"));
-        assert!(body.contains("mon_agent_legacy_permission_reauthorization_required"));
+        assert!(body.contains("eden_agent_active_sessions"));
+        assert!(body.contains("eden_agent_first_token_seconds_sum"));
+        assert!(body.contains("eden_agent_provider_retries_total"));
+        assert!(body.contains("eden_agent_database_scrape_latency_seconds"));
+        assert!(body.contains("eden_agent_legacy_skill_reinstalls_pending"));
+        assert!(body.contains("eden_agent_legacy_permission_reauthorization_required"));
     }
 
     #[tokio::test]
@@ -6341,7 +6345,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::SEC_WEBSOCKET_PROTOCOL,
-            format!("{WEBSOCKET_PROTOCOL}, mon-agent-token.0123456789abcdef0123456789abcdef")
+            format!("{WEBSOCKET_PROTOCOL}, eden-agent-token.0123456789abcdef0123456789abcdef")
                 .parse()
                 .expect("header"),
         );
@@ -6351,7 +6355,7 @@ mod tests {
     #[test]
     fn command_line_configuration_parses_typed_long_term_server_settings() {
         let args = Args::try_parse_from([
-            "mon-agent-server",
+            "eden-agent-server",
             "--bind",
             "127.0.0.1:41092",
             "--database",
@@ -6369,7 +6373,7 @@ mod tests {
             "--core-base-url",
             "http://127.0.0.1:40011",
             "--allowed-origins",
-            "http://127.0.0.1:40091,monagent://app",
+            "http://127.0.0.1:40091,edenagent://app",
         ])
         .expect("typed configuration");
         assert_eq!(args.bind, "127.0.0.1:41092".parse().expect("socket"));
@@ -6390,12 +6394,12 @@ mod tests {
             args.allowed_origins,
             vec![
                 "http://127.0.0.1:40091".to_owned(),
-                "monagent://app".to_owned()
+                "edenagent://app".to_owned()
             ]
         );
-        assert!(Args::try_parse_from(["mon-agent-server", "--log-max-files", "many"]).is_err());
+        assert!(Args::try_parse_from(["eden-agent-server", "--log-max-files", "many"]).is_err());
         assert!(
-            Args::try_parse_from(["mon-agent-server", "--bind", "0.0.0.0:not-a-port"]).is_err()
+            Args::try_parse_from(["eden-agent-server", "--bind", "0.0.0.0:not-a-port"]).is_err()
         );
     }
 
@@ -6451,7 +6455,7 @@ mod tests {
                 "protocolVersion":1,
                 "icon":"cable",
                 "entrypoints":{
-                    mon_agent_connector_package::current_platform():{
+                    eden_agent_connector_package::current_platform():{
                         "path":"worker","args":[]
                     }
                 },
@@ -6846,7 +6850,7 @@ mod tests {
             .store
             .enqueue_input(
                 session.id,
-                mon_agent_core::TurnId::new(),
+                eden_agent_core::TurnId::new(),
                 json!({"text":"busy"}),
             )
             .await
@@ -6968,7 +6972,7 @@ mod tests {
             .get_session(session.id)
             .await
             .expect("closed session");
-        assert_eq!(closed.status, mon_agent_store::SessionStatus::Closed);
+        assert_eq!(closed.status, eden_agent_store::SessionStatus::Closed);
     }
 
     #[tokio::test]

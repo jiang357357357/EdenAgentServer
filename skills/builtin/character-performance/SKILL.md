@@ -2,7 +2,7 @@
 name: character-performance
 description: 用当前角色的立绘动作、表情、动效和表情包参与对话演出。
 metadata:
-  monagent:
+  edenagent:
     display_name: 角色演出
     version: 1.0.0
     tools: [list_character_actions, switch_character_action, list_character_stickers, remember_character_sticker, send_character_sticker, delete_character_sticker]

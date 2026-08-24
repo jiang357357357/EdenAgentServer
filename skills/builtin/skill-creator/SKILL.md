@@ -1,8 +1,8 @@
 ---
 name: skill-creator
-description: 创建或安全增量更新用户希望复用的 MonAgent 技能。
+description: 创建或安全增量更新用户希望复用的 Eden Agent 技能。
 metadata:
-  monagent:
+  edenagent:
     display_name: 技能创建
     version: 2.0.0
     tools: [list_skills, create_skill, update_skill]

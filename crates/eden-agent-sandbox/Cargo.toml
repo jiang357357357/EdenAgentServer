@@ -1,0 +1,21 @@
+[package]
+name = "eden-agent-sandbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+globset.workspace = true
+eden-agent-core = { path = "../../../AgentCore/crates/eden-agent-core" }
+eden-agent-domain = { path = "../../../AgentCore/crates/eden-agent-domain" }
+eden-agent-store = { path = "../eden-agent-store" }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true

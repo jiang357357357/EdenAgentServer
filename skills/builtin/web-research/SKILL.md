@@ -2,7 +2,7 @@
 name: web-research
 description: 搜索实时网页信息并抓取相关网页正文。
 metadata:
-  monagent:
+  edenagent:
     display_name: 网页搜索与研究
     version: 1.0.0
     tools: [web]

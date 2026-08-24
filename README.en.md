@@ -1,22 +1,22 @@
 <div align="center">
 
-# MonAgent Rust Server
+# Eden Agent Rust Server
 
-**The local backend, persistence layer, and extension host for MonAgent**
+**The local backend, persistence layer, and extension host for Eden Agent**
 
-[![Integration CI](https://github.com/jiang357357357/MonAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/jiang357357357/MonAgent/actions/workflows/ci.yml)
+[![Integration CI](https://github.com/jiang357357357/EdenAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/jiang357357357/EdenAgent/actions/workflows/ci.yml)
 ![Rust 1.85+](https://img.shields.io/badge/Rust-1.85%2B-dea584?logo=rust&logoColor=white)
 ![Tokio](https://img.shields.io/badge/runtime-Tokio-5566cc)
 ![SQLite](https://img.shields.io/badge/storage-SQLite-003b57?logo=sqlite&logoColor=white)
 ![Version](https://img.shields.io/badge/version-1.8.0-e67700)
 
-[简体中文](README.md) · **English** · [Main repository](https://github.com/jiang357357357/MonAgent)
+[简体中文](README.md) · **English** · [Main repository](https://github.com/jiang357357357/EdenAgent)
 
 </div>
 
 ## Overview
 
-`mon-agent-server` is the only local backend process used by MonAgent. It links the host-independent `AgentCore` Rust crates directly and exposes capability-token-protected WebSocket JSON-RPC and Blob HTTP endpoints.
+`eden-agent-server` is the only local backend process used by Eden Agent. It links the host-independent `AgentCore` Rust crates directly and exposes capability-token-protected WebSocket JSON-RPC and Blob HTTP endpoints.
 
 The Server owns process boundaries and external side effects:
 
@@ -31,26 +31,26 @@ The Server owns process boundaries and external side effects:
 
 ```mermaid
 flowchart LR
-    Client[Web / Electron] -->|WS JSON-RPC| API[mon-agent-api]
-    Client -->|HTTP Blob| Blob[mon-agent-blob]
-    API --> App[mon-agent-app]
+    Client[Web / Electron] -->|WS JSON-RPC| API[eden-agent-api]
+    Client -->|HTTP Blob| Blob[eden-agent-blob]
+    API --> App[eden-agent-app]
     App --> Core[AgentCore]
-    App --> Store[(mon-agent-store / SQLite)]
-    App --> Provider[mon-agent-provider]
+    App --> Store[(eden-agent-store / SQLite)]
+    App --> Provider[eden-agent-provider]
     App --> Extensions[skills / plugins / MCP / connectors]
     Extensions --> Sandbox[permissions / sandbox]
 ```
 
-Events are persisted before they are broadcast to clients. The Rust types in `mon-agent-api` and the generated TypeScript client are the single source of truth for the frontend protocol.
+Events are persisted before they are broadcast to clients. The Rust types in `eden-agent-api` and the generated TypeScript client are the single source of truth for the frontend protocol.
 
 ## Development
 
-Run from the complete MonAgent workspace:
+Run from the complete Eden Agent workspace:
 
 ```bash
-git clone --recurse-submodules https://github.com/jiang357357357/MonAgent.git
-cd MonAgent
-cargo run -p mon-agent-server
+git clone --recurse-submodules https://github.com/jiang357357357/EdenAgent.git
+cd EdenAgent
+cargo run -p eden-agent-server
 ```
 
 Or use the project script:
@@ -71,15 +71,15 @@ For desktop use, local model configuration is normally managed through **Configu
 
 | Variable | Purpose |
 | --- | --- |
-| `MON_AGENT_MODEL=provider/model` | Select a model, for example `openai/gpt-4o-mini` |
+| `EDEN_AGENT_MODEL=provider/model` | Select a model, for example `openai/gpt-4o-mini` |
 | `<PROVIDER>_API_KEY` | Provider credential, with `OPENAI_API_KEY` as a fallback |
-| `MON_AGENT_BASE_URL` / `OPENAI_BASE_URL` | OpenAI-compatible API endpoint |
-| `MON_AGENT_DATABASE` | SQLite database path |
-| `MON_AGENT_BLOB_ROOT` | Blob storage directory |
-| `MON_AGENT_WORKSPACE_ROOT` | Default workspace root |
-| `MON_AGENT_CAPABILITY_TOKEN` | Client capability token; written to a token file when omitted |
+| `EDEN_AGENT_BASE_URL` / `OPENAI_BASE_URL` | OpenAI-compatible API endpoint |
+| `EDEN_AGENT_DATABASE` | SQLite database path |
+| `EDEN_AGENT_BLOB_ROOT` | Blob storage directory |
+| `EDEN_AGENT_WORKSPACE_ROOT` | Default workspace root |
+| `EDEN_AGENT_CAPABILITY_TOKEN` | Client capability token; written to a token file when omitted |
 | `MON_CORE_BASE_URL` / `MON_CORE_TOKEN` | Enable Mon business tools |
-| `MON_AGENT_SANDBOX_EXECUTABLE` | Select an external command sandbox |
+| `EDEN_AGENT_SANDBOX_EXECUTABLE` | Select an external command sandbox |
 
 Never commit real credentials to source files, example configuration, test fixtures, or runtime logs.
 
@@ -89,7 +89,7 @@ Never commit real credentials to source files, example configuration, test fixtu
 - `/blobs`: Blob upload and retrieval
 - `/readyz`: service health check
 
-There is no legacy REST/SSE compatibility layer. Regenerate the client after changing `mon-agent-api` types:
+There is no legacy REST/SSE compatibility layer. Regenerate the client after changing `eden-agent-api` types:
 
 ```bash
 npm run generate:rpc
@@ -117,9 +117,9 @@ cargo test --workspace --locked
 
 - [Multi-agent orchestration](docs/orchestration.md)
 - [Subagents](docs/subagents.md)
-- [Long-term all-Rust server architecture](https://github.com/jiang357357357/MonAgent/blob/main/文档/技术/MonAgent%20全%20Rust%20服务端长期架构方案.md) (Chinese)
-- [Frontend and Electron-Core responsibilities](https://github.com/jiang357357357/MonAgent/blob/main/文档/技术/MonAgent%20前端与%20Electron-Core%20职责边界说明.md) (Chinese)
-- [Installable connector protocol and package format](https://github.com/jiang357357357/MonAgent/blob/main/文档/技术/MonAgent%20可安装连接器协议与包格式.md) (Chinese)
+- [Long-term all-Rust server architecture](https://github.com/jiang357357357/EdenAgent/blob/main/文档/技术/Eden Agent%20全%20Rust%20服务端长期架构方案.md) (Chinese)
+- [Frontend and Electron-Core responsibilities](https://github.com/jiang357357357/EdenAgent/blob/main/文档/技术/Eden Agent%20前端与%20Electron-Core%20职责边界说明.md) (Chinese)
+- [Installable connector protocol and package format](https://github.com/jiang357357357/EdenAgent/blob/main/文档/技术/Eden Agent%20可安装连接器协议与包格式.md) (Chinese)
 
 ## License
 

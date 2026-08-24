@@ -2,7 +2,7 @@
 name: multi-agent
 description: 把边界清晰、可独立完成的任务交给合适的子智能体。
 metadata:
-  monagent:
+  edenagent:
     display_name: 子智能体协作
     version: 1.0.0
     tools: [spawn_agent, spawn_agents, send_message, followup_task, list_agents, interrupt_agent, wait_agent]

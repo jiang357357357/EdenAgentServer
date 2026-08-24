@@ -1,5 +1,5 @@
 [package]
-name = "mon-agent-server"
+name = "eden-agent-server"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 publish = false
 
 [[bin]]
-name = "mon-agent-server"
+name = "eden-agent-server"
 path = "rust/main.rs"
 
 [dependencies]
@@ -18,25 +18,25 @@ clap.workspace = true
 chrono.workspace = true
 futures.workspace = true
 http.workspace = true
-mon-agent-api = { path = "crates/mon-agent-api" }
-mon-agent-app = { path = "crates/mon-agent-app" }
-mon-agent-blob = { path = "crates/mon-agent-blob" }
-mon-agent-core = { path = "../AgentCore/crates/mon-agent-core" }
-mon-agent-connectors = { path = "crates/mon-agent-connectors" }
-mon-agent-connector-package = { path = "crates/mon-agent-connector-package" }
-mon-agent-core-sync = { path = "crates/mon-agent-core-sync" }
-mon-agent-host = { path = "crates/mon-agent-host" }
-mon-agent-interaction = { path = "crates/mon-agent-interaction" }
-mon-agent-multiagent = { path = "crates/mon-agent-multiagent" }
-mon-agent-mcp = { path = "crates/mon-agent-mcp" }
-mon-agent-market = { path = "crates/mon-agent-market" }
-mon-agent-provider = { path = "crates/mon-agent-provider" }
-mon-agent-sandbox = { path = "crates/mon-agent-sandbox" }
-mon-agent-plugins = { path = "crates/mon-agent-plugins" }
-mon-agent-skills = { path = "crates/mon-agent-skills" }
-mon-agent-store = { path = "crates/mon-agent-store" }
-mon-agent-tools = { path = "../AgentCore/crates/mon-agent-tools" }
-mon-agent-workspace = { path = "crates/mon-agent-workspace" }
+eden-agent-api = { path = "crates/eden-agent-api" }
+eden-agent-app = { path = "crates/eden-agent-app" }
+eden-agent-blob = { path = "crates/eden-agent-blob" }
+eden-agent-core = { path = "../AgentCore/crates/eden-agent-core" }
+eden-agent-connectors = { path = "crates/eden-agent-connectors" }
+eden-agent-connector-package = { path = "crates/eden-agent-connector-package" }
+eden-agent-core-sync = { path = "crates/eden-agent-core-sync" }
+eden-agent-host = { path = "crates/eden-agent-host" }
+eden-agent-interaction = { path = "crates/eden-agent-interaction" }
+eden-agent-multiagent = { path = "crates/eden-agent-multiagent" }
+eden-agent-mcp = { path = "crates/eden-agent-mcp" }
+eden-agent-market = { path = "crates/eden-agent-market" }
+eden-agent-provider = { path = "crates/eden-agent-provider" }
+eden-agent-sandbox = { path = "crates/eden-agent-sandbox" }
+eden-agent-plugins = { path = "crates/eden-agent-plugins" }
+eden-agent-skills = { path = "crates/eden-agent-skills" }
+eden-agent-store = { path = "crates/eden-agent-store" }
+eden-agent-tools = { path = "../AgentCore/crates/eden-agent-tools" }
+eden-agent-workspace = { path = "crates/eden-agent-workspace" }
 reqwest.workspace = true
 schemars.workspace = true
 serde.workspace = true

@@ -1,13 +1,13 @@
-class MonAgentBridgeInfo extends GSInfo {
-    function GetAuthor()      { return "MonAgent"; }
-    function GetName()        { return "MonAgentBridge"; }
-    function GetDescription() { return "Structured Admin Port bridge for MonAgent gameplay commands."; }
+class EdenAgentBridgeInfo extends GSInfo {
+    function GetAuthor()      { return "Eden Agent"; }
+    function GetName()        { return "EdenAgentBridge"; }
+    function GetDescription() { return "Structured Admin Port bridge for Eden Agent gameplay commands."; }
     function GetVersion()     { return 6; }
     function MinVersionToLoad(){ return 1; }
     function GetDate()        { return "2026-08-07"; }
-    function CreateInstance() { return "MonAgentBridge"; }
+    function CreateInstance() { return "EdenAgentBridge"; }
     function GetShortName()   { return "MABR"; }
     function GetAPIVersion()  { return "15"; }
 }
 
-RegisterGS(MonAgentBridgeInfo());
+RegisterGS(EdenAgentBridgeInfo());

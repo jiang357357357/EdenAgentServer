@@ -1,22 +1,22 @@
 <div align="center">
 
-# MonAgent Rust Server
+# Eden Agent Rust Server
 
-**MonAgent 的本地后端、持久化与扩展宿主**
+**Eden Agent 的本地后端、持久化与扩展宿主**
 
-[![Integration CI](https://github.com/jiang357357357/MonAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/jiang357357357/MonAgent/actions/workflows/ci.yml)
+[![Integration CI](https://github.com/jiang357357357/EdenAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/jiang357357357/EdenAgent/actions/workflows/ci.yml)
 ![Rust 1.85+](https://img.shields.io/badge/Rust-1.85%2B-dea584?logo=rust&logoColor=white)
 ![Tokio](https://img.shields.io/badge/runtime-Tokio-5566cc)
 ![SQLite](https://img.shields.io/badge/storage-SQLite-003b57?logo=sqlite&logoColor=white)
 ![Version](https://img.shields.io/badge/version-1.8.0-e67700)
 
-**简体中文** · [English](README.en.md) · [主仓库](https://github.com/jiang357357357/MonAgent)
+**简体中文** · [English](README.en.md) · [主仓库](https://github.com/jiang357357357/EdenAgent)
 
 </div>
 
 ## 简介
 
-`mon-agent-server` 是 MonAgent 唯一的本地后端进程。它直接链接宿主无关的 `AgentCore` Rust crates，并对外提供带能力令牌的 WebSocket JSON-RPC 与 Blob HTTP 端点。
+`eden-agent-server` 是 Eden Agent 唯一的本地后端进程。它直接链接宿主无关的 `AgentCore` Rust crates，并对外提供带能力令牌的 WebSocket JSON-RPC 与 Blob HTTP 端点。
 
 Server 负责所有进程边界和外部副作用：
 
@@ -31,26 +31,26 @@ Server 负责所有进程边界和外部副作用：
 
 ```mermaid
 flowchart LR
-    Client[Web / Electron] -->|WS JSON-RPC| API[mon-agent-api]
-    Client -->|HTTP Blob| Blob[mon-agent-blob]
-    API --> App[mon-agent-app]
+    Client[Web / Electron] -->|WS JSON-RPC| API[eden-agent-api]
+    Client -->|HTTP Blob| Blob[eden-agent-blob]
+    API --> App[eden-agent-app]
     App --> Core[AgentCore]
-    App --> Store[(mon-agent-store / SQLite)]
-    App --> Provider[mon-agent-provider]
+    App --> Store[(eden-agent-store / SQLite)]
+    App --> Provider[eden-agent-provider]
     App --> Extensions[skills / plugins / MCP / connectors]
     Extensions --> Sandbox[permissions / sandbox]
 ```
 
-事件先写入持久化层，再广播给客户端。前端协议以 `mon-agent-api` 的 Rust 类型和生成的 TypeScript 客户端为唯一事实来源。
+事件先写入持久化层，再广播给客户端。前端协议以 `eden-agent-api` 的 Rust 类型和生成的 TypeScript 客户端为唯一事实来源。
 
 ## 开发运行
 
-推荐从完整 MonAgent 工作区运行：
+推荐从完整 Eden Agent 工作区运行：
 
 ```bash
-git clone --recurse-submodules https://github.com/jiang357357357/MonAgent.git
-cd MonAgent
-cargo run -p mon-agent-server
+git clone --recurse-submodules https://github.com/jiang357357357/EdenAgent.git
+cd EdenAgent
+cargo run -p eden-agent-server
 ```
 
 也可以使用项目脚本：
@@ -71,15 +71,15 @@ curl http://127.0.0.1:40092/readyz
 
 | 变量 | 用途 |
 | --- | --- |
-| `MON_AGENT_MODEL=provider/model` | 选择模型，例如 `openai/gpt-4o-mini` |
+| `EDEN_AGENT_MODEL=provider/model` | 选择模型，例如 `openai/gpt-4o-mini` |
 | `<PROVIDER>_API_KEY` | 对应供应商密钥；可回退到 `OPENAI_API_KEY` |
-| `MON_AGENT_BASE_URL` / `OPENAI_BASE_URL` | OpenAI 兼容 API 地址 |
-| `MON_AGENT_DATABASE` | SQLite 数据库路径 |
-| `MON_AGENT_BLOB_ROOT` | Blob 存储目录 |
-| `MON_AGENT_WORKSPACE_ROOT` | 默认工作区根目录 |
-| `MON_AGENT_CAPABILITY_TOKEN` | 客户端能力令牌；未提供时写入令牌文件 |
+| `EDEN_AGENT_BASE_URL` / `OPENAI_BASE_URL` | OpenAI 兼容 API 地址 |
+| `EDEN_AGENT_DATABASE` | SQLite 数据库路径 |
+| `EDEN_AGENT_BLOB_ROOT` | Blob 存储目录 |
+| `EDEN_AGENT_WORKSPACE_ROOT` | 默认工作区根目录 |
+| `EDEN_AGENT_CAPABILITY_TOKEN` | 客户端能力令牌；未提供时写入令牌文件 |
 | `MON_CORE_BASE_URL` / `MON_CORE_TOKEN` | 启用 Mon 业务工具 |
-| `MON_AGENT_SANDBOX_EXECUTABLE` | 指定外部命令隔离器 |
+| `EDEN_AGENT_SANDBOX_EXECUTABLE` | 指定外部命令隔离器 |
 
 不要把真实密钥提交到仓库、示例配置、测试夹具或运行日志。
 
@@ -89,7 +89,7 @@ curl http://127.0.0.1:40092/readyz
 - `/blobs`：Blob 上传与读取
 - `/readyz`：服务健康检查
 
-本项目不提供旧 REST/SSE 兼容层。修改 `mon-agent-api` 类型后需重新生成客户端：
+本项目不提供旧 REST/SSE 兼容层。修改 `eden-agent-api` 类型后需重新生成客户端：
 
 ```bash
 npm run generate:rpc
@@ -117,9 +117,9 @@ cargo test --workspace --locked
 
 - [多智能体编排](docs/orchestration.md)
 - [子智能体](docs/subagents.md)
-- [全 Rust 服务端长期架构方案](https://github.com/jiang357357357/MonAgent/blob/main/文档/技术/MonAgent%20全%20Rust%20服务端长期架构方案.md)
-- [前端与 Electron-Core 职责边界](https://github.com/jiang357357357/MonAgent/blob/main/文档/技术/MonAgent%20前端与%20Electron-Core%20职责边界说明.md)
-- [可安装连接器协议与包格式](https://github.com/jiang357357357/MonAgent/blob/main/文档/技术/MonAgent%20可安装连接器协议与包格式.md)
+- [全 Rust 服务端长期架构方案](https://github.com/jiang357357357/EdenAgent/blob/main/文档/技术/Eden Agent%20全%20Rust%20服务端长期架构方案.md)
+- [前端与 Electron-Core 职责边界](https://github.com/jiang357357357/EdenAgent/blob/main/文档/技术/Eden Agent%20前端与%20Electron-Core%20职责边界说明.md)
+- [可安装连接器协议与包格式](https://github.com/jiang357357357/EdenAgent/blob/main/文档/技术/Eden Agent%20可安装连接器协议与包格式.md)
 
 ## 许可证
 
