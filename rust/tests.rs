@@ -75,6 +75,7 @@ async fn test_state() -> AppState {
         1,
     );
     AppState {
+        runtime_origin: RuntimeOrigin::Mon,
         capability_token: Arc::from("0123456789abcdef0123456789abcdef"),
         allowed_origins: Arc::new(HashSet::from(["http://localhost:40091".to_owned()])),
         store,
@@ -117,6 +118,7 @@ async fn health_exposes_directly_linked_core_version() {
     let value: Value = serde_json::from_slice(&bytes).expect("health JSON");
     assert_eq!(value["agentCoreVersion"], eden_agent_core::VERSION);
     assert_eq!(value["protocolVersion"], PROTOCOL_VERSION);
+    assert_eq!(value["runtimeOrigin"], "mon");
 }
 
 #[tokio::test]

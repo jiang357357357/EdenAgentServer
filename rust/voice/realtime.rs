@@ -22,9 +22,19 @@ pub(crate) async fn realtime_stt_upgrade(
         )
             .into_response();
     }
-    match state.store.get_session(query.session_id).await {
-        Ok(session) if session.runtime_origin == SessionRuntimeOrigin::Mon => {}
-        Ok(_) => {
+    let session = match state.store.get_session(query.session_id).await {
+        Ok(session) => session,
+        Err(error) => return (StatusCode::NOT_FOUND, error.to_string()).into_response(),
+    };
+    if session_origin(&session) != state.runtime_origin {
+        return (
+            StatusCode::FORBIDDEN,
+            "runtime_origin_mismatch: session is not available in this runtime",
+        )
+            .into_response();
+    }
+    match state.runtime_origin {
+        RuntimeOrigin::Local => {
             let persisted = match read_voice_runtime_config(&state).await {
                 Ok(config) => config.stt,
                 Err(error) => {
@@ -41,7 +51,7 @@ pub(crate) async fn realtime_stt_upgrade(
                 .on_upgrade(move |socket| local_realtime_stt(socket, config))
                 .into_response();
         }
-        Err(error) => return (StatusCode::NOT_FOUND, error.to_string()).into_response(),
+        RuntimeOrigin::Mon => {}
     }
     let upstream_url = match state
         .host_services

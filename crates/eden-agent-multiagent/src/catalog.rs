@@ -292,6 +292,7 @@ impl SubagentCatalog {
             .collect();
         let user = user_root
             .map(Path::to_owned)
+            .or_else(|| std::env::var_os("EDEN_AGENT_USER_AGENT_ROOT").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("Data/agents"));
         for (scope, root) in [
             ("user", user),

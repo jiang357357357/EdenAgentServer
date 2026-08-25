@@ -417,6 +417,50 @@ impl Store {
         Ok(Self { pool, events })
     }
 
+    /// Permanently binds a database to one runtime realm.  The first bind also
+    /// removes sessions belonging to the other realm (including their
+    /// cascading rows).  Subsequent attempts to open the same database for a
+    /// different realm fail closed instead of silently sharing state.
+    pub async fn bind_runtime_origin(
+        &self,
+        runtime_origin: SessionRuntimeOrigin,
+        allow_migration_rebind: bool,
+    ) -> Result<u64, StoreError> {
+        const KEY: &str = "system.runtime_origin";
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let existing =
+            sqlx::query_scalar::<_, String>("SELECT value_json FROM app_config WHERE key=?")
+                .bind(KEY)
+                .fetch_optional(&mut *transaction)
+                .await?;
+        if let Some(existing) = existing {
+            let bound: String = serde_json::from_str(&existing)?;
+            if bound != runtime_origin.as_str() && !allow_migration_rebind {
+                return Err(StoreError::InvalidValue(format!(
+                    "database is bound to runtime origin {bound}, not {}",
+                    runtime_origin.as_str()
+                )));
+            }
+            if bound == runtime_origin.as_str() {
+                transaction.commit().await?;
+                return Ok(0);
+            }
+        }
+        let removed = sqlx::query("DELETE FROM sessions WHERE runtime_origin <> ?")
+            .bind(runtime_origin.as_str())
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+        sqlx::query("INSERT INTO app_config(key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at")
+            .bind(KEY)
+            .bind(serde_json::to_string(runtime_origin.as_str())?)
+            .bind(now_ms())
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(removed)
+    }
+
     pub async fn expire_pending_interactions(&self) -> Result<u64, StoreError> {
         let now = now_ms();
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -4599,5 +4643,63 @@ mod tests {
             after_delete.tool_calls_failed,
             before_delete.tool_calls_failed
         );
+    }
+
+    #[tokio::test]
+    async fn database_runtime_binding_prunes_foreign_sessions_and_fails_closed() {
+        let store = Store::in_memory().await.expect("store");
+        let mon = store
+            .create_session_with_runtime_origin(
+                "mon",
+                Vec::new(),
+                json!({}),
+                SessionRuntimeOrigin::Mon,
+            )
+            .await
+            .expect("mon session");
+        let local = store
+            .create_session_with_runtime_origin(
+                "local",
+                Vec::new(),
+                json!({}),
+                SessionRuntimeOrigin::Local,
+            )
+            .await
+            .expect("local session");
+
+        assert_eq!(
+            store
+                .bind_runtime_origin(SessionRuntimeOrigin::Local, false)
+                .await
+                .expect("bind local"),
+            1
+        );
+        assert!(store.get_session(local.id).await.is_ok());
+        assert!(matches!(
+            store.get_session(mon.id).await,
+            Err(StoreError::SessionNotFound(_))
+        ));
+        assert_eq!(
+            store
+                .bind_runtime_origin(SessionRuntimeOrigin::Local, false)
+                .await
+                .expect("idempotent bind"),
+            0
+        );
+        assert!(matches!(
+            store
+                .bind_runtime_origin(SessionRuntimeOrigin::Mon, false)
+                .await,
+            Err(StoreError::InvalidValue(_))
+        ));
+
+        assert_eq!(
+            store
+                .bind_runtime_origin(SessionRuntimeOrigin::Mon, true)
+                .await
+                .expect("one-shot migration rebind"),
+            1
+        );
+        assert!(store.get_session(local.id).await.is_err());
     }
 }

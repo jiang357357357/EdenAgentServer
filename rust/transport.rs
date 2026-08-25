@@ -7,6 +7,7 @@ pub(crate) struct HealthResponse {
     server_version: &'static str,
     agent_core_version: &'static str,
     protocol_version: u32,
+    runtime_origin: RuntimeOrigin,
 }
 
 #[derive(Serialize)]
@@ -41,12 +42,13 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-pub(crate) async fn health() -> impl IntoResponse {
+pub(crate) async fn health(State(state): State<AppState>) -> impl IntoResponse {
     axum::Json(HealthResponse {
         status: "ok",
         server_version: env!("CARGO_PKG_VERSION"),
         agent_core_version: eden_agent_core::VERSION,
         protocol_version: PROTOCOL_VERSION,
+        runtime_origin: state.runtime_origin,
     })
 }
 
@@ -136,7 +138,10 @@ pub(crate) async fn readiness(State(state): State<AppState>) -> Response {
         "model".to_owned(),
         ReadinessCheck {
             ready: models.is_ready(),
-            required: true,
+            // The Mon realm receives its model binding from Eden Core after a
+            // Core session attaches.  Local must be independently usable at
+            // startup and therefore still requires a configured model.
+            required: state.runtime_origin == RuntimeOrigin::Local,
             detail: if models.is_ready() {
                 format!(
                     "default={}, available sessions={}, unavailable sessions={}, available actors={}, unavailable actors={}",
@@ -714,7 +719,10 @@ pub(crate) async fn process_client_text(
     let response = match request.method.as_str() {
         "initialize" if runtime_origin.is_none() => {
             match serde_json::from_value::<InitializeParams>(request.params) {
-                Ok(params) if params.protocol_version == PROTOCOL_VERSION => {
+                Ok(params)
+                    if params.protocol_version == PROTOCOL_VERSION
+                        && params.runtime_origin == state.runtime_origin =>
+                {
                     let origin = params.runtime_origin;
                     *runtime_origin = Some(origin);
                     RpcResponse::success(
@@ -729,7 +737,14 @@ pub(crate) async fn process_client_text(
                         },
                     )
                 }
-                Ok(_) => RpcResponse::error(id, -32001, "unsupported protocol version"),
+                Ok(params) if params.protocol_version != PROTOCOL_VERSION => {
+                    RpcResponse::error(id, -32001, "unsupported protocol version")
+                }
+                Ok(_) => RpcResponse::error(
+                    id,
+                    -32003,
+                    "runtime_origin_mismatch: this server belongs to another runtime",
+                ),
                 Err(error) => {
                     RpcResponse::error(id, -32602, format!("invalid initialize params: {error}"))
                 }

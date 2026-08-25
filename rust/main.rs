@@ -140,10 +140,21 @@ struct Args {
 
     #[arg(
         long,
+        env = "EDEN_AGENT_RUNTIME_ORIGIN",
+        default_value = "mon",
+        value_parser = ["mon", "local"]
+    )]
+    runtime_origin: String,
+
+    #[arg(
+        long,
         env = "EDEN_AGENT_TOKEN_FILE",
         default_value = "Data/server-capability.token"
     )]
     token_file: PathBuf,
+
+    #[arg(long, env = "EDEN_AGENT_REALM_MIGRATION_MARKER")]
+    realm_migration_marker: Option<PathBuf>,
 
     #[arg(
         long,
@@ -222,6 +233,7 @@ struct Args {
 
 #[derive(Clone)]
 struct AppState {
+    runtime_origin: RuntimeOrigin,
     capability_token: Arc<str>,
     allowed_origins: Arc<HashSet<String>>,
     store: Store,
@@ -300,6 +312,11 @@ impl WorkspaceSkillRoots {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let runtime_origin = match args.runtime_origin.as_str() {
+        "mon" => RuntimeOrigin::Mon,
+        "local" => RuntimeOrigin::Local,
+        value => anyhow::bail!("unsupported runtime origin: {value}"),
+    };
     if args.print_protocol_schema {
         println!(
             "{}",
@@ -317,6 +334,33 @@ async fn main() -> Result<()> {
         fs::create_dir_all(parent).await?;
     }
     let store = Store::open(&args.database).await?;
+    let allow_migration_rebind = if let Some(marker) = args.realm_migration_marker.as_ref() {
+        fs::read_to_string(marker)
+            .await
+            .is_ok_and(|value| value.trim() == args.runtime_origin)
+    } else {
+        false
+    };
+    let removed_foreign_sessions = store
+        .bind_runtime_origin(store_origin(runtime_origin), allow_migration_rebind)
+        .await
+        .context("bind database to runtime origin")?;
+    if let Some(marker) = args
+        .realm_migration_marker
+        .as_ref()
+        .filter(|_| allow_migration_rebind)
+    {
+        let completed = marker.with_file_name(".realm-migration-complete");
+        fs::write(&completed, format!("{}\n", args.runtime_origin)).await?;
+        fs::remove_file(marker).await?;
+    }
+    if removed_foreign_sessions > 0 {
+        info!(
+            removed_foreign_sessions,
+            runtime_origin = ?runtime_origin,
+            "removed sessions from the other runtime during realm migration"
+        );
+    }
     initialize_voice_config(&store).await?;
     let plugins = PluginInstaller::open(&args.plugin_root)?;
     let marketplace = MarketplaceClient::new(args.plugin_root.join("market-cache"))
@@ -636,6 +680,7 @@ async fn main() -> Result<()> {
     let connector_supervisor =
         connectors.start_with_heartbeat(Arc::clone(&diagnostics.connector_heartbeat));
     let state = AppState {
+        runtime_origin,
         capability_token: Arc::from(capability_token),
         allowed_origins: Arc::new(args.allowed_origins.into_iter().collect()),
         store,
@@ -666,6 +711,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("failed to bind {}", args.bind))?;
     info!(
         address = %args.bind,
+        runtime_origin = ?runtime_origin,
         token_file = %args.token_file.display(),
         database = %args.database.display(),
         workspace = %workspace_root.display(),
