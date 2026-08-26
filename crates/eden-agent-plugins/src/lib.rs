@@ -1083,15 +1083,20 @@ fn resolve_package_file(root: &Path, relative: &str) -> Result<PathBuf, PluginEr
 }
 
 fn verify_integrity(root: &Path, policy: LoadPolicy) -> Result<IntegrityState, PluginError> {
-    let files = package_files(root)?;
-    let bytes = package_size(root, &files)?;
+    // Windows canonical paths use the verbatim `\\?\` prefix. Normalize the
+    // package root before comparing it with canonicalized component paths so a
+    // valid file inside a non-canonical TempDir/root is not reported as an
+    // escape.
+    let root = fs::canonicalize(root).map_err(PluginError::Io)?;
+    let files = package_files(&root)?;
+    let bytes = package_size(&root, &files)?;
     let checksum_path = root.join("checksums.json");
     if !checksum_path.is_file() {
         return if policy == LoadPolicy::Development {
             Ok(IntegrityState::UnverifiedDevelopment {
                 files: files.len(),
                 bytes,
-                digest: aggregate_file_digest(root, &files)?,
+                digest: aggregate_file_digest(&root, &files)?,
             })
         } else {
             Err(PluginError::IntegrityRequired)
@@ -1113,7 +1118,7 @@ fn verify_integrity(root: &Path, policy: LoadPolicy) -> Result<IntegrityState, P
     }
     let mut aggregate = Sha256::new();
     for (relative, expected) in &checksums {
-        let file = resolve_package_file(root, relative)?;
+        let file = resolve_package_file(&root, relative)?;
         let actual = hex::encode(Sha256::digest(fs::read(file)?));
         if !actual.eq_ignore_ascii_case(expected) {
             return Err(PluginError::ChecksumMismatch(relative.clone()));
