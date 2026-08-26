@@ -309,6 +309,7 @@ async fn workspace_switch_rpc_persists_a_validated_pending_request() {
         .await
         .expect("session");
     let target = tempfile::tempdir().expect("target workspace").keep();
+    let canonical_target = std::fs::canonicalize(&target).expect("canonical target workspace");
     let result = execute_method(
         &state,
         "workspace.switch",
@@ -316,7 +317,7 @@ async fn workspace_switch_rpc_persists_a_validated_pending_request() {
     )
     .await
     .expect("workspace switch");
-    let target_text = target.to_string_lossy().into_owned();
+    let target_text = canonical_target.to_string_lossy().into_owned();
     assert_eq!(result["pendingPath"].as_str(), Some(target_text.as_str()));
     let persisted = state.workspaces.state().await.expect("workspace state");
     assert_eq!(persisted.pending_session_id, Some(session.id));
@@ -335,6 +336,7 @@ async fn catalog_worker_applies_workspace_only_after_idle_validation() {
         .await
         .expect("session");
     let target = tempfile::tempdir().expect("target workspace").keep();
+    let canonical_target = std::fs::canonicalize(&target).expect("canonical target workspace");
     state
         .workspaces
         .request_switch(session.id, &target)
@@ -363,7 +365,7 @@ async fn catalog_worker_applies_workspace_only_after_idle_validation() {
     .await
     .expect("workspace switch timeout");
     worker.abort();
-    assert_eq!(state.workspaces.current_root(), target);
+    assert_eq!(state.workspaces.current_root(), canonical_target);
 }
 
 #[tokio::test]
