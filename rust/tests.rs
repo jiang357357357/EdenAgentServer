@@ -317,13 +317,22 @@ async fn workspace_switch_rpc_persists_a_validated_pending_request() {
     )
     .await
     .expect("workspace switch");
-    let target_text = canonical_target.to_string_lossy().into_owned();
-    assert_eq!(result["pendingPath"].as_str(), Some(target_text.as_str()));
+    let returned_path = result["pendingPath"]
+        .as_str()
+        .expect("returned pending path");
+    assert_eq!(
+        std::fs::canonicalize(returned_path).expect("canonical returned pending path"),
+        canonical_target
+    );
     let persisted = state.workspaces.state().await.expect("workspace state");
     assert_eq!(persisted.pending_session_id, Some(session.id));
+    let persisted_path = persisted
+        .pending_path
+        .as_deref()
+        .expect("persisted pending path");
     assert_eq!(
-        persisted.pending_path.as_deref(),
-        Some(target_text.as_str())
+        std::fs::canonicalize(persisted_path).expect("canonical persisted pending path"),
+        canonical_target
     );
 }
 
@@ -365,7 +374,11 @@ async fn catalog_worker_applies_workspace_only_after_idle_validation() {
     .await
     .expect("workspace switch timeout");
     worker.abort();
-    assert_eq!(state.workspaces.current_root(), canonical_target);
+    assert_eq!(
+        std::fs::canonicalize(state.workspaces.current_root())
+            .expect("canonical current workspace"),
+        canonical_target
+    );
 }
 
 #[tokio::test]
