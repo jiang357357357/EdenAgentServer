@@ -100,7 +100,7 @@ use eden_agent_skills::{SkillCatalog, SkillDefinition};
 use eden_agent_store::{
     EventRecord, PluginInstallRecord, PluginMarketRevocationInput, PluginMarketSourceRecord,
     PluginPermissionGrantInput, PluginPermissionGrantRecord, PluginRecord, SessionRecord,
-    SessionRuntimeOrigin, Store,
+    SessionRuntimeOrigin, Store, VoiceSpeechSegmentRecord, VoiceSpeechSegmentUpsert,
 };
 use eden_agent_tools::ProcessSandbox;
 use eden_agent_workspace::WorkspaceService;
@@ -108,6 +108,7 @@ use futures::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,

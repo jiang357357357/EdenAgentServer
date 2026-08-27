@@ -328,6 +328,40 @@ pub struct BlobRecord {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct VoiceSpeechSegmentRecord {
+    pub id: i64,
+    pub session_id: SessionId,
+    pub external_message_id: String,
+    pub external_audio_asset_id: Option<i64>,
+    pub audio_blob_id: BlobId,
+    pub duration_ms: Option<i64>,
+    pub audio_format: String,
+    pub segment_group_id: String,
+    pub group_index: i64,
+    pub sequence: i64,
+    pub text_hash: String,
+    pub text_length: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct VoiceSpeechSegmentUpsert {
+    pub session_id: SessionId,
+    pub external_message_id: String,
+    pub external_audio_asset_id: Option<i64>,
+    pub audio_blob_id: BlobId,
+    pub duration_ms: Option<i64>,
+    pub audio_format: String,
+    pub segment_group_id: String,
+    pub group_index: i64,
+    pub sequence: i64,
+    pub text_hash: String,
+    pub text_length: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentThreadRecord {
     pub id: AgentId,
     pub session_id: SessionId,
@@ -2745,6 +2779,127 @@ impl Store {
         .ok_or(StoreError::BlobNotFound(id))?;
         blob_from_row(&row)
     }
+
+    pub async fn upsert_voice_speech_segment(
+        &self,
+        input: VoiceSpeechSegmentUpsert,
+    ) -> Result<VoiceSpeechSegmentRecord, StoreError> {
+        if input.external_message_id.trim().is_empty()
+            || input.segment_group_id.trim().is_empty()
+            || input.audio_format.trim().is_empty()
+            || input.text_hash.trim().is_empty()
+            || input.group_index < 0
+            || input.sequence < 0
+            || input.text_length < 0
+            || input.duration_ms.is_some_and(|value| value < 0)
+        {
+            return Err(StoreError::InvalidValue(
+                "invalid voice speech segment".to_owned(),
+            ));
+        }
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        ensure_session(&mut transaction, input.session_id).await?;
+        let now = now_ms();
+        // Sequence zero starts a fresh rendering of this logical speech group.
+        // Remove later segments from an older rendering so a changed chunk plan
+        // cannot leave stale audio behind after a retry or application restart.
+        if input.sequence == 0 {
+            sqlx::query(
+                "DELETE FROM voice_speech_segments
+                 WHERE session_id = ? AND external_message_id = ?
+                   AND segment_group_id = ? AND sequence > 0",
+            )
+            .bind(input.session_id.to_string())
+            .bind(&input.external_message_id)
+            .bind(&input.segment_group_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO voice_speech_segments(
+                session_id, external_message_id, external_audio_asset_id, audio_blob_id,
+                duration_ms, audio_format, segment_group_id, group_index, sequence,
+                text_hash, text_length, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(session_id, external_message_id, segment_group_id, sequence)
+             DO UPDATE SET
+                external_audio_asset_id=excluded.external_audio_asset_id,
+                audio_blob_id=excluded.audio_blob_id,
+                duration_ms=excluded.duration_ms,
+                audio_format=excluded.audio_format,
+                group_index=excluded.group_index,
+                text_hash=excluded.text_hash,
+                text_length=excluded.text_length,
+                updated_at=excluded.updated_at",
+        )
+        .bind(input.session_id.to_string())
+        .bind(&input.external_message_id)
+        .bind(input.external_audio_asset_id)
+        .bind(input.audio_blob_id.to_string())
+        .bind(input.duration_ms)
+        .bind(&input.audio_format)
+        .bind(&input.segment_group_id)
+        .bind(input.group_index)
+        .bind(input.sequence)
+        .bind(&input.text_hash)
+        .bind(input.text_length)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        let row = sqlx::query(
+            "SELECT id, session_id, external_message_id, external_audio_asset_id,
+                    audio_blob_id, duration_ms, audio_format, segment_group_id,
+                    group_index, sequence, text_hash, text_length, created_at, updated_at
+             FROM voice_speech_segments
+             WHERE session_id = ? AND external_message_id = ?
+               AND segment_group_id = ? AND sequence = ?",
+        )
+        .bind(input.session_id.to_string())
+        .bind(&input.external_message_id)
+        .bind(&input.segment_group_id)
+        .bind(input.sequence)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let record = voice_speech_segment_from_row(&row)?;
+        transaction.commit().await?;
+        Ok(record)
+    }
+
+    pub async fn list_voice_speech_segments(
+        &self,
+        session_id: SessionId,
+        message_id: Option<&str>,
+    ) -> Result<Vec<VoiceSpeechSegmentRecord>, StoreError> {
+        self.get_session(session_id).await?;
+        let rows = if let Some(message_id) = message_id.filter(|value| !value.trim().is_empty()) {
+            sqlx::query(
+                "SELECT id, session_id, external_message_id, external_audio_asset_id,
+                        audio_blob_id, duration_ms, audio_format, segment_group_id,
+                        group_index, sequence, text_hash, text_length, created_at, updated_at
+                 FROM voice_speech_segments
+                 WHERE session_id = ? AND external_message_id = ?
+                 ORDER BY group_index ASC, sequence ASC, id ASC",
+            )
+            .bind(session_id.to_string())
+            .bind(message_id)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT id, session_id, external_message_id, external_audio_asset_id,
+                        audio_blob_id, duration_ms, audio_format, segment_group_id,
+                        group_index, sequence, text_hash, text_length, created_at, updated_at
+                 FROM voice_speech_segments
+                 WHERE session_id = ?
+                 ORDER BY external_message_id ASC, group_index ASC, sequence ASC, id ASC",
+            )
+            .bind(session_id.to_string())
+            .fetch_all(&self.pool)
+            .await?
+        };
+        rows.iter().map(voice_speech_segment_from_row).collect()
+    }
 }
 
 async fn ensure_session(
@@ -3110,6 +3265,27 @@ fn blob_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<BlobRecord, StoreError
         byte_length: row.try_get("byte_length")?,
         storage_path: row.try_get("storage_path")?,
         created_at: row.try_get("created_at")?,
+    })
+}
+
+fn voice_speech_segment_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<VoiceSpeechSegmentRecord, StoreError> {
+    Ok(VoiceSpeechSegmentRecord {
+        id: row.try_get("id")?,
+        session_id: row.try_get::<String, _>("session_id")?.parse()?,
+        external_message_id: row.try_get("external_message_id")?,
+        external_audio_asset_id: row.try_get("external_audio_asset_id")?,
+        audio_blob_id: row.try_get::<String, _>("audio_blob_id")?.parse()?,
+        duration_ms: row.try_get("duration_ms")?,
+        audio_format: row.try_get("audio_format")?,
+        segment_group_id: row.try_get("segment_group_id")?,
+        group_index: row.try_get("group_index")?,
+        sequence: row.try_get("sequence")?,
+        text_hash: row.try_get("text_hash")?,
+        text_length: row.try_get("text_length")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
 
@@ -4701,5 +4877,85 @@ mod tests {
             1
         );
         assert!(store.get_session(local.id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn voice_speech_segments_are_upserted_filtered_and_deleted_with_the_session() {
+        let store = Store::in_memory().await.expect("store");
+        let session = store.create_session("voice").await.expect("session");
+        let first_blob = store
+            .put_blob_metadata("voice-1", "audio/wav", 4, "aa/voice-1")
+            .await
+            .expect("first blob");
+        let second_blob = store
+            .put_blob_metadata("voice-2", "audio/wav", 8, "bb/voice-2")
+            .await
+            .expect("second blob");
+        let base = VoiceSpeechSegmentUpsert {
+            session_id: session.id,
+            external_message_id: "message-1".to_owned(),
+            external_audio_asset_id: None,
+            audio_blob_id: first_blob.id,
+            duration_ms: Some(1200),
+            audio_format: "wav".to_owned(),
+            segment_group_id: "message-1:0:0".to_owned(),
+            group_index: 0,
+            sequence: 0,
+            text_hash: "hash-1".to_owned(),
+            text_length: 4,
+        };
+        let inserted = store
+            .upsert_voice_speech_segment(base.clone())
+            .await
+            .expect("insert segment");
+        for sequence in 1..=2 {
+            store
+                .upsert_voice_speech_segment(VoiceSpeechSegmentUpsert {
+                    sequence,
+                    text_hash: format!("old-hash-{sequence}"),
+                    ..base.clone()
+                })
+                .await
+                .expect("insert old trailing segment");
+        }
+        let updated = store
+            .upsert_voice_speech_segment(VoiceSpeechSegmentUpsert {
+                audio_blob_id: second_blob.id,
+                duration_ms: Some(2400),
+                text_hash: "hash-2".to_owned(),
+                ..base
+            })
+            .await
+            .expect("update segment");
+        assert_eq!(updated.id, inserted.id);
+        assert_eq!(updated.audio_blob_id, second_blob.id);
+        assert_eq!(updated.text_hash, "hash-2");
+
+        let listed = store
+            .list_voice_speech_segments(session.id, Some("message-1"))
+            .await
+            .expect("list segment");
+        // A successful new sequence zero replaces the previous rendering and
+        // therefore removes any trailing segments from its old chunk plan.
+        assert_eq!(listed, vec![updated]);
+        assert!(
+            store
+                .list_voice_speech_segments(session.id, Some("missing"))
+                .await
+                .expect("filter segments")
+                .is_empty()
+        );
+
+        assert!(
+            store
+                .delete_session(session.id)
+                .await
+                .expect("delete session")
+        );
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM voice_speech_segments")
+            .fetch_one(&store.pool)
+            .await
+            .expect("count segments");
+        assert_eq!(remaining, 0);
     }
 }

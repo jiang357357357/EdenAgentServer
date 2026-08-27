@@ -10,7 +10,7 @@ use reqwest::{Client, Method, Url};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicI64, Ordering},
@@ -18,19 +18,24 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
-use tokio::sync::{Notify, RwLock, broadcast};
+use tokio::sync::{Mutex, Notify, RwLock, broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
 const CLAIM_LEASE_MS: i64 = 60_000;
 const BATCH_SIZE: u32 = 20;
+// Mon Core's AgentSessionMap and TTS endpoints use this stable protocol
+// discriminator. It is intentionally independent from the Eden Agent product
+// name so existing Core records and speech-segment lookups remain compatible.
+const CORE_AGENT_SOURCE: &str = "monagent";
 
 #[derive(Clone)]
 pub struct CoreSyncService {
     store: Store,
     client: Client,
     credentials: Arc<RwLock<HashMap<String, CoreCredential>>>,
+    projected_sessions: Arc<Mutex<HashSet<SessionId>>>,
     notify: Arc<Notify>,
 }
 
@@ -95,6 +100,7 @@ impl CoreSyncService {
             store,
             client,
             credentials: Arc::new(RwLock::new(HashMap::new())),
+            projected_sessions: Arc::new(Mutex::new(HashSet::new())),
             notify: Arc::new(Notify::new()),
         })
     }
@@ -127,6 +133,7 @@ impl CoreSyncService {
             .write()
             .await
             .insert(credential_ref.clone(), credential);
+        self.projected_sessions.lock().await.remove(&session_id);
         let identity = self
             .store
             .set_core_session_identity(
@@ -216,6 +223,40 @@ impl CoreSyncService {
             .await?;
         self.notify.notify_one();
         Ok(true)
+    }
+
+    /// Ensure the Core session row required by dependent APIs (notably TTS)
+    /// exists before issuing those requests. The durable outbox remains the
+    /// eventual-consistency path; this synchronous idempotent projection closes
+    /// the first-message race where speech synthesis could arrive first.
+    pub async fn ensure_session_projection(
+        &self,
+        session_id: SessionId,
+    ) -> Result<(), CoreSyncError> {
+        if self.projected_sessions.lock().await.contains(&session_id) {
+            return Ok(());
+        }
+        let identity = self
+            .store
+            .get_core_session_identity(session_id)
+            .await?
+            .ok_or_else(|| {
+                CoreSyncError::CredentialUnavailable(format!(
+                    "session {session_id} has no Core identity"
+                ))
+            })?;
+        let credential = self
+            .credentials
+            .read()
+            .await
+            .get(&identity.credential_ref)
+            .cloned()
+            .ok_or_else(|| CoreSyncError::CredentialUnavailable(identity.credential_ref))?;
+        let payload = session_projection(&self.store, session_id).await?;
+        self.deliver_session_projection(&credential, &payload)
+            .await?;
+        self.projected_sessions.lock().await.insert(session_id);
+        Ok(())
     }
 
     pub async fn enqueue_event(&self, event: &EventRecord) -> Result<bool, CoreSyncError> {
@@ -340,6 +381,7 @@ impl CoreSyncService {
             .and_then(|records| records.first())
             .and_then(|record| scalar(record.get("id")))
         else {
+            self.projected_sessions.lock().await.remove(&session_id);
             return Ok(false);
         };
         self.request(
@@ -349,6 +391,7 @@ impl CoreSyncService {
             None,
         )
         .await?;
+        self.projected_sessions.lock().await.remove(&session_id);
         Ok(true)
     }
 
@@ -475,30 +518,8 @@ impl CoreSyncService {
             .ok_or_else(|| CoreSyncError::CredentialUnavailable(record.credential_ref.clone()))?;
         match record.kind.as_str() {
             "session" => {
-                let session_map = self
-                    .request(
-                        &credential,
-                        Method::POST,
-                        "/api/agent/sessions/",
-                        Some(record.payload.clone()),
-                    )
+                self.deliver_session_projection(&credential, &record.payload)
                     .await?;
-                if let (Some(core_id), Some(assistant_ids)) = (
-                    scalar(session_map.get("id")),
-                    record
-                        .payload
-                        .get("session_payload")
-                        .and_then(|payload| payload.get("participantAssistantIDs"))
-                        .and_then(Value::as_array),
-                ) {
-                    self.request(
-                        &credential,
-                        Method::PUT,
-                        &format!("/api/agent/sessions/{core_id}/participants/"),
-                        Some(json!({"assistant_ids":assistant_ids,"mode":"companion"})),
-                    )
-                    .await?;
-                }
             }
             "message" => {
                 let session = record.payload.get("session").cloned().ok_or_else(|| {
@@ -587,6 +608,37 @@ impl CoreSyncService {
             }
         }
         debug!(outbox_id = record.id, kind = %record.kind, "Core projection completed");
+        Ok(())
+    }
+
+    async fn deliver_session_projection(
+        &self,
+        credential: &CoreCredential,
+        payload: &Value,
+    ) -> Result<(), CoreSyncError> {
+        let session_map = self
+            .request(
+                credential,
+                Method::POST,
+                "/api/agent/sessions/",
+                Some(payload.clone()),
+            )
+            .await?;
+        if let (Some(core_id), Some(assistant_ids)) = (
+            scalar(session_map.get("id")),
+            payload
+                .get("session_payload")
+                .and_then(|payload| payload.get("participantAssistantIDs"))
+                .and_then(Value::as_array),
+        ) {
+            self.request(
+                credential,
+                Method::PUT,
+                &format!("/api/agent/sessions/{core_id}/participants/"),
+                Some(json!({"assistant_ids":assistant_ids,"mode":"companion"})),
+            )
+            .await?;
+        }
         Ok(())
     }
 
@@ -684,7 +736,7 @@ async fn session_projection(store: &Store, session_id: SessionId) -> Result<Valu
         })
         .collect::<Vec<_>>();
     Ok(json!({
-        "source":"edenagent",
+        "source":CORE_AGENT_SOURCE,
         "external_session_id":session.id,
         "assistant":assistant_id,
         "character":character_id,
@@ -763,7 +815,7 @@ fn message_projection(
     let character_id = participant_id(session, "characterId", "character", "id");
     json!({
         "session":{
-            "source":"edenagent",
+            "source":CORE_AGENT_SOURCE,
             "external_session_id":session.id,
             "assistant":assistant_id,
             "character":character_id,
@@ -856,7 +908,7 @@ async fn director_projection(
     let character_id = participant_id(&session, "characterId", "character", "id");
     Ok(json!({
         "session":{
-            "source":"edenagent","external_session_id":session.id,"assistant":assistant_id,
+            "source":CORE_AGENT_SOURCE,"external_session_id":session.id,"assistant":assistant_id,
             "character":character_id,"title":session.title,"mode":"companion","director_policy":{},
             "session_payload":{"id":session.id,"title":session.title,"participants":session.participants,
                 "environment":session.environment,
@@ -1091,6 +1143,7 @@ mod tests {
             .find(|item| item.kind == "session")
             .expect("session item")
             .payload;
+        assert_eq!(session_payload["source"], CORE_AGENT_SOURCE);
         assert_eq!(session_payload["assistant"], "3");
         assert_eq!(session_payload["character"], "7");
         assert_eq!(
@@ -1106,6 +1159,7 @@ mod tests {
             .find(|item| item.kind == "message")
             .expect("message item")
             .payload;
+        assert_eq!(message_payload["session"]["source"], CORE_AGENT_SOURCE);
         assert_eq!(message_payload["message"]["kind"], "assistant");
         assert_eq!(
             message_payload["message"]["external_message_id"],

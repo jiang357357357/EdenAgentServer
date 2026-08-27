@@ -242,7 +242,100 @@ async fn voice_gsv_rpc_discovers_tests_and_previews_through_the_server() {
         .await
         .expect("test GSV STT");
     assert_eq!(tested["ok"], true);
+
+    execute_method(
+        &state,
+        "voice.tts.config.update",
+        serde_json::to_value(&tts).expect("TTS config JSON"),
+    )
+    .await
+    .expect("persist GSV config");
+    let session = state
+        .store
+        .create_session_with_runtime_origin(
+            "local voice",
+            Vec::new(),
+            json!({}),
+            SessionRuntimeOrigin::Local,
+        )
+        .await
+        .expect("local session");
+    let synthesized = execute_method_for_origin(
+        &state,
+        RuntimeOrigin::Local,
+        "voice.tts.synthesize",
+        json!({
+            "sessionId":session.id,
+            "messageId":"message-1",
+            "segmentGroupId":"message-1:0:0",
+            "groupIndex":0,
+            "sequence":0,
+            "text":"老师，您好",
+            "configId":1,
+            "mode":"text_only"
+        }),
+    )
+    .await
+    .expect("synthesize local speech");
+    assert_eq!(synthesized["success"], true);
+    let synthesized_blob = synthesized["audio_blob_id"]
+        .as_str()
+        .expect("synthesized blob");
+
+    let restored = execute_method_for_origin(
+        &state,
+        RuntimeOrigin::Local,
+        "voice.tts.list_segments",
+        json!({"sessionId":session.id,"messageId":"message-1"}),
+    )
+    .await
+    .expect("restore local speech");
+    let restored = restored.as_array().expect("speech segments");
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0]["audio_blob_id"], synthesized_blob);
+    assert_eq!(restored[0]["text_hash"], speech_text_hash("老师，您好"));
+    assert_eq!(restored[0]["segment_group_id"], "message-1:0:0");
     mock.abort();
+}
+
+#[tokio::test]
+async fn mon_voice_history_is_read_from_agent_storage_without_core_credentials() {
+    let state = test_state().await;
+    let session = state.store.create_session("voice").await.expect("session");
+    let blob = state
+        .blobs
+        .put("audio/wav", b"persisted-wav")
+        .await
+        .expect("voice blob");
+    state
+        .store
+        .upsert_voice_speech_segment(VoiceSpeechSegmentUpsert {
+            session_id: session.id,
+            external_message_id: "message-1".to_owned(),
+            external_audio_asset_id: Some(42),
+            audio_blob_id: blob.id,
+            duration_ms: Some(900),
+            audio_format: "wav".to_owned(),
+            segment_group_id: "message-1:0:0".to_owned(),
+            group_index: 0,
+            sequence: 0,
+            text_hash: speech_text_hash("已持久化"),
+            text_length: 4,
+        })
+        .await
+        .expect("persist segment");
+
+    let restored = execute_method(
+        &state,
+        "voice.tts.list_segments",
+        json!({"sessionId":session.id}),
+    )
+    .await
+    .expect("restore without Core credentials");
+    let restored = restored.as_array().expect("speech segments");
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0]["audio_blob_id"], blob.id.to_string());
+    assert_eq!(restored[0]["audio_asset_id"], 42);
 }
 
 #[test]

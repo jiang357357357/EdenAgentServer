@@ -4,10 +4,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- 将流式 TTS 合成片段及其音频 Blob 索引持久化到 Agent 本地数据库，支持重启后恢复播放，并可从 Mon Core 回填历史语音。
+
 ### Changed
 
 - 自 2026-08-24 起，当前版本改用 PolyForm Noncommercial 1.0.0 非商业许可，并提供单独商业授权；历史 MIT 版本的既有授权不追溯撤销。
 - MonCore 配置读取路径切换为 Mon 根工作区的 `Core/.monconfig`。
+- Mon Core 会话投影统一使用 `monagent` 来源标识，并在首次 TTS 请求前同步建立会话与参与者映射，避免首条消息语音竞态。
 
 ## [1.8.0] - 2026-08-05
 
