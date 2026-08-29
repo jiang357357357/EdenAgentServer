@@ -419,7 +419,11 @@ impl Store {
         // background transaction from starving read-only UI requests.
         let pool = SqlitePoolOptions::new()
             .max_connections(8)
-            .acquire_timeout(Duration::from_secs(5))
+            // A burst of BEGIN IMMEDIATE writers can occupy every pooled
+            // connection while SQLite serializes them. Windows filesystem
+            // latency can legitimately exceed the previous five-second pool
+            // deadline, so let queued runtime writes wait for the writer turn.
+            .acquire_timeout(Duration::from_secs(30))
             .connect_with(options)
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;

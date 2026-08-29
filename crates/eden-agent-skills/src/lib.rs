@@ -2634,6 +2634,11 @@ mod tests {
         ];
         #[cfg(not(windows))]
         let command = vec!["sh", "-c", "printf '{\"text\":\"ok\"}'"];
+        // A fresh PowerShell process can spend several seconds loading on a
+        // Windows runner (especially while Defender scans newly built test
+        // binaries). Keep the production timeout behavior covered without
+        // making this cross-platform execution test depend on cold-start I/O.
+        let timeout_seconds = if cfg!(windows) { 30 } else { 10 };
         fs::write(
             root.join("tools/echo.json"),
             serde_json::to_vec_pretty(&json!({
@@ -2645,7 +2650,7 @@ mod tests {
                 "outputSchema":{"type":"object","required":["text"],"properties":{"text":{"type":"string"}}},
                 "command":command,
                 "testCommand":command,
-                "timeoutSeconds":10,
+                "timeoutSeconds":timeout_seconds,
             }))
             .expect("manifest JSON"),
         )
