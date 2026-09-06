@@ -33,6 +33,7 @@ use eden_agent_api::{
     WorkspaceDirectoryInfo, WorkspaceEntryInfo, WorkspaceEntryKind, WorkspaceFileInfo,
     WorkspaceInfo, WorkspacePathParams, WorkspaceSwitchParams, WorkspaceSwitchResult,
 };
+use eden_agent_api::{CommandExecutionInfo, CommandExecutionMode, CommandExecutionSetParams};
 use eden_agent_domain::{
     AgentId, BlobId, ItemId, OperationId, PermissionRequestId, QuestionRequestId, SessionId,
     ToolCallId, TurnId,
@@ -51,6 +52,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = ts_rs::Config::default();
     let declarations = [
+        CommandExecutionMode::decl(&config),
+        CommandExecutionInfo::decl(&config),
+        CommandExecutionSetParams::decl(&config),
         SessionId::decl(&config),
         TurnId::decl(&config),
         ItemId::decl(&config),
@@ -240,6 +244,8 @@ export interface RpcMethodMap {{
   "message.list": {{ params: MessageListParams; result: EventPage }}
   "permission.list": {{ params: PermissionListParams; result: PermissionRequestInfo[] }}
   "permission.mode.get": {{ params: Record<string, never>; result: {{ mode: "restricted" | "full_access" | "takeover" }} }}
+  "command.execution.get": {{ params: Record<string, never>; result: CommandExecutionInfo }}
+  "command.execution.set": {{ params: CommandExecutionSetParams; result: CommandExecutionInfo }}
   "permission.mode.set": {{ params: {{ mode: "restricted" | "full_access" | "takeover" }}; result: {{ mode: "restricted" | "full_access" | "takeover" }} }}
   "permission.resolve": {{ params: PermissionResolveParams; result: PermissionRequestInfo }}
   "operation.list": {{ params: OperationListParams; result: OperationInfo[] }}

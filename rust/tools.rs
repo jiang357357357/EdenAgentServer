@@ -1,9 +1,6 @@
 use super::*;
 
-pub(crate) fn native_tool_registry(
-    workspaces: &WorkspaceService,
-    command_tools_enabled: bool,
-) -> ToolRegistry {
+pub(crate) fn native_tool_registry(workspaces: &WorkspaceService) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     for (name, description, parameters, sequential) in [
         (
@@ -64,17 +61,17 @@ pub(crate) fn native_tool_registry(
             registry.register(tool);
         }
     }
-    if command_tools_enabled {
+    {
         let command_definitions = if cfg!(windows) {
             vec![(
                 "powershell",
-                "Run a PowerShell command in the configured OS sandbox",
+                "Run a PowerShell command using the user-selected execution boundary and approval policy",
                 json!({"type":"object","required":["command"],"properties":{"command":{"type":"string"},"yield_time_ms":{"type":"integer"}}}),
             )]
         } else {
             vec![(
                 "bash",
-                "Run a Bash command in the configured OS sandbox",
+                "Run a Bash command using the user-selected execution boundary and approval policy",
                 json!({"type":"object","required":["command"],"properties":{"command":{"type":"string"},"yield_time_ms":{"type":"integer"}}}),
             )]
         };
@@ -88,7 +85,7 @@ pub(crate) fn native_tool_registry(
         }
         let mut definition = ToolDefinition::direct(
             "write_stdin",
-            "Poll, write to, or terminate a sandboxed process session",
+            "Poll, write to, or terminate an authorized process session",
         );
         definition.parameters = json!({"type":"object","required":["session_id"],"properties":{"session_id":{"type":"string"},"chars":{"type":"string"},"terminate":{"type":"boolean"},"yield_time_ms":{"type":"integer"}}});
         definition.execution_mode = ToolExecutionMode::Sequential;

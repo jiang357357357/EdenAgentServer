@@ -15,6 +15,39 @@ pub const TOKEN_PROTOCOL_PREFIX: &str = "eden-agent-token.";
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
+pub enum CommandExecutionMode {
+    #[default]
+    Sandbox,
+    Host,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommandExecutionSetParams {
+    pub mode: CommandExecutionMode,
+    #[serde(default)]
+    pub confirm_host_execution: bool,
+    #[serde(default)]
+    pub network_access: bool,
+    #[serde(default)]
+    pub writable_roots: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandExecutionInfo {
+    pub mode: CommandExecutionMode,
+    pub network_access: bool,
+    pub writable_roots: Vec<String>,
+    pub available: bool,
+    pub sandbox_available: bool,
+    pub sandbox_backend: String,
+    pub shell: String,
+    pub detail: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeOrigin {
     #[default]
     Mon,
@@ -1686,6 +1719,8 @@ pub struct VoiceSpeechSegmentInfo {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ProtocolSchemaCatalog {
+    pub command_execution: CommandExecutionInfo,
+    pub command_execution_set: CommandExecutionSetParams,
     pub rpc_request: RpcRequest,
     pub rpc_response: RpcResponse,
     pub initialize: InitializeParams,

@@ -1,4 +1,23 @@
 use super::*;
+use eden_agent_api::{CommandExecutionInfo, CommandExecutionMode, CommandExecutionSetParams};
+use eden_agent_workspace::{CommandExecutionSettings, CommandExecutionStatus};
+
+fn command_execution_info(status: CommandExecutionStatus) -> CommandExecutionInfo {
+    CommandExecutionInfo {
+        mode: if status.settings.mode == "host" {
+            CommandExecutionMode::Host
+        } else {
+            CommandExecutionMode::Sandbox
+        },
+        network_access: status.settings.network_access,
+        writable_roots: status.settings.writable_roots,
+        available: status.available,
+        sandbox_available: status.sandbox_available,
+        sandbox_backend: status.sandbox_backend,
+        shell: status.shell,
+        detail: status.detail,
+    }
+}
 
 pub(crate) async fn execute_interaction_rpc(
     state: &AppState,
@@ -7,6 +26,34 @@ pub(crate) async fn execute_interaction_rpc(
     params: Value,
 ) -> Result<Value, RpcFailure> {
     match method {
+        "command.execution.get" => serde_json::to_value(command_execution_info(
+            state.workspaces.command_execution_status(),
+        ))
+        .map_err(|error| RpcFailure::application(error.to_string())),
+        "command.execution.set" => {
+            let params: CommandExecutionSetParams = parse_params(params)?;
+            if params.mode == CommandExecutionMode::Host && !params.confirm_host_execution {
+                return Err(RpcFailure::invalid_params(
+                    "本机执行需要用户明确确认；它使用当前系统账户权限，不提供工作区、世界目录或网络隔离。",
+                ));
+            }
+            let status = state
+                .workspaces
+                .set_command_execution(CommandExecutionSettings {
+                    mode: if params.mode == CommandExecutionMode::Host {
+                        "host"
+                    } else {
+                        "sandbox"
+                    }
+                    .into(),
+                    network_access: params.network_access,
+                    writable_roots: params.writable_roots,
+                })
+                .await
+                .map_err(RpcFailure::application)?;
+            serde_json::to_value(command_execution_info(status))
+                .map_err(|error| RpcFailure::application(error.to_string()))
+        }
         "permission.list" => {
             let params: PermissionListParams = parse_params(params)?;
             let records = state

@@ -144,8 +144,17 @@ impl CoreSyncService {
             )
             .await?;
         self.enqueue_session_snapshot(session_id).await?;
-        for event in self.store.list_events(session_id, 0).await? {
-            if event.event_type == "agent.message_end" {
+        let mut after_seq = 0;
+        loop {
+            let messages = self
+                .store
+                .list_completed_message_events(session_id, after_seq, 200)
+                .await?;
+            if messages.is_empty() {
+                break;
+            }
+            for event in messages {
+                after_seq = event.seq;
                 self.enqueue_event(&event).await?;
             }
         }
@@ -700,7 +709,7 @@ fn epoch_millis() -> i64 {
 
 async fn session_projection(store: &Store, session_id: SessionId) -> Result<Value, StoreError> {
     let session = store.get_session(session_id).await?;
-    let events = store.list_events(session_id, 0).await?;
+    let events = store.list_sync_snapshot_events(session_id).await?;
     let assistant_id = participant_id(&session, "assistantId", "assistant", "id");
     let character_id = participant_id(&session, "characterId", "character", "id");
     let canonical_context = events
@@ -777,7 +786,9 @@ async fn stable_message_id(
     if role == Some("toolResult") {
         return Ok(event.id);
     }
-    let events = store.list_events(event.session_id, 0).await?;
+    let events = store
+        .list_message_boundaries(event.session_id, event.turn_id, event.seq)
+        .await?;
     let mut message_start_id = None;
     for candidate in events
         .iter()
@@ -863,7 +874,7 @@ async fn director_projection(
     plan_id: &str,
 ) -> Result<Value, StoreError> {
     let session = store.get_session(session_id).await?;
-    let events = store.list_events(session_id, 0).await?;
+    let events = store.list_director_events(session_id).await?;
     let plan = events
         .iter()
         .find(|event| {
@@ -1015,6 +1026,70 @@ mod tests {
             credential_ref("https://core.example/", "secret-token")
         );
         assert!(!reference.contains("secret-token"));
+    }
+
+    #[tokio::test]
+    async fn session_snapshots_exclude_stream_updates_and_keep_older_metadata() {
+        let store = Store::in_memory().await.unwrap();
+        let session = store.create_session("projection").await.unwrap();
+        store
+            .append_event(
+                session.id,
+                None,
+                "context.compacted",
+                json!({"summary":"keep summary"}),
+            )
+            .await
+            .unwrap();
+        store
+            .append_event(
+                session.id,
+                None,
+                "character.action.changed",
+                json!({"action":"wave"}),
+            )
+            .await
+            .unwrap();
+        let mut writer = eden_agent_store::StreamEventWriter::default();
+        for index in 0..250 {
+            store
+                .append_event(session.id, None, "turn.completed", json!({"index":index}))
+                .await
+                .unwrap();
+            writer
+                .append(
+                    &store,
+                    session.id,
+                    None,
+                    json!({"message":{"content":"x".repeat(1024 + index)}}),
+                )
+                .await
+                .unwrap();
+            store
+                .append_event(
+                    session.id,
+                    None,
+                    "subagent.agent_message_update",
+                    json!({"event":{"message":"partial"}}),
+                )
+                .await
+                .unwrap();
+        }
+        let selected = store.list_sync_snapshot_events(session.id).await.unwrap();
+        assert_eq!(selected.len(), 202);
+        let payload = session_projection(&store, session.id).await.unwrap();
+        let events = payload["session_events_payload"].as_array().unwrap();
+        assert_eq!(events.len(), 200);
+        assert!(events.iter().all(|event| event["type"] == "turn.completed"));
+        assert_eq!(events[0]["payload"]["index"], 50);
+        assert_eq!(
+            payload["session_payload"]["canonicalContext"]["summary"],
+            "keep summary"
+        );
+        assert_eq!(
+            payload["session_payload"]["characterRuntime"]["action"],
+            "wave"
+        );
     }
 
     #[tokio::test]

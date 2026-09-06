@@ -181,10 +181,20 @@ pub(crate) async fn readiness(State(state): State<AppState>) -> Response {
             ready: state.diagnostics.process_sandbox_available,
             required: false,
             detail: if state.diagnostics.process_sandbox_available {
-                "available; command tools enabled".to_owned()
+                "startup probe passed"
             } else {
-                "unavailable; command tools fail closed".to_owned()
-            },
+                "unavailable; sandbox execution disabled"
+            }
+            .to_owned(),
+        },
+    );
+    let execution = state.workspaces.command_execution_status();
+    checks.insert(
+        "commandExecution".to_owned(),
+        ReadinessCheck {
+            ready: execution.available,
+            required: false,
+            detail: execution.detail,
         },
     );
     let ready = checks.values().all(|check| !check.required || check.ready);
@@ -612,113 +622,126 @@ pub(crate) fn bearer_token_matches(state: &AppState, headers: &HeaderMap) -> boo
     bearer.is_some_and(|token| token == state.capability_token.as_ref())
 }
 
+const MAX_CONNECTION_REQUESTS: usize = 16;
+const MAX_CONTROL_REQUESTS: usize = 4;
+
 pub(crate) async fn handle_socket(socket: WebSocket, state: AppState) {
     let connection_id = Uuid::new_v4().to_string();
     let (mut sender, mut receiver) = socket.split();
     let mut notifications = state.runtime.subscribe();
     let mut runtime_origin = None;
+    let mut pending = futures::stream::FuturesUnordered::new();
+    let mut active_requests = 0usize;
+    let mut active_controls = 0usize;
 
     loop {
         tokio::select! {
             frame = receiver.next() => {
                 match frame {
                     Some(Ok(Message::Text(text))) => {
-                        if process_client_text(
-                            &mut sender,
-                            &state,
-                            &connection_id,
-                            &mut runtime_origin,
-                            &text,
-                        )
-                        .await
-                        .is_err()
-                        {
-                            break;
+                        let request = match serde_json::from_str::<RpcRequest>(&text) {
+                            Ok(request) if request.jsonrpc == JSON_RPC_VERSION => request,
+                            Ok(request) => {
+                                if send_response(&mut sender, RpcResponse::error(request.id.unwrap_or(Value::Null), -32600, "invalid JSON-RPC version")).await.is_err() { break; }
+                                continue;
+                            }
+                            Err(error) => {
+                                if send_response(&mut sender, RpcResponse::error(Value::Null, -32700, format!("parse error: {error}"))).await.is_err() { break; }
+                                continue;
+                            }
+                        };
+                        let Some(id) = request.id else { continue };
+                        if runtime_origin.is_none() || request.method == "initialize" {
+                            let was_initialized = runtime_origin.is_some();
+                            let response = initialize_connection(&state, &mut runtime_origin, id, &request.method, request.params);
+                            if send_response(&mut sender, response).await.is_err() { break; }
+                            if !was_initialized && runtime_origin.is_some()
+                                && send_json(&mut sender, &RpcNotification::new("server.ready", ReadyNotification { connection_id: connection_id.clone() })).await.is_err() { break; }
+                            continue;
                         }
+                        let control = matches!(request.method.as_str(), "turn.cancel" | "permission.resolve" | "question.resolve" | "question.reject" | "agent.interrupt");
+                        let active = if control { &mut active_controls } else { &mut active_requests };
+                        let limit = if control { MAX_CONTROL_REQUESTS } else { MAX_CONNECTION_REQUESTS };
+                        if *active >= limit {
+                            if send_response(&mut sender, RpcResponse::error(id, -32004, "too many concurrent requests")).await.is_err() { break; }
+                            continue;
+                        }
+                        *active += 1;
+                        let state = state.clone();
+                        let origin = runtime_origin.expect("initialized above");
+                        // Accepted operations finish even if the client disconnects;
+                        // dropping a response waiter must not abort external side effects.
+                        let task = tokio::spawn(async move {
+                            execute_method_for_origin(&state, origin, &request.method, request.params).await
+                        });
+                        pending.push(async move { (id, control, task.await) });
                     }
                     Some(Ok(Message::Ping(payload))) => {
-                        if sender.send(Message::Pong(payload)).await.is_err() {
-                            break;
-                        }
+                        if send_frame(&mut sender, Message::Pong(payload)).await.is_err() { break; }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(_)) => {}
-                    Some(Err(error)) => {
-                        warn!(%connection_id, %error, "websocket receive failed");
-                        break;
-                    }
+                    Some(Err(error)) => { warn!(%connection_id, %error, "websocket receive failed"); break; }
                 }
+            }
+            completed = pending.next(), if !pending.is_empty() => {
+                let Some((id, control, result)) = completed else { continue };
+                if control { active_controls -= 1; } else { active_requests -= 1; }
+                let response = match result {
+                    Ok(Ok(result)) => RpcResponse::success(id, result),
+                    Ok(Err(failure)) => RpcResponse::error(id, failure.code, failure.message),
+                    Err(error) => {
+                        warn!(%connection_id, %error, "RPC task failed");
+                        RpcResponse::error(id, -32603, "RPC task failed")
+                    }
+                };
+                if send_response(&mut sender, response).await.is_err() { break; }
             }
             event = notifications.recv(), if runtime_origin.is_some() => {
                 let notification = match event {
                     Ok(event) => {
                         let Some(origin) = runtime_origin else { continue };
-                        let belongs_to_origin = state
-                            .store
-                            .get_session(event.session_id)
-                            .await
-                            .is_ok_and(|session| session_origin(&session) == origin);
-                        if !belongs_to_origin {
-                            continue;
-                        }
+                        if !event_belongs_to_origin(&state, &event, origin).await { continue; }
                         RpcNotification::new("session.event", session_event(event))
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        RpcNotification::new(
-                            "server.warning",
-                            json!({
-                                "code": "event_stream_lagged",
-                                "skipped": skipped,
-                                "recovery": "call event.list with the last observed sequence",
-                            }),
-                        )
-                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => RpcNotification::new(
+                        "server.warning", json!({"code":"event_stream_lagged","skipped":skipped,"recovery":"call event.list with the last observed sequence"}),
+                    ),
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 };
-                if send_json(&mut sender, &notification).await.is_err() {
-                    break;
-                }
+                if send_json(&mut sender, &notification).await.is_err() { break; }
             }
         }
     }
 }
 
-pub(crate) async fn process_client_text(
-    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+async fn event_belongs_to_origin(
     state: &AppState,
-    connection_id: &str,
-    runtime_origin: &mut Option<RuntimeOrigin>,
-    text: &str,
-) -> Result<(), axum::Error> {
-    let request = match serde_json::from_str::<RpcRequest>(text) {
-        Ok(request) if request.jsonrpc == JSON_RPC_VERSION => request,
-        Ok(request) => {
-            return send_response(
-                sender,
-                RpcResponse::error(
-                    request.id.unwrap_or(Value::Null),
-                    -32600,
-                    "invalid JSON-RPC version",
-                ),
-            )
-            .await;
-        }
-        Err(error) => {
-            return send_response(
-                sender,
-                RpcResponse::error(Value::Null, -32700, format!("parse error: {error}")),
-            )
-            .await;
-        }
-    };
+    event: &eden_agent_store::EventRecord,
+    origin: RuntimeOrigin,
+) -> bool {
+    if event.event_type == "session.deleted" {
+        // This metadata is produced by Store inside the deletion transaction,
+        // never by an RPC client. The session row no longer exists here.
+        return event.payload.get("runtimeOrigin") == Some(&json!(origin));
+    }
+    state
+        .store
+        .get_session(event.session_id)
+        .await
+        .is_ok_and(|session| session_origin(&session) == origin)
+}
 
-    let Some(id) = request.id else {
-        return Ok(());
-    };
-    let was_initialized = runtime_origin.is_some();
-    let response = match request.method.as_str() {
+fn initialize_connection(
+    state: &AppState,
+    runtime_origin: &mut Option<RuntimeOrigin>,
+    id: Value,
+    method: &str,
+    params: Value,
+) -> RpcResponse {
+    match method {
         "initialize" if runtime_origin.is_none() => {
-            match serde_json::from_value::<InitializeParams>(request.params) {
+            match serde_json::from_value::<InitializeParams>(params) {
                 Ok(params)
                     if params.protocol_version == PROTOCOL_VERSION
                         && params.runtime_origin == state.runtime_origin =>
@@ -754,32 +777,8 @@ pub(crate) async fn process_client_text(
         _ if runtime_origin.is_none() => {
             RpcResponse::error(id, -32000, "initialize must be the first request")
         }
-        _ => match execute_method_for_origin(
-            state,
-            runtime_origin.unwrap_or(RuntimeOrigin::Mon),
-            &request.method,
-            request.params,
-        )
-        .await
-        {
-            Ok(result) => RpcResponse::success(id, result),
-            Err(failure) => RpcResponse::error(id, failure.code, failure.message),
-        },
-    };
-    send_response(sender, response).await?;
-    if runtime_origin.is_some() && !was_initialized {
-        send_json(
-            sender,
-            &RpcNotification::new(
-                "server.ready",
-                ReadyNotification {
-                    connection_id: connection_id.to_owned(),
-                },
-            ),
-        )
-        .await?;
+        _ => RpcResponse::error(id, -32000, "initialize must be the first request"),
     }
-    Ok(())
 }
 
 pub(crate) fn runtime_capabilities(origin: RuntimeOrigin) -> Vec<String> {
@@ -821,11 +820,27 @@ pub(crate) async fn send_json(
     sender: &mut futures::stream::SplitSink<WebSocket, Message>,
     value: &impl Serialize,
 ) -> Result<(), axum::Error> {
-    sender
-        .send(Message::Text(
+    send_frame(
+        sender,
+        Message::Text(
             serde_json::to_string(value)
                 .expect("RPC frame must serialize")
                 .into(),
-        ))
+        ),
+    )
+    .await
+}
+
+async fn send_frame(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    frame: Message,
+) -> Result<(), axum::Error> {
+    tokio::time::timeout(Duration::from_secs(10), sender.send(frame))
         .await
+        .map_err(|_| {
+            axum::Error::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "WebSocket writer stalled",
+            ))
+        })?
 }

@@ -1216,3 +1216,302 @@ async fn runtime_origins_isolate_sessions_and_core_capabilities() {
     assert!(runtime_capabilities(RuntimeOrigin::Local).contains(&"voice-tts".to_owned()));
     assert!(runtime_capabilities(RuntimeOrigin::Local).contains(&"voice-stt-realtime".to_owned()));
 }
+
+#[tokio::test]
+async fn command_execution_rpc_requires_explicit_host_confirmation_and_preserves_approval_mode() {
+    let state = test_state().await;
+    let initial = execute_method(&state, "command.execution.get", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(initial["mode"], "sandbox");
+    assert_eq!(initial["available"], false);
+    execute_method(&state, "command.execution.set", json!({"mode":"host"}))
+        .await
+        .expect_err("confirmation required");
+    assert_eq!(
+        state.store.get_config("command.execution").await.unwrap(),
+        None
+    );
+    execute_method(&state, "command.execution.set", json!({"mode":"invalid"}))
+        .await
+        .expect_err("invalid mode");
+    let host = execute_method(
+        &state,
+        "command.execution.set",
+        json!({"mode":"host","confirmHostExecution":true}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(host["mode"], "host");
+    assert_eq!(host["available"], true);
+    assert_eq!(state.approvals.mode(), SandboxPermissionMode::Restricted);
+    assert_eq!(
+        state
+            .store
+            .get_config("command.execution")
+            .await
+            .unwrap()
+            .unwrap()["mode"],
+        "host"
+    );
+    assert!(!state.workspaces.verified_process_sandbox().is_available());
+    execute_method(&state, "permission.mode.set", json!({"mode":"takeover"}))
+        .await
+        .unwrap();
+    let sandbox = execute_method(&state, "command.execution.set", json!({"mode":"sandbox"}))
+        .await
+        .unwrap();
+    assert_eq!(sandbox["available"], false);
+    assert_eq!(state.approvals.mode(), SandboxPermissionMode::Takeover);
+}
+
+#[tokio::test]
+async fn host_terminal_uses_real_approval_hook_and_registered_tools() {
+    use eden_agent_core::{
+        AgentContext, AssistantMessage, BeforeToolCall, ToolCall, ToolCallContext, ToolHooks,
+        event_channel,
+    };
+    let state = test_state().await;
+    execute_method(
+        &state,
+        "command.execution.set",
+        json!({"mode":"host","confirmHostExecution":true}),
+    )
+    .await
+    .unwrap();
+    state
+        .approvals
+        .set_mode(SandboxPermissionMode::FullAccess)
+        .await
+        .unwrap();
+    let registry = native_tool_registry(&state.workspaces);
+    let name = if cfg!(windows) { "powershell" } else { "bash" };
+    let tool = registry.get(name).unwrap();
+    assert!(registry.get("write_stdin").is_some());
+    let call = ToolCall {
+        id: "host-approval".into(),
+        name: name.into(),
+        arguments: json!({"command":"echo eden-approved","yield_time_ms":1000}),
+    };
+    let session = state.store.create_session("host terminal").await.unwrap();
+    let turn_id = eden_agent_core::TurnId::new();
+    let before = BeforeToolCall {
+        assistant_message: AssistantMessage::text(""),
+        call: call.clone(),
+        definition: tool.definition(),
+        permission_request: tool.permission_request(&call.arguments),
+        context: AgentContext {
+            metadata: json!({"sessionId":session.id,"turnId":turn_id}),
+            ..Default::default()
+        },
+    };
+    let approvals = state.approvals.clone();
+    let pending =
+        tokio::spawn(async move { approvals.before(before, CancellationToken::new()).await });
+    let permission = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if let Some(permission) = state
+                .approvals
+                .list_pending(Some(session.id))
+                .await
+                .unwrap()
+                .first()
+            {
+                break permission.clone();
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(permission.capability, "shell.host.execute");
+    state
+        .approvals
+        .resolve(permission.id, ApprovalDecision::Once, None)
+        .await
+        .unwrap();
+    let approved = pending.await.unwrap().unwrap();
+    let (events, _receiver) = event_channel(8);
+    let result = tool
+        .execute(
+            &call,
+            ToolCallContext {
+                cancellation: CancellationToken::new(),
+                events,
+                session_id: Some(session.id.to_string()),
+                metadata: approved.metadata,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(result.success);
+}
+
+type TestRpcSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn open_test_rpc(state: AppState) -> (TestRpcSocket, tokio::task::JoinHandle<()>) {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let token = state.capability_token.clone();
+    let origin = state.runtime_origin;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, build_router(state)).await.unwrap();
+    });
+    let mut request = format!("ws://{address}/rpc").into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    send_test_rpc(&mut socket, 0, "initialize", json!({
+        "protocolVersion":PROTOCOL_VERSION,"clientName":"test","clientVersion":"test","runtimeOrigin":origin,
+    })).await;
+    assert!(read_test_rpc(&mut socket).await.get("result").is_some());
+    assert_eq!(read_test_rpc(&mut socket).await["method"], "server.ready");
+    (socket, server)
+}
+
+async fn send_test_rpc(socket: &mut TestRpcSocket, id: u32, method: &str, params: Value) {
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+}
+
+async fn read_test_rpc(socket: &mut TestRpcSocket) -> Value {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let frame = socket.next().await.unwrap().unwrap();
+            if let tokio_tungstenite::tungstenite::Message::Text(text) = frame {
+                return serde_json::from_str(&text).unwrap();
+            }
+        }
+    })
+    .await
+    .expect("RPC frame timed out")
+}
+
+#[tokio::test]
+async fn websocket_delivers_deleted_session_tombstones_without_crossing_realms() {
+    let state = test_state().await;
+    let store = state.store.clone();
+    let mon = store.create_session("mon session").await.unwrap();
+    let local = store
+        .create_session_with_runtime_origin(
+            "local session",
+            vec![],
+            json!({}),
+            eden_agent_store::SessionRuntimeOrigin::Local,
+        )
+        .await
+        .unwrap();
+    let (mut socket, server) = open_test_rpc(state).await;
+    store.delete_session(local.id).await.unwrap();
+    store.delete_session(mon.id).await.unwrap();
+    let event = read_test_rpc(&mut socket).await;
+    assert_eq!(event["method"], "session.event");
+    assert_eq!(event["params"]["eventType"], "session.deleted");
+    assert_eq!(event["params"]["sessionId"], mon.id.to_string());
+    assert_eq!(event["params"]["payload"]["runtimeOrigin"], "mon");
+    socket.close(None).await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn websocket_keeps_notifications_and_cancellation_live_when_slow_requests_fill_capacity() {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let app = Router::new().route("/api/synthesis/role-emotion", post({
+        let gate = gate.clone();
+        let started = started.clone();
+        move || {
+            let gate = gate.clone();
+            let started = started.clone();
+            async move {
+                started.notify_one();
+                gate.acquire().await.unwrap().forget();
+                Json(json!({"success":true,"audio_data":BASE64.encode(b"test-wav"),"duration":1.0}))
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mock = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let state = test_state().await;
+    let store = state.store.clone();
+    let session = store.create_session("concurrent RPC").await.unwrap();
+    let (mut socket, server) = open_test_rpc(state).await;
+    let mut config = default_gsv_tts_config();
+    config.service_url = format!("http://{address}");
+    config.version = "v2ProPlus".into();
+    config.world = "BlueArchive".into();
+    config.role = "Arona".into();
+    config.role_id = "arona-1".into();
+    config.emotion = "平常".into();
+    for id in 100..116 {
+        send_test_rpc(
+            &mut socket,
+            id,
+            "voice.gsv.preview",
+            json!({"config":config,"text":"hello"}),
+        )
+        .await;
+    }
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .unwrap();
+    send_test_rpc(&mut socket, 200, "voice.config.read", json!({})).await;
+    send_test_rpc(
+        &mut socket,
+        201,
+        "turn.cancel",
+        json!({"sessionId":session.id}),
+    )
+    .await;
+    store
+        .append_event(session.id, None, "turn.completed", json!({"probe":true}))
+        .await
+        .unwrap();
+    let mut rejected = false;
+    let mut cancelled = false;
+    let mut notified = false;
+    while !(rejected && cancelled && notified) {
+        let response = read_test_rpc(&mut socket).await;
+        match response["id"].as_u64() {
+            Some(200) => {
+                assert_eq!(response["error"]["code"], -32004);
+                rejected = true;
+            }
+            Some(201) => {
+                assert_eq!(response["result"]["cancellationRequested"], true);
+                cancelled = true;
+            }
+            Some(other) => panic!("slow RPC {other} completed before the gate opened: {response}"),
+            None => {
+                if response["params"]["payload"]["probe"] == true {
+                    notified = true;
+                }
+            }
+        }
+    }
+    gate.add_permits(16);
+    let mut completed = HashSet::new();
+    while completed.len() < 16 {
+        let response = read_test_rpc(&mut socket).await;
+        if let Some(id) = response["id"].as_u64() {
+            assert!((100..116).contains(&id));
+            assert_eq!(response["result"]["ok"], true, "{response}");
+            completed.insert(id);
+        }
+    }
+    socket.close(None).await.unwrap();
+    server.abort();
+    mock.abort();
+}

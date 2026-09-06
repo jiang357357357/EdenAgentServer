@@ -46,7 +46,7 @@ pub(crate) async fn execute_method_for_origin(
         Some("session" | "turn" | "event" | "message" | "director") => {
             execute_conversation_rpc(state, runtime_origin, method, params).await
         }
-        Some("permission" | "operation" | "question" | "media") => {
+        Some("permission" | "operation" | "question" | "media" | "command") => {
             execute_interaction_rpc(state, runtime_origin, method, params).await
         }
         Some("skill" | "plugin") => execute_extensions_rpc(state, method, params).await,

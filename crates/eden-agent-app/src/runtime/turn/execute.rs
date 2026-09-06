@@ -2,7 +2,7 @@ use super::super::context::{
     RuntimeLoopHooks, latest_prompt_cache_states, latest_skill_snapshots, prompt_section,
     skill_prompt_section,
 };
-use super::super::event::{annotate_agent_event, persist_agent_event};
+use super::super::event::persist_agent_events;
 use super::super::tool_policy::tools_for_profile;
 use super::super::{EVENT_CHANNEL_CAPACITY, RuntimeError, RuntimeInner};
 use crate::{director, prompt};
@@ -309,7 +309,7 @@ pub(super) async fn execute_director_plan(
         config.loop_hooks = loop_hooks.clone();
         config.session_id = Some(input.session_id.to_string());
         let driver = AgentLoop::new(config);
-        let (emitter, mut events) = event_channel(EVENT_CHANNEL_CAPACITY);
+        let (emitter, events) = event_channel(EVENT_CHANNEL_CAPACITY);
         let first_beat = beat_index == 0;
         if !first_beat {
             actor_context
@@ -344,17 +344,14 @@ pub(super) async fn execute_director_plan(
                     .await
             }
         };
-        let persistence = async {
-            let mut active_message_id = None;
-            while let Some(event) = events.recv().await {
-                // Speaker identity is message metadata, not director-only metadata.
-                // Persist it for single-participant turns too so voice output and
-                // historical rendering can resolve the participant's TTS config.
-                let event = annotate_agent_event(event, &speaker, &orchestration);
-                persist_agent_event(&inner.store, input, event, &mut active_message_id).await?;
-            }
-            Ok::<(), RuntimeError>(())
-        };
+        let persistence = persist_agent_events(
+            &inner.store,
+            input,
+            events,
+            &speaker,
+            &orchestration,
+            cancellation.clone(),
+        );
         let (execution_result, persistence_result) = tokio::join!(execution, persistence);
         persistence_result?;
         let result = execution_result?;

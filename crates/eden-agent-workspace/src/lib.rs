@@ -1,5 +1,8 @@
 //! Durable workspace switching and permission-gated external read-only tools.
 
+mod command_execution;
+pub use command_execution::{CommandExecutionSettings, CommandExecutionStatus};
+
 use async_trait::async_trait;
 use eden_agent_core::{
     ContentBlock, PermissionRequest, Tool, ToolCall, ToolCallContext, ToolDefinition,
@@ -29,6 +32,7 @@ pub struct WorkspaceService {
     store: Store,
     root: Arc<RwLock<PathBuf>>,
     native_template: NativeToolConfig,
+    commands: Arc<command_execution::CommandExecution>,
 }
 
 impl WorkspaceService {
@@ -51,10 +55,14 @@ impl WorkspaceService {
                 .await
                 .map_err(|error| error.to_string())?;
         }
+        let commands =
+            command_execution::CommandExecution::initialize(&store, process_sandbox, &root).await?;
         Ok(Self {
             store,
             root: Arc::new(RwLock::new(root.clone())),
-            native_template: NativeToolConfig::new(root).with_process_sandbox(process_sandbox),
+            native_template: NativeToolConfig::new(root)
+                .with_process_sandbox(commands.sandbox.clone()),
+            commands: Arc::new(commands),
         })
     }
 
@@ -97,6 +105,14 @@ impl WorkspaceService {
     /// Publish a pre-validated pending root. The in-memory root changes before
     /// the durable event is broadcast, and rolls back if the transaction fails.
     pub async fn commit_pending(&self, path: &Path) -> Result<WorkspaceStateRecord, String> {
+        let _change = self
+            .commands
+            .gate
+            .try_write()
+            .map_err(|_| "workspace tools are still executing".to_owned())?;
+        if self.native_template.has_active_processes() {
+            return Err("terminal processes are still running".into());
+        }
         let target = canonical_directory(path)?;
         let previous = {
             let mut root = self.root.write().unwrap_or_else(|value| value.into_inner());
@@ -135,6 +151,7 @@ impl WorkspaceService {
             definition,
             root: Arc::clone(&self.root),
             template: self.native_template.clone(),
+            commands: Arc::clone(&self.commands),
         }))
     }
 
@@ -154,6 +171,7 @@ struct DynamicNativeTool {
     definition: ToolDefinition,
     root: Arc<RwLock<PathBuf>>,
     template: NativeToolConfig,
+    commands: Arc<command_execution::CommandExecution>,
 }
 
 impl DynamicNativeTool {
@@ -165,7 +183,10 @@ impl DynamicNativeTool {
             .clone();
         create_native_tool(
             self.definition.clone(),
-            self.template.clone().with_workspace_root(root),
+            self.template
+                .clone()
+                .with_workspace_root(root)
+                .with_process_sandbox(self.commands.backend()),
         )
         .expect("dynamic wrapper only accepts native tool definitions")
     }
@@ -174,11 +195,49 @@ impl DynamicNativeTool {
 #[async_trait]
 impl Tool for DynamicNativeTool {
     fn definition(&self) -> ToolDefinition {
-        self.definition.clone()
+        let mut definition = self.definition.clone();
+        if command_execution::is_command(&definition.name) {
+            definition.description.push_str(&format!(
+                " Execution status: {}. Only the user can change this setting.",
+                self.commands.status().detail
+            ));
+        }
+        definition
     }
 
     fn permission_request(&self, arguments: &Value) -> Option<PermissionRequest> {
-        self.implementation().permission_request(arguments)
+        if command_execution::is_command(&self.definition.name)
+            && self.definition.name != "write_stdin"
+            && !self.commands.status().available
+        {
+            return None;
+        }
+        let mut request = self.implementation().permission_request(arguments)?;
+        if command_execution::is_command(&self.definition.name) {
+            let settings = self.commands.settings();
+            if settings.mode == "host" {
+                request.permission = request.permission.replacen("shell.", "shell.host.", 1);
+            }
+            let root = self.root.read().unwrap_or_else(|value| value.into_inner());
+            request.patterns = request
+                .patterns
+                .iter()
+                .map(|pattern| {
+                    format!(
+                        "{} | {} | network={} | writable={:?} | {}",
+                        settings.mode,
+                        root.display(),
+                        settings.network_access,
+                        settings.writable_roots,
+                        pattern,
+                    )
+                })
+                .collect();
+            if !request.always.is_empty() {
+                request.always = request.patterns.clone();
+            }
+        }
+        Some(request)
     }
 
     async fn execute(
@@ -186,6 +245,34 @@ impl Tool for DynamicNativeTool {
         call: &ToolCall,
         context: ToolCallContext,
     ) -> Result<ToolOutput, ToolFailure> {
+        let _execution = self.commands.gate.read().await;
+        if command_execution::is_command(&self.definition.name) {
+            let status = self.commands.status();
+            if !status.available && self.definition.name != "write_stdin" {
+                return Err(ToolFailure::new(
+                    "command_execution_unavailable",
+                    status.detail,
+                ));
+            }
+            if let Some(request) = self.permission_request(&call.arguments) {
+                if context
+                    .metadata
+                    .get("authorizedCapability")
+                    .and_then(Value::as_str)
+                    != Some(request.permission.as_str())
+                    || context
+                        .metadata
+                        .get("authorizedResource")
+                        .and_then(Value::as_str)
+                        != request.patterns.first().map(String::as_str)
+                {
+                    return Err(ToolFailure::new(
+                        "command_policy_changed",
+                        "Command execution policy changed or was not approved. Request fresh authorization before retrying.",
+                    ));
+                }
+            }
+        }
         self.implementation().execute(call, context).await
     }
 }

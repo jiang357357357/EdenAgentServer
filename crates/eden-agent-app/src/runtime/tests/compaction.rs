@@ -1,6 +1,167 @@
 use super::*;
 
 #[tokio::test]
+async fn filtered_history_preserves_context_and_actor_metadata_across_compaction() {
+    use crate::runtime::context::{
+        director_conversation_context, latest_prompt_cache_states, latest_skill_snapshots,
+        rebuild_context,
+    };
+    let store = Store::in_memory().await.unwrap();
+    let session = store.create_session("long history").await.unwrap();
+    let mut retained = None;
+    for index in 0..80 {
+        let turn = TurnId::new();
+        let event = store
+            .append_event(
+                session.id,
+                Some(turn),
+                "agent.message_end",
+                json!({"message":Message::user(format!("question-{index}"))}),
+            )
+            .await
+            .unwrap();
+        if index == 75 {
+            retained = Some(event.id);
+        }
+        store
+            .append_event(
+                session.id,
+                Some(turn),
+                "agent.message_update",
+                json!({"message":"transient"}),
+            )
+            .await
+            .unwrap();
+        store
+            .append_event(session.id, Some(turn), "turn.completed", json!({}))
+            .await
+            .unwrap();
+        store
+            .append_event(
+                session.id,
+                None,
+                "context.cache_state",
+                json!({"assistantId":"a","cache":{"epoch":index}}),
+            )
+            .await
+            .unwrap();
+        store
+            .append_event(
+                session.id,
+                None,
+                "context.skill_snapshot",
+                json!({"assistantId":"a","content":format!("skill-{index}")}),
+            )
+            .await
+            .unwrap();
+    }
+    // A second actor's older state must survive the newer actor's snapshots.
+    store
+        .append_event(
+            session.id,
+            None,
+            "context.cache_state",
+            json!({"assistantId":"b","cache":{"epoch":1}}),
+        )
+        .await
+        .unwrap();
+    store
+        .append_event(
+            session.id,
+            None,
+            "context.subagent_notification",
+            json!({"messageID":"mail-1","content":"worker finished"}),
+        )
+        .await
+        .unwrap();
+    store
+        .append_event(
+            session.id,
+            None,
+            "character.action.changed",
+            json!({"characterId":"a","action":"wave"}),
+        )
+        .await
+        .unwrap();
+    for compacted in [false, true] {
+        if compacted {
+            store
+                .append_event(
+                    session.id,
+                    None,
+                    "context.compacted",
+                    json!({"summary":"old summary","firstKeptEntryId":retained}),
+                )
+                .await
+                .unwrap();
+            store
+                .append_event(
+                    session.id,
+                    None,
+                    "context.compacted",
+                    json!({"summary":"latest summary","firstKeptEntryId":retained}),
+                )
+                .await
+                .unwrap();
+            // Empty/tool-only messages must not displace the director's readable history.
+            for _ in 0..25 {
+                let turn = TurnId::new();
+                store
+                    .append_event(
+                        session.id,
+                        Some(turn),
+                        "agent.message_end",
+                        json!({"message":Message::Assistant(AssistantMessage::text(""))}),
+                    )
+                    .await
+                    .unwrap();
+                store
+                    .append_event(session.id, Some(turn), "turn.completed", json!({}))
+                    .await
+                    .unwrap();
+            }
+        }
+        let full = store.list_events(session.id, 0).await.unwrap();
+        let filtered = store.list_context_events(session.id).await.unwrap();
+        assert!(
+            !filtered
+                .iter()
+                .any(|event| event.event_type == "agent.message_update")
+        );
+        assert_eq!(
+            rebuild_context(&full, "system"),
+            rebuild_context(&filtered, "system")
+        );
+        assert_eq!(
+            director_conversation_context(&full, 12_000),
+            director_conversation_context(&filtered, 12_000)
+        );
+        assert_eq!(
+            latest_prompt_cache_states(&full),
+            latest_prompt_cache_states(&filtered)
+        );
+        assert_eq!(
+            latest_skill_snapshots(&full),
+            latest_skill_snapshots(&filtered)
+        );
+        for kind in ["context.subagent_notification", "character.action.changed"] {
+            assert_eq!(
+                full.iter()
+                    .filter(|e| e.event_type == kind)
+                    .collect::<Vec<_>>(),
+                filtered
+                    .iter()
+                    .filter(|e| e.event_type == kind)
+                    .collect::<Vec<_>>()
+            );
+        }
+        if compacted {
+            assert!(filtered.len() < full.len() / 2);
+        }
+    }
+}
+
+#[tokio::test]
 async fn manual_compaction_without_old_context_completes_as_a_noop() {
     let store = Store::in_memory().await.expect("store");
     let session = store

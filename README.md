@@ -100,11 +100,13 @@ GSV TTS/STT 配置由 **配置 → 语音配置** 通过 JSON-RPC 写入 Server 
 npm run generate:rpc
 ```
 
+终端执行设置、Windows 支持与 Linux 联网配置见[终端执行边界](docs/command-execution.md)。
+
 ## 安全边界
 
 - 默认只绑定回环地址。
 - 写文件、执行命令、外部通信、连接器动作、技能变更和作业调度均经过权限策略。
-- 命令工具只有在可用的操作系统沙箱中才注册；缺少沙箱时故障关闭。
+- 终端默认使用经过启动探测的 OS 沙箱；用户可在权限菜单明确开启本机执行，审批策略独立生效。MCP stdio 和技能代码仍要求沙箱。
 - `AgentCore` 不依赖 HTTP、SQLite、具体供应商、Electron 或 Mon Core。
 - 进程启动、网络访问和持久化由 Server 统一管理。
 

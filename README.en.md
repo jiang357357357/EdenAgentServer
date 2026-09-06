@@ -104,7 +104,7 @@ npm run generate:rpc
 
 - The service binds to the loopback interface by default.
 - File writes, command execution, external communication, connector actions, skill changes, and job scheduling go through permission policy.
-- Command tools are registered only when an OS sandbox is available; otherwise they fail closed.
+- Terminal commands default to a verified OS sandbox. Users can explicitly enable host execution in the permissions menu; approval policy remains independent. MCP stdio and skill code still require a sandbox.
 - `AgentCore` does not depend on HTTP, SQLite, a model provider, Electron, or Mon Core.
 - Process launch, networking, and persistence are centralized in the Server.
 

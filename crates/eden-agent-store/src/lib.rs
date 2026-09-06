@@ -1,8 +1,12 @@
 //! Durable SQLite state for Eden Agent sessions.
 
+mod context_events;
+mod event_storage;
+pub use event_storage::StreamEventWriter;
 mod host;
 mod legacy_import;
 mod plugins;
+mod projection_events;
 pub use host::*;
 pub use legacy_import::*;
 pub use plugins::*;
@@ -1004,12 +1008,13 @@ impl Store {
 
     pub async fn delete_session(&self, session_id: SessionId) -> Result<bool, StoreError> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let next_seq: Option<i64> =
-            sqlx::query_scalar("SELECT next_seq FROM sessions WHERE id = ?")
-                .bind(session_id.to_string())
-                .fetch_optional(&mut *transaction)
-                .await?;
-        let next_seq = next_seq.ok_or(StoreError::SessionNotFound(session_id))?;
+        let session = sqlx::query("SELECT next_seq, runtime_origin FROM sessions WHERE id = ?")
+            .bind(session_id.to_string())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(StoreError::SessionNotFound(session_id))?;
+        let next_seq: i64 = session.try_get("next_seq")?;
+        let runtime_origin: String = session.try_get("runtime_origin")?;
         let active_inputs: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM session_inputs WHERE session_id = ? AND state IN ('queued', 'claimed')",
         )
@@ -1043,7 +1048,7 @@ impl Store {
                 seq: next_seq,
                 turn_id: None,
                 event_type: "session.deleted".to_owned(),
-                payload: json!({"sessionID":session_id}),
+                payload: json!({"sessionID":session_id,"runtimeOrigin":runtime_origin}),
                 created_at: now_ms(),
             });
         }
@@ -1770,15 +1775,7 @@ impl Store {
         session_id: SessionId,
         after_seq: i64,
     ) -> Result<Vec<EventRecord>, StoreError> {
-        let rows = sqlx::query(
-            "SELECT id, session_id, seq, turn_id, event_type, payload_json, created_at
-             FROM session_events WHERE session_id = ? AND seq > ? ORDER BY seq",
-        )
-        .bind(session_id.to_string())
-        .bind(after_seq)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.iter().map(event_from_row).collect()
+        self.read_event_storage(session_id, after_seq, None).await
     }
 
     pub async fn list_director_events(
@@ -1811,21 +1808,11 @@ impl Store {
         limit: u32,
     ) -> Result<EventPageRecord, StoreError> {
         let limit = limit.clamp(1, 500) as usize;
-        let rows = sqlx::query(
-            "SELECT id, session_id, seq, turn_id, event_type, payload_json, created_at
-             FROM session_events WHERE session_id = ? AND seq > ? ORDER BY seq LIMIT ?",
-        )
-        .bind(session_id.to_string())
-        .bind(after_seq.max(0))
-        .bind(i64::try_from(limit + 1).unwrap_or(501))
-        .fetch_all(&self.pool)
-        .await?;
-        let has_more = rows.len() > limit;
-        let mut items = rows
-            .iter()
-            .take(limit)
-            .map(event_from_row)
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut items = self
+            .read_event_storage(session_id, after_seq.max(0), Some(limit + 1))
+            .await?;
+        let has_more = items.len() > limit;
+        items.truncate(limit);
         let next_cursor = has_more.then(|| {
             items
                 .last()
@@ -2963,6 +2950,17 @@ async fn append_event_tx(
     event_type: &str,
     payload: Value,
 ) -> Result<EventRecord, StoreError> {
+    append_event_storage_tx(transaction, session_id, turn_id, event_type, payload, None).await
+}
+
+async fn append_event_storage_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    session_id: SessionId,
+    turn_id: Option<TurnId>,
+    event_type: &str,
+    payload: Value,
+    stored: Option<(i64, String)>,
+) -> Result<EventRecord, StoreError> {
     let seq: i64 = sqlx::query_scalar(
         "UPDATE sessions SET next_seq = next_seq + 1, updated_at = ? WHERE id = ? RETURNING next_seq - 1",
     )
@@ -2981,16 +2979,17 @@ async fn append_event_tx(
         created_at: now_ms(),
     };
     sqlx::query(
-        "INSERT INTO session_events(id, session_id, seq, turn_id, event_type, payload_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO session_events(id, session_id, seq, turn_id, event_type, payload_json, created_at, payload_base_seq)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(event.id.to_string())
     .bind(session_id.to_string())
     .bind(event.seq)
     .bind(event.turn_id.map(|id| id.to_string()))
     .bind(&event.event_type)
-    .bind(serde_json::to_string(&event.payload)?)
+    .bind(match &stored { Some((_, encoded)) => encoded.clone(), None => serde_json::to_string(&event.payload)? })
     .bind(event.created_at)
+    .bind(stored.map(|(base, _)| base))
     .execute(&mut **transaction)
     .await?;
     if event.event_type == "context.usage_updated" {

@@ -28,8 +28,23 @@ pub enum PolicyEffect {
 #[derive(Clone, Debug)]
 pub struct PermissionRule {
     pub effect: PolicyEffect,
-    capability: GlobMatcher,
-    resource: GlobMatcher,
+    capability: PermissionMatcher,
+    resource: PermissionMatcher,
+}
+
+#[derive(Clone, Debug)]
+enum PermissionMatcher {
+    Glob(GlobMatcher),
+    Exact(String),
+}
+
+impl PermissionMatcher {
+    fn matches(&self, value: &str) -> bool {
+        match self {
+            Self::Glob(matcher) => matcher.is_match(value),
+            Self::Exact(expected) => expected == value,
+        }
+    }
 }
 
 impl PermissionRule {
@@ -42,13 +57,13 @@ impl PermissionRule {
         let resource_pattern = resource.into();
         Ok(Self {
             effect,
-            capability: Glob::new(&capability_pattern)?.compile_matcher(),
-            resource: Glob::new(&resource_pattern)?.compile_matcher(),
+            capability: PermissionMatcher::Glob(Glob::new(&capability_pattern)?.compile_matcher()),
+            resource: PermissionMatcher::Glob(Glob::new(&resource_pattern)?.compile_matcher()),
         })
     }
 
     fn matches(&self, capability: &str, resource: &str) -> bool {
-        self.capability.is_match(capability) && self.resource.is_match(resource)
+        self.capability.matches(capability) && self.resource.matches(resource)
     }
 }
 
@@ -212,11 +227,13 @@ impl ApprovalService {
             )
             .await?;
         if decision == ApprovalDecision::Always {
-            let rule = PermissionRule::new(
-                PolicyEffect::Allow,
-                mutation.permission.capability.clone(),
-                mutation.permission.resource.clone(),
-            )?;
+            // A remembered user decision authorizes the exact reviewed operation,
+            // not a glob embedded in a shell command or Windows path.
+            let rule = PermissionRule {
+                effect: PolicyEffect::Allow,
+                capability: PermissionMatcher::Exact(mutation.permission.capability.clone()),
+                resource: PermissionMatcher::Exact(mutation.permission.resource.clone()),
+            };
             self.policy
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -382,7 +399,7 @@ impl ToolHooks for ApprovalService {
                 self.mark_operation_started(operation_id).await?;
                 return Ok(BeforeToolCallResult {
                     cached_output: None,
-                    metadata: json!({"operationId":operation_id}),
+                    metadata: json!({"operationId":operation_id,"authorizedCapability":request.permission,"authorizedResource":resource}),
                 });
             }
             PolicyEffect::Deny => {
@@ -466,7 +483,7 @@ impl ToolHooks for ApprovalService {
                 self.mark_operation_started(operation_id).await?;
                 Ok(BeforeToolCallResult {
                     cached_output: None,
-                    metadata: json!({"operationId":operation_id}),
+                    metadata: json!({"operationId":operation_id,"authorizedCapability":request.permission,"authorizedResource":resource}),
                 })
             }
             ApprovalDecision::Deny => {
@@ -635,6 +652,10 @@ mod tests {
             PolicyEffect::Ask
         );
         assert_eq!(
+            service.evaluate("shell.host.execute", "cargo test"),
+            PolicyEffect::Ask
+        );
+        assert_eq!(
             store.get_config("permission.mode").await.expect("config"),
             Some(json!("full_access"))
         );
@@ -668,8 +689,8 @@ mod tests {
                         definition: ToolDefinition::direct("write", "write file"),
                         permission_request: Some(PermissionRequest {
                             permission: "workspace.write".to_owned(),
-                            patterns: vec!["README.md".to_owned()],
-                            always: vec!["README.md".to_owned()],
+                            patterns: vec![r"C:\Project [demo]\README*.md".to_owned()],
+                            always: vec![r"C:\Project [demo]\README*.md".to_owned()],
                         }),
                         context: AgentContext {
                             metadata: json!({"sessionId": session.id, "turnId": turn_id}),
@@ -698,10 +719,23 @@ mod tests {
         .await
         .expect("permission request timeout");
         service
-            .resolve(request.id, ApprovalDecision::Once, None)
+            .resolve(request.id, ApprovalDecision::Always, None)
             .await
             .expect("resolve");
-        task.await.expect("join").expect("tool released");
+        let approved = task.await.expect("join").expect("tool released");
+        assert_eq!(approved.metadata["authorizedCapability"], "workspace.write");
+        assert_eq!(
+            approved.metadata["authorizedResource"],
+            r"C:\Project [demo]\README*.md"
+        );
+        assert_eq!(
+            service.evaluate("workspace.write", r"C:\Project [demo]\README*.md"),
+            PolicyEffect::Allow
+        );
+        assert_eq!(
+            service.evaluate("workspace.write", r"C:\Project [demo]\README-other.md"),
+            PolicyEffect::Ask
+        );
         let events = store.list_events(session.id, 0).await.expect("events");
         assert_eq!(events[0].event_type, "permission.requested");
         assert_eq!(events[1].event_type, "permission.resolved");

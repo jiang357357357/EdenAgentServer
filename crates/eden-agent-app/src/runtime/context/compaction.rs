@@ -402,7 +402,7 @@ pub(in crate::runtime) async fn compact_if_needed(
     force: bool,
 ) -> Result<(), RuntimeError> {
     let context_window = model_spec.context_window.unwrap_or(u64::MAX);
-    let events = inner.store.list_events(input.session_id, 0).await?;
+    let events = inner.store.list_context_events(input.session_id).await?;
     let entries = conversation_entries(&events);
     let messages = entries
         .iter()

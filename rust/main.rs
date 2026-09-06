@@ -547,14 +547,17 @@ async fn main() -> Result<()> {
     let questions = QuestionService::new(store.clone());
     let media = MediaService::new(store.clone(), blobs.clone());
     let process_sandbox = resolve_process_sandbox(args.sandbox_executable.as_deref());
-    let process_sandbox_available = process_sandbox.is_available();
-    if !process_sandbox_available {
-        warn!("no process sandbox is available; command tools remain disabled");
-    }
     let workspaces =
         WorkspaceService::initialize(store.clone(), &args.workspace_root, process_sandbox.clone())
             .await
             .map_err(anyhow::Error::msg)?;
+    let process_sandbox = workspaces.verified_process_sandbox();
+    let process_sandbox_available = process_sandbox.is_available();
+    if !process_sandbox_available {
+        warn!(
+            "no verified process sandbox is available; sandbox execution remains disabled; native commands require explicit host execution authorization"
+        );
+    }
     let workspace_root = workspaces.current_root();
     let workspace_skill_roots = WorkspaceSkillRoots {
         configured: Arc::new(args.skill_roots.clone()),
@@ -573,7 +576,7 @@ async fn main() -> Result<()> {
             "skill diagnostic"
         );
     }
-    let mut tools = native_tool_registry(&workspaces, process_sandbox.is_available());
+    let mut tools = native_tool_registry(&workspaces);
     for tool in workspaces.tools() {
         tools.register(tool);
     }
@@ -733,7 +736,7 @@ async fn main() -> Result<()> {
 }
 
 fn resolve_process_sandbox(configured: Option<&std::path::Path>) -> ProcessSandbox {
-    if let Some(executable) = configured.filter(|path| path.is_file()) {
+    if let Some(executable) = configured {
         return ProcessSandbox::External(executable.to_owned());
     }
     #[cfg(target_os = "linux")]

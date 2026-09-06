@@ -98,7 +98,7 @@ pub(super) async fn prepare_turn(
         inner.store.complete_input(input).await?;
         return Ok(PrepareOutcome::Completed);
     }
-    let session_events = inner.store.list_events(input.session_id, 0).await?;
+    let session_events = inner.store.list_context_events(input.session_id).await?;
     let base_system_prompt = inner
         .system_prompt
         .read()

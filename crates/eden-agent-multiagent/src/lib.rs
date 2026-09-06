@@ -474,6 +474,40 @@ impl MultiAgentService {
     }
 }
 
+async fn persist_subagent_events(
+    store: &Store,
+    session_id: SessionId,
+    agent_id: AgentId,
+    agent_path: &str,
+    mut events: tokio::sync::mpsc::Receiver<eden_agent_core::AgentEvent>,
+    cancellation: CancellationToken,
+) -> Result<(), MultiAgentError> {
+    let result = async {
+        while let Some(event) = events.recv().await {
+            let payload = serde_json::to_value(event)?;
+            let kind = payload
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            store
+                .append_event(
+                    session_id,
+                    None,
+                    format!("subagent.agent_{kind}"),
+                    json!({"agentId":agent_id,"agentPath":agent_path,"event":payload}),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        events.close();
+        cancellation.cancel();
+    }
+    result
+}
+
 async fn run_agent(inner: Arc<Inner>, record: AgentThreadRecord) -> Result<(), MultiAgentError> {
     let _permit = Arc::clone(&inner.concurrency)
         .acquire_owned()
@@ -645,26 +679,15 @@ async fn run_agent(inner: Arc<Inner>, record: AgentThreadRecord) -> Result<(), M
     config.max_steps = u32::try_from(remaining_turns).unwrap_or(u32::MAX);
     config.session_id = Some(record.session_id.to_string());
     let driver = AgentLoop::new(config);
-    let (emitter, mut events) = event_channel(256);
-    let store = inner.store.clone();
-    let event_record = record.clone();
-    let persistence = async move {
-        while let Some(event) = events.recv().await {
-            let payload = serde_json::to_value(&event).unwrap_or_else(|_| json!({}));
-            let kind = payload
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let _ = store
-                .append_event(
-                    event_record.session_id,
-                    None,
-                    format!("subagent.agent_{kind}"),
-                    json!({"agentId":event_record.id,"agentPath":event_record.agent_path,"event":payload}),
-                )
-                .await;
-        }
-    };
+    let (emitter, events) = event_channel(256);
+    let persistence = persist_subagent_events(
+        &inner.store,
+        record.session_id,
+        record.id,
+        &record.agent_path,
+        events,
+        cancellation.clone(),
+    );
     let execution = async {
         if terminal_checkpoint {
             return Ok(eden_agent_core::RunResult {
@@ -694,7 +717,8 @@ async fn run_agent(inner: Arc<Inner>, record: AgentThreadRecord) -> Result<(), M
         .await
         .map_err(|_| AgentError::Hook("sub-agent lifetime budget expired".to_owned()))?
     };
-    let (result, ()) = tokio::join!(execution, persistence);
+    let (result, persisted) = tokio::join!(execution, persistence);
+    persisted?;
     let result = result.map_err(|error| MultiAgentError::Agent(error.to_string()))?;
     if let Some(error) = result
         .context
@@ -1401,6 +1425,40 @@ mod tests {
         time::Duration,
     };
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn event_persistence_failure_is_reported_and_cancels_the_child() {
+        let store = Store::in_memory().await.unwrap();
+        let cancellation = CancellationToken::new();
+        let (emitter, events) = event_channel(2);
+        let producer = async {
+            for _ in 0..1000 {
+                emitter
+                    .emit(eden_agent_core::AgentEvent::AgentStart)
+                    .await?;
+            }
+            Ok::<(), AgentError>(())
+        };
+        let persistence = persist_subagent_events(
+            &store,
+            SessionId::new(),
+            AgentId::new(),
+            "/root/child",
+            events,
+            cancellation.clone(),
+        );
+        let (produced, persisted) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(producer, persistence)
+        })
+        .await
+        .expect("child must settle after event persistence fails");
+        assert!(produced.is_err());
+        assert!(matches!(
+            persisted,
+            Err(MultiAgentError::Store(StoreError::SessionNotFound(_)))
+        ));
+        assert!(cancellation.is_cancelled());
+    }
 
     struct ReplyModel {
         text: String,

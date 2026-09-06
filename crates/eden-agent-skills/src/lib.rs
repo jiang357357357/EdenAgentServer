@@ -277,8 +277,8 @@ impl SkillCatalog {
             .tools
             .iter()
             .filter(|tool| {
-                !known.contains(*tool)
-                    && !(code_tools_available && local_code_tools.contains(tool.as_str()))
+                !(known.contains(*tool)
+                    || code_tools_available && local_code_tools.contains(tool.as_str()))
             })
             .cloned()
             .collect()
