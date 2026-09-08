@@ -21,7 +21,7 @@ use eden_agent_api::{
     QuestionListParams, QuestionOptionInfo, QuestionRejectParams, QuestionRequestInfo,
     QuestionResolveParams, ReadyNotification, RpcError, RpcNotification, RpcRequest, RpcResponse,
     RuntimeModelCatalogInfo, RuntimeModelIdentityInfo, RuntimeModelInfo, RuntimeModelOptionInfo,
-    RuntimeOrigin, SelfAwakeDiaryInfo, SelfAwakeListParams, SelfAwakePage, SelfAwakeRunInfo,
+    RuntimeOrigin, SelfAwakeExecutionParams, SelfAwakeExecutionInfo, SelfAwakeDiaryInfo, SelfAwakeListParams, SelfAwakePage, SelfAwakeScheduleInfo, SelfAwakeRunInfo,
     SessionCompactParams, SessionCreateParams, SessionEnvironment, SessionEnvironmentLocation,
     SessionEvent, SessionListParams, SessionParticipant, SessionParticipantsParams,
     SessionReadParams, SessionStatus, SessionSummary, SessionTitleParams, SkillEnableParams,
@@ -193,7 +193,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SelfAwakeListParams::decl(&config),
         SelfAwakeDiaryInfo::decl(&config),
         SelfAwakeRunInfo::decl(&config),
+        SelfAwakeScheduleInfo::decl(&config),
         SelfAwakePage::decl(&config),
+        SelfAwakeExecutionParams::decl(&config),
+        SelfAwakeExecutionInfo::decl(&config),
         DirectorListParams::decl(&config),
         DirectorBeatInfo::decl(&config),
         DirectorSceneInfo::decl(&config),
@@ -306,6 +309,7 @@ export interface RpcMethodMap {{
   "voice.stt.test": {{ params: GsvSttTestParams; result: GsvConnectionTestResult }}
   "voice.tts.synthesize": {{ params: VoiceTtsSynthesizeParams; result: VoiceTtsSynthesizeResult }}
   "voice.tts.list_segments": {{ params: VoiceSpeechSegmentListParams; result: VoiceSpeechSegmentInfo[] }}
+  "self_awake.execution": {{ params: SelfAwakeExecutionParams; result: SelfAwakeExecutionInfo }}
   "self_awake.list": {{ params: SelfAwakeListParams; result: SelfAwakePage }}
   "director.list": {{ params: DirectorListParams; result: DirectorRunInfo[] }}
 }}

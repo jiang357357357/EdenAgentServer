@@ -1,3 +1,6 @@
+mod self_awake_bridge;
+mod self_awake_context;
+mod self_awake_audit;
 mod jobs;
 mod observability;
 mod plugins;
@@ -257,6 +260,7 @@ struct AppState {
     core_models: CoreModelClient,
     core_sync: CoreSyncService,
     diagnostics: Arc<RuntimeDiagnostics>,
+    self_awake_audit: self_awake_audit::SelfAwakeAudit,
 }
 
 const GSV_TTS_CONFIG_KEY: &str = "voice.gsv.tts";
@@ -373,6 +377,7 @@ async fn main() -> Result<()> {
             "recovered interrupted session title generation"
         );
     }
+    store.recover_self_awake_desktop_states().await?;
     let core_sync = CoreSyncService::new(store.clone()).map_err(anyhow::Error::msg)?;
     if let (Some(core_base_url), Some(core_token)) =
         (args.core_base_url.as_deref(), args.core_token.as_deref())
@@ -577,6 +582,9 @@ async fn main() -> Result<()> {
         );
     }
     let mut tools = native_tool_registry(&workspaces);
+    if runtime_origin == RuntimeOrigin::Mon {
+        tools.register(Arc::new(self_awake_context::SelfAwakeContextTool(store.clone())));
+    }
     for tool in workspaces.tools() {
         tools.register(tool);
     }
@@ -669,6 +677,7 @@ async fn main() -> Result<()> {
         Arc::clone(&diagnostics.catalog_heartbeat),
     );
     let jobs = tokio::spawn(run_durable_jobs(
+        host_services.clone(),
         store.clone(),
         runtime.clone(),
         core_models.clone(),
@@ -683,6 +692,8 @@ async fn main() -> Result<()> {
     ));
     let connector_supervisor =
         connectors.start_with_heartbeat(Arc::clone(&diagnostics.connector_heartbeat));
+    let self_awake_audit = self_awake_audit::SelfAwakeAudit::new(store.clone(), &args.database);
+    let self_awake_audit_worker = self_awake_audit.clone().spawn();
     let state = AppState {
         runtime_origin,
         capability_token: Arc::from(capability_token),
@@ -707,6 +718,7 @@ async fn main() -> Result<()> {
         core_models,
         core_sync,
         diagnostics,
+        self_awake_audit,
     };
     let plugin_market_refresh_worker = spawn_plugin_market_refresh_worker(state.clone());
     let app = build_router(state);
@@ -727,6 +739,7 @@ async fn main() -> Result<()> {
         .context("server failed");
     runtime.shutdown().await;
     jobs.abort();
+    self_awake_audit_worker.abort();
     plugin_hook_worker.abort();
     plugin_market_refresh_worker.abort();
     connector_supervisor.abort();

@@ -1698,4 +1698,48 @@ mod tests {
             .cancellation
             .cancel();
     }
+    #[tokio::test]
+    async fn remaining_tools_audit_connector_lifecycle_and_offline_errors() {
+        let packages = tempfile::tempdir().unwrap();
+        stage_schema_package(packages.path(), include_bytes!("../../../../Connectors/official/openttd/package/connector.json"));
+        stage_schema_package(packages.path(), include_bytes!("../../../../Connectors/official/victoria3/package/connector.json"));
+        let store = Store::in_memory().await.unwrap();
+        let service = ConnectorService::with_config(store.clone(), ConnectorServiceConfig {
+            package_root: packages.path().to_path_buf(), package_policy:LoadPolicy::Development,
+            connector_data_root: packages.path().join("data"), ..ConnectorServiceConfig::default()
+        }).unwrap();
+        let tools = service.tools();
+        async fn call(tools:&[Arc<dyn Tool>], name:&str, arguments:Value) -> Result<ToolOutput,ToolFailure> {
+            tools.iter().find(|t| t.definition().name == name).unwrap().execute(
+                &ToolCall{id:name.into(),name:name.into(),arguments},tool_context()).await
+        }
+        let description=call(&tools,"describe_connector",json!({"connectorKey":"openttd"})).await.unwrap();
+        assert!(description.details.to_string().contains("openttd"));
+        let registration=call(&tools,"register_connector",json!({"connectorKey":"openttd","identityKey":"audit","settings":{},"desiredState":"disconnected"})).await.unwrap();
+        let id:Uuid=registration.details["connector"]["id"].as_str().unwrap().parse().unwrap();
+        call(&tools,"set_connector_state",json!({"connectorId":id,"desiredState":"disconnected"})).await.unwrap();
+        assert_eq!(store.get_connector(id).await.unwrap().desired_state,"disconnected");
+        let event=store.publish_connector_event(id,"audit-event","fixture",json!({"marker":"audit"})).await.unwrap();
+        let claimed=call(&tools,"claim_connector_events",json!({"connectorId":id})).await.unwrap();
+        assert!(claimed.details.to_string().contains(&event.id.to_string()));
+        call(&tools,"finish_connector_events",json!({"eventIds":[event.id]})).await.unwrap();
+        assert!(call(&tools,"claim_connector_events",json!({"connectorId":id})).await.unwrap().details.as_array().unwrap().is_empty());
+        for (name,args) in [
+            ("execute_connector_action",json!({"connectorId":id,"action":"refresh_state","payload":{}})),
+            ("query_connector",json!({"connectorId":id,"query":"get_state"})),
+            ("query_openttd",json!({"connectorId":id,"query":"get_state"})),
+            ("query_victoria3",json!({"query":"get_state"})),
+        ] {
+            let error=call(&tools,name,args).await.expect_err("no game worker is running");
+            println!("audit dependency {name}: {}: {}",error.info.code,error.message);
+            if name == "query_victoria3" {
+                assert_eq!(error.info.code,"connector_not_found");
+            } else {
+                assert!(error.message.contains("worker is not active"),"{name}: {error:?}");
+            }
+        }
+        // List only: never install or change a real user's NewGRF files.
+        call(&tools,"openttd_newgrf",json!({"action":"list"})).await.unwrap();
+    }
+
 }

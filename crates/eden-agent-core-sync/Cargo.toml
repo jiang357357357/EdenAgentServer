@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+eden-agent-host = { path = "../eden-agent-host" }
 chrono.workspace = true
 hex.workspace = true
 eden-agent-domain = { path = "../../../AgentCore/crates/eden-agent-domain" }

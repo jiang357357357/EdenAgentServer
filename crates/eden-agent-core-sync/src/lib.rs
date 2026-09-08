@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-const CLAIM_LEASE_MS: i64 = 60_000;
+const CLAIM_LEASE_MS: i64 = 180_000;
 const BATCH_SIZE: u32 = 20;
 // Mon Core's AgentSessionMap and TTS endpoints use this stable protocol
 // discriminator. It is intentionally independent from the Eden Agent product
@@ -217,6 +217,7 @@ impl CoreSyncService {
         &self,
         session_id: SessionId,
     ) -> Result<bool, CoreSyncError> {
+        if self.store.get_session(session_id).await?.is_background() { return Ok(false); }
         let Some(identity) = self.store.get_core_session_identity(session_id).await? else {
             return Ok(false);
         };
@@ -242,6 +243,7 @@ impl CoreSyncService {
         &self,
         session_id: SessionId,
     ) -> Result<(), CoreSyncError> {
+        if self.store.get_session(session_id).await?.is_background() { return Ok(()); }
         if self.projected_sessions.lock().await.contains(&session_id) {
             return Ok(());
         }
@@ -269,6 +271,9 @@ impl CoreSyncService {
     }
 
     pub async fn enqueue_event(&self, event: &EventRecord) -> Result<bool, CoreSyncError> {
+        if event.event_type != "self_awake.completed" && self.store.get_session(event.session_id).await.is_ok_and(|session| session.is_background()) {
+            return Ok(false);
+        }
         let Some(identity) = self
             .store
             .get_core_session_identity(event.session_id)
@@ -414,22 +419,7 @@ impl CoreSyncService {
             match self.deliver(&record).await {
                 Ok(()) => {
                     self.store.complete_core_sync(record.id).await?;
-                    if record.kind == "notification"
-                        && let Some(run_id) = record
-                            .payload
-                            .get("runId")
-                            .and_then(Value::as_str)
-                            .and_then(|value| Uuid::parse_str(value).ok())
-                    {
-                        self.store
-                            .update_self_awake_notification(
-                                run_id,
-                                "delivered",
-                                Some(json!({"deliveredBy":"core_email"})),
-                                None,
-                            )
-                            .await?;
-                    }
+
                 }
                 Err(error) => {
                     let delay = retry_delay_ms(record.attempts);
@@ -602,13 +592,24 @@ impl CoreSyncService {
                     .ok_or_else(|| {
                         CoreSyncError::Request("notification has no message".to_owned())
                     })?;
-                self.request(
-                    &credential,
-                    Method::POST,
-                    "/api/agent/external-email/send/",
-                    Some(json!({"subject":title,"content":message})),
-                )
-                .await?;
+                let run_id = record.payload.get("runId").and_then(Value::as_str)
+                    .and_then(|id|Uuid::parse_str(id).ok())
+                    .ok_or_else(||CoreSyncError::Request("notification has no runId".into()))?;
+                if self.store.get_self_awake_notification(run_id).await?.is_some_and(|value|value["state"]=="delivered") {
+                    return Ok(());
+                }
+                if record.payload.get("expiresAt").and_then(Value::as_i64).is_some_and(|at| at < Utc::now().timestamp_millis()) {
+                    self.store.update_self_awake_notification(run_id,"suppressed",Some(json!({"reason":"casual_message_expired"})),None).await?;
+                    return Ok(());
+                }
+                let mut payload=record.payload.clone();
+                payload["title"]=json!(title);payload["message"]=json!(message);
+                let result=eden_agent_host::deliver_user_contact_tracked(credential.base.as_str(),&credential.token,&payload,Some(self.store.clone())).await;
+                match result {
+                    Ok(result) => self.store.update_self_awake_notification(run_id,"delivered",Some(result),None).await?,
+                    Err(result) => return Err(CoreSyncError::Request(result.to_string())),
+                }
+
             }
             other => {
                 return Err(CoreSyncError::Request(format!(

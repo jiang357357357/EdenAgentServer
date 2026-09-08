@@ -1,7 +1,7 @@
 use super::{SelfAwakeState, execute::DirectedTurnResult};
 use crate::runtime::{RuntimeError, RuntimeInner};
 use crate::{director, memory, prompt, self_awake, session_title};
-use eden_agent_core::{AgentError, ModelSpec};
+use eden_agent_core::{AgentError, Message, ModelSpec};
 use eden_agent_store::InputRecord;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -39,6 +39,19 @@ pub(super) async fn finish_turn(
         self_awake_state,
         active_model_spec,
     } = context;
+    let run_result = run_result.and_then(|result| {
+        if prompt_profile == prompt::PromptProfile::SelfAwake {
+            if let Some(message) = result.new_messages.iter().rev().find_map(|message| {
+                if let Message::Assistant(message) = message { Some(message) } else { None }
+            }) {
+                if message.is_terminal_failure() {
+                    return Err(AgentError::Hook(message.error_message.clone()
+                        .unwrap_or_else(|| "self-awake model turn failed".to_owned())).into());
+                }
+            }
+        }
+        Ok(result)
+    });
     match run_result {
         Ok(result) => {
             let final_assistant_text = memory::final_assistant_text(&result.new_messages);
@@ -126,16 +139,24 @@ pub(super) async fn finish_turn(
                 self_awake::apply_decision(&inner.store, run, input.turn_id, &trigger, &decision)
                     .await?;
                 let decision_value = serde_json::to_value(&decision)
-                    .unwrap_or_else(|_| json!({"action":"observe_only"}));
+                    .unwrap_or_else(|_| json!({"action":"write_diary"}));
                 let diary = self_awake::diary_value(&decision);
-                let notification =
+                let mut notification =
                     self_awake::notification_value(&decision, &trigger).map(|mut notification| {
                         if let Some(object) = notification.as_object_mut() {
                             object.insert("runId".to_owned(), json!(run.id));
+                            object.insert("author".to_owned(), self_awake::author_snapshot(request));
                         }
                         notification
                     });
-                let next_wake = self_awake::next_wake(run, &decision);
+                // A successful direct desktop tool call already contacted the
+                // user. Do not generate another host delivery from the JSON.
+                if inner.store.desktop_reminders_for_run(run.id).await?.iter().any(|r| matches!(r["state"].as_str(),Some("open"|"closed"|"unknown"))) {
+                    notification=None;
+                }
+                // MonOs owns the next timer for externally submitted runs.
+                let next_wake = (job.payload["scheduler"] != "monos")
+                    .then(|| self_awake::next_wake(run, &decision));
                 let next_job = inner
                     .store
                     .complete_self_awake_run(
@@ -143,7 +164,7 @@ pub(super) async fn finish_turn(
                         decision_value.clone(),
                         diary,
                         notification.clone(),
-                        Some(next_wake),
+                        next_wake,
                     )
                     .await?;
                 inner

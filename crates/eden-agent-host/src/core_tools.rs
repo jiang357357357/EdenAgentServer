@@ -93,7 +93,7 @@ impl Action {
             Self::SwitchAssistant => {
                 "把当前会话持久交接给指定的真实助手，并从下一根回合由目标助手接手。用户说\u{201c}叫某助手出来\u{201d}、\u{201c}换某助手来\u{201d}、\u{201c}让某助手接手\u{201d}或\u{201c}我想和某助手说话\u{201d}时必须调用；可直接传 assistantName，或传 list_assistants 返回的 assistantId。不得用角色动作、旁白或普通回复代替。"
             }
-            Self::SelfAwakeState => "Read durable self-awake schedules",
+            Self::SelfAwakeState => "Read self-awake job scheduling status only; not service health or diary history",
             Self::ListSelfAwakeDiaries => "List self-awake diaries from Mon Core",
             Self::ReadSelfAwakeDiary => "Read one self-awake diary from Mon Core",
             Self::AnalyzeImage => "Analyze an image through Mon Core vision",
@@ -181,13 +181,18 @@ impl Tool for CoreTool {
                 .list_jobs(Some("self_awake"), 100)
                 .await
                 .map_err(store_error)?;
+            let session_id = context.session_id.as_deref()
+                .and_then(|id| id.parse::<eden_agent_domain::SessionId>().ok())
+                .ok_or_else(|| ToolFailure::new("missing_session", "self-awake state requires a session"))?;
+            let jobs: Vec<_> = jobs.into_iter().filter(|job| job.session_id == Some(session_id)).collect();
             let next = jobs
                 .iter()
                 .filter(|job| job.state == "scheduled")
                 .map(|job| job.due_at)
                 .min();
             return Ok(output(
-                json!({"enabled":true,"nextWakeAt":next,"jobs":jobs}),
+                json!({"nextAgentJobAt":next,"jobs":jobs.iter().take(20).map(self_awake_job_summary).collect::<Vec<_>>(),
+                    "note":"Scheduling records only, not a health check. No historical input, diary or desktop snapshot is included. For MonOs-managed wakes the next Agent job may not be enqueued yet; null does not mean self-awake is disabled."}),
             ));
         }
         let core = self
@@ -1335,6 +1340,9 @@ async fn send_qq(core: &CoreClient, args: &Value) -> Result<Value, ToolFailure> 
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| ToolFailure::new("invalid_arguments", "content is required"))?;
     let (bot, target_type, target, used_default, management) = qq_target(core, args).await?;
+    if args.get("privateOnly").and_then(Value::as_bool) == Some(true) && target_type != "user" {
+        return Err(ToolFailure::new("private_target_required", "configured QQ target is a group; private user contact required"));
+    }
     let mut raw = core
         .request(
             Method::POST,
@@ -1363,7 +1371,7 @@ async fn send_qq(core: &CoreClient, args: &Value) -> Result<Value, ToolFailure> 
     Ok(raw)
 }
 
-async fn contact_user(core: &CoreClient, args: &Value) -> Result<Value, ToolFailure> {
+pub(crate) async fn contact_user(core: &CoreClient, args: &Value) -> Result<Value, ToolFailure> {
     let message = args
         .get("message")
         .and_then(Value::as_str)
@@ -1426,7 +1434,7 @@ async fn contact_user(core: &CoreClient, args: &Value) -> Result<Value, ToolFail
         let request_id = channel_request_id(args, "qq", source_type, source_id);
         match send_qq(
             core,
-            &json!({"content":text,"metadata":metadata,"requestId":request_id}),
+            &json!({"content":text,"metadata":metadata,"requestId":request_id,"privateOnly":args.get("privateOnly")}),
         )
         .await
         {
@@ -1953,7 +1961,11 @@ mod tests {
                 .body(Body::empty())
                 .expect("empty delete response");
         }
-        let payload = if path.starts_with("/api/devices/qq_bot/management/") {
+        let payload = if path == "/api/agent/self-awake/diaries/42/" {
+            json!({"id":42,"content":"isolated diary marker"})
+        } else if path == "/api/ai/entities/analyze-image/" {
+            json!({"description":"fixture image analysis","success":true})
+        } else if path.starts_with("/api/devices/qq_bot/management/") {
             json!({"success":true,"data":{
                 "bot_id":7,
                 "default_send_target":{"target_type":"user","target_qq_number":"123456","name":"主人"},
@@ -2384,6 +2396,21 @@ mod tests {
         assert_eq!(bytes, image);
         assert_eq!(mime, "image/png");
         assert_eq!(filename, "哭哭.png");
+    }
+
+    #[tokio::test]
+    async fn chosen_contact_channel_reaches_core_without_broadcasting() {
+        let (host, requests, server) = fake_host().await;
+        let core=host.core_client(None).await.unwrap();
+        let result=crate::deliver_user_contact(core.base.as_str(),&core.token,&json!({
+            "runId":"00000000-0000-4000-8000-000000000001", "channel":"email", "fallbackChannels":["qq"],
+            "title":"分享一件事","message":"老师，想和你聊聊。"
+        })).await.unwrap();
+        assert_eq!(result["deliveredChannel"],"email");
+        let captured=requests.lock().await;
+        assert_eq!(captured.iter().filter(|r|r.path=="/api/agent/external-email/send/").count(),1);
+        assert!(!captured.iter().any(|r|r.path.contains("send-message")));
+        server.abort();
     }
 
     #[tokio::test]
@@ -2893,4 +2920,49 @@ mod tests {
         );
         assert_eq!(delivered.details["data"]["access"]["approved"], true);
     }
+    #[tokio::test]
+    async fn remaining_tools_audit_diary_vision_email_routing() {
+        let (host,requests,server)=fake_host().await;
+        for (action,args,path,marker) in [
+            (Action::ReadSelfAwakeDiary,json!({"id":42}),"/api/agent/self-awake/diaries/42/","isolated diary marker"),
+            (Action::AnalyzeImage,json!({"imageUrl":"https://example.test/image.png","prompt":"fixture"}),"/api/ai/entities/analyze-image/","fixture image analysis"),
+            (Action::SendEmail,json!({"subject":"audit","content":"fixture","to":["owner@example.test"]}),"/api/agent/external-email/send/","owner@example.test"),
+        ] {
+            let output=CoreTool{host:host.clone(),action}.execute(
+                &ToolCall{id:action.name().into(),name:action.name().into(),arguments:args},
+                context(None,None,json!({}))).await.unwrap();
+            assert!(output.details.to_string().contains(marker));
+            assert!(requests.lock().await.iter().any(|r|r.path==path));
+        }
+        let captured=requests.lock().await;
+        let vision=captured.iter().find(|r|r.path=="/api/ai/entities/analyze-image/").unwrap();
+        assert_eq!(vision.body["image_url"],"https://example.test/image.png");
+        server.abort();
+    }
+}
+
+
+fn self_awake_job_summary(job: &eden_agent_store::JobRecord) -> Value {
+    json!({"id":job.id,"state":job.state,"dueAt":job.due_at,
+        "attempts":job.attempts,"createdAt":job.created_at,"updatedAt":job.updated_at})
+}
+
+#[cfg(test)]
+mod self_awake_summary_tests {
+    use super::*;
+    #[test]
+    fn schedule_result_does_not_reintroduce_old_context() {
+        let job: eden_agent_store::JobRecord = serde_json::from_value(json!({
+            "id":"00000000-0000-4000-8000-000000000001","kind":"self_awake","sessionId":null,"dueAt":1,
+            "payload":{"trigger":{"user_activity":"PRIVATE_DESKTOP","last_state":{"diary":"PRIVATE_DIARY"}}},
+            "state":"completed","attempts":1,"leaseUntil":null,"idempotencyKey":"private-key",
+            "lastError":"PRIVATE_ERROR","createdAt":1,"updatedAt":2
+        })).unwrap();
+        let value=self_awake_job_summary(&job);
+        assert_eq!(value["state"],"completed");
+        assert!(!value.to_string().contains("PRIVATE"));
+        assert!(value.get("payload").is_none());
+    }
+
+
 }

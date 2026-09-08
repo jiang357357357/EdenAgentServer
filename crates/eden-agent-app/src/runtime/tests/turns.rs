@@ -236,3 +236,59 @@ async fn explicit_assistant_handoff_turn_exposes_only_real_handoff_tools() {
         vec!["list_assistants", "switch_session_assistant"]
     );
 }
+
+#[tokio::test]
+async fn self_awake_uses_bounded_requests_without_replaying_old_turns() {
+    let store = Store::in_memory().await.unwrap();
+    let session = store.create_session("wake history").await.unwrap();
+    let model = Arc::new(RecordingModel { requests: StdMutex::new(Vec::new()) });
+    let runtime = SessionRuntime::new(store.clone(), ModelSpec { id:"test".into(), provider:"test".into(), ..ModelSpec::default() }, model.clone(), ToolRegistry::new(), "system");
+    let mut notifications = runtime.subscribe();
+    runtime.submit_turn(session.id, "OLD_PRIVATE_CHAT_MARKER".repeat(100), json!([])).await.unwrap();
+    wait_for_completion(&mut notifications).await;
+    for index in 0..4 {
+        let job = store.schedule_job("self_awake",Some(session.id),0,json!({"scheduler":"monos","trigger":{"type":"scheduled","user_activity":{"title":"PRIVATE_CONTEXT_WINDOW"},"self_diary":{"content":"PRIVATE_CONTEXT_DIARY"},"module_status":"PRIVATE_CONTEXT_STATUS"},"conversationHistory":[{"role":"user","content":"PRIVATE_CONTEXT_CHAT"}]}),&format!("bounded-{index}")).await.unwrap();
+        runtime.submit_job_turn(session.id,"wake".into(),job.id,"self_awake",None).await.unwrap();
+        wait_for_completion(&mut notifications).await;
+    }
+    {
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(),5);
+        let size = requests[1].messages.len();
+        for request in &requests[1..] {
+            assert_eq!(request.messages.len(),size);
+            assert!(!serde_json::to_string(&request.messages).unwrap().contains("OLD_PRIVATE_CHAT_MARKER"));
+            assert!(!serde_json::to_string(&request.messages).unwrap().contains("PRIVATE_CONTEXT_"));
+        }
+    }
+    assert_eq!(store.count_self_awake_runs(None).await.unwrap(),4);
+    assert!(store.list_events(session.id,0).await.unwrap().iter().any(|event| event.payload.to_string().contains("OLD_PRIVATE_CHAT_MARKER")));
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn self_awake_model_terminal_error_is_failed_not_completed() {
+    struct FailedModel;
+    #[async_trait]
+    impl ModelAdapter for FailedModel {
+        async fn generate(&self, _request: ModelRequest, _events: EventEmitter, _cancellation: CancellationToken) -> Result<ModelOutput, ModelError> {
+            Ok(ModelOutput::complete(AssistantMessage::failure("context limit test", false)))
+        }
+    }
+    let store = Store::in_memory().await.unwrap();
+    let session = store.create_session("failed wake").await.unwrap();
+    let runtime = SessionRuntime::new(store.clone(),ModelSpec { id:"test".into(),provider:"test".into(),..ModelSpec::default() },Arc::new(FailedModel),ToolRegistry::new(),"system");
+    let mut events = runtime.subscribe();
+    let job = store.schedule_job("self_awake",Some(session.id),0,json!({"scheduler":"monos"}),"failure").await.unwrap();
+    runtime.submit_job_turn(session.id,"wake".into(),job.id,"self_awake",None).await.unwrap();
+    tokio::time::timeout(TEST_EVENT_TIMEOUT,async {
+        loop { if events.recv().await.unwrap().event_type == "turn.failed" { break; } }
+    }).await.unwrap();
+    let run = store.get_self_awake_run_by_job(job.id).await.unwrap();
+    assert_eq!(run.status,"failed");
+    assert!(run.last_error.unwrap().contains("context limit test"));
+    let diaries = store.list_self_awake_diaries_for_run(run.id).await.unwrap();
+    assert!(diaries[0].content.contains("context limit test"));
+    assert!(diaries[0].metadata["hostFailure"].as_bool().unwrap());
+    runtime.shutdown().await;
+}

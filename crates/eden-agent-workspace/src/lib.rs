@@ -978,4 +978,24 @@ mod tests {
             1
         );
     }
+    #[tokio::test]
+    async fn remaining_tools_audit_external_wrappers() {
+        let root = TempDir::new().unwrap();
+        fs::write(root.path().join("evidence.txt"),"needle").unwrap();
+        for (action,args) in [
+            (ExternalAction::List,json!({"root":root.path()})),
+            (ExternalAction::Read,json!({"root":root.path(),"path":"evidence.txt"})),
+            (ExternalAction::Find,json!({"root":root.path(),"name":"evidence"})),
+            (ExternalAction::Grep,json!({"root":root.path(),"pattern":"needle"})),
+        ] {
+            let tool = ExternalReadTool {action};
+            let name = tool.definition().name;
+            let (events,_) = event_channel(8);
+            let out = tool.execute(&ToolCall{id:name.clone(),name,arguments:args},ToolCallContext{
+                events,session_id:None,metadata:json!({}),cancellation:CancellationToken::new()
+            }).await.unwrap();
+            assert!(out.content.iter().any(|c| matches!(c,ContentBlock::Text{text} if text.contains("evidence") || text.contains("needle"))));
+        }
+    }
+
 }

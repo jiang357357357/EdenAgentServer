@@ -339,17 +339,21 @@ impl MultiAgentService {
     fn launch(&self, record: AgentThreadRecord) {
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
-            if let Err(error) = run_agent(Arc::clone(&inner), record.clone()).await {
-                let failed = inner
-                    .store
-                    .fail_agent_thread(record.id, error.to_string())
-                    .await;
-                if let Ok(failed) = failed {
-                    let parent_path =
-                        serde_json::from_value::<AgentRuntimeConfig>(failed.config.clone())
-                            .map(|config| config.parent_path)
-                            .unwrap_or_else(|_| "/root".to_owned());
-                    let _ = inner
+            let mut record = record;
+            loop {
+                let result = run_agent(Arc::clone(&inner), record.clone()).await;
+                let succeeded = result.is_ok();
+                if let Err(error) = result {
+                    let failed = inner
+                        .store
+                        .fail_agent_thread(record.id, error.to_string())
+                        .await;
+                    if let Ok(failed) = failed {
+                        let parent_path =
+                            serde_json::from_value::<AgentRuntimeConfig>(failed.config.clone())
+                                .map(|config| config.parent_path)
+                                .unwrap_or_else(|_| "/root".to_owned());
+                        let _ = inner
                         .store
                         .enqueue_agent_message(
                             failed.session_id,
@@ -365,9 +369,35 @@ impl MultiAgentService {
                             json!({"agentId":failed.id,"status":failed.status,"error":failed.error}),
                         )
                         .await;
+                    }
+                }
+                // Serialize the final mailbox check with send_message. A follow-up
+                // arriving after the loop drained its control queue must not vanish.
+                let mut active = inner.active.lock().await;
+                active.remove(&record.id);
+                let pending = inner
+                    .store
+                    .pending_agent_messages(record.session_id, &record.agent_path)
+                    .await;
+                let next = if let (true, Ok(messages)) = (succeeded, pending) {
+                    if let Some(message) = messages.iter().find(|message| message.trigger_turn) {
+                        inner
+                            .store
+                            .requeue_agent_thread(record.id, &message.content)
+                            .await
+                            .ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                drop(active);
+                match next {
+                    Some(next) => record = next,
+                    None => break,
                 }
             }
-            inner.active.lock().await.remove(&record.id);
         });
     }
 
@@ -417,6 +447,8 @@ impl MultiAgentService {
         content: &str,
         trigger_turn: bool,
     ) -> Result<AgentThreadRecord, MultiAgentError> {
+        // Also guards the worker's final mailbox check and idle transition.
+        let active_agents = self.inner.active.lock().await;
         let record = self.inner.store.get_agent_thread(id).await?;
         let message = self
             .inner
@@ -431,7 +463,12 @@ impl MultiAgentService {
                 json!({}),
             )
             .await?;
-        if let Some(active) = self.inner.active.lock().await.get(&id).cloned() {
+        if let Some(active) = active_agents.get(&id).cloned() {
+            // Keep follow-ups durable until the next execution takes them. The
+            // current loop may already be returning its final result.
+            if trigger_turn {
+                return Ok(record);
+            }
             let prompt = Message::user(format!(
                 "Message from {}:\n{}",
                 message.sender_path, message.content
@@ -605,26 +642,38 @@ async fn run_agent(inner: Arc<Inner>, record: AgentThreadRecord) -> Result<(), M
     } else {
         false
     };
-    let terminal_checkpoint = resumed && context.messages.last().is_some_and(Message::is_assistant);
+    let mailbox = inner
+        .store
+        .pending_agent_messages(record.session_id, &record.agent_path)
+        .await?;
+    let has_followup = mailbox.iter().any(|message| message.trigger_turn);
+    let terminal_checkpoint =
+        resumed && context.messages.last().is_some_and(Message::is_assistant) && !has_followup;
     if deadline <= now_ms() && !terminal_checkpoint {
         return Err(MultiAgentError::Agent(
             "sub-agent lifetime budget expired".to_owned(),
         ));
     }
-    let mailbox = inner
-        .store
-        .pending_agent_messages(record.session_id, &record.agent_path)
-        .await?;
     for message in &mailbox {
         let prompt = Message::user(format!(
             "Message from {}:\n{}",
             message.sender_path, message.content
         ));
-        if message.trigger_turn {
+        if resumed && has_followup {
+            // Persisted follow-ups are input to this turn, not a request for an
+            // additional turn after it. Preserve the prior conversation.
+            context.messages.push(prompt);
+        } else if message.trigger_turn {
             control.follow_up.enqueue(prompt);
         } else {
             control.steering.enqueue(prompt);
         }
+    }
+    if resumed && has_followup {
+        inner
+            .store
+            .checkpoint_agent_thread(record.id, serde_json::to_value(&context)?)
+            .await?;
     }
     inner
         .store
@@ -1458,6 +1507,228 @@ mod tests {
             Err(MultiAgentError::Store(StoreError::SessionNotFound(_)))
         ));
         assert!(cancellation.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn remaining_tools_audit_multiagent_lifecycle() {
+        async fn call(
+            svc: &MultiAgentService,
+            session: SessionId,
+            name: &str,
+            arguments: Value,
+        ) -> ToolOutput {
+            svc.tools()
+                .into_iter()
+                .find(|t| t.definition().name == name)
+                .unwrap()
+                .execute(
+                    &ToolCall {
+                        id: name.into(),
+                        name: name.into(),
+                        arguments,
+                    },
+                    tool_context(session),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"))
+        }
+        let root = TempDir::new().unwrap();
+        let store = Store::in_memory().await.unwrap();
+        let session = store.create_session("isolated audit").await.unwrap();
+        let model = Arc::new(ReplyModel::new("fixture reply", json!({})));
+        let svc = service(store.clone(), model.clone(), &root);
+        call(
+            &svc,
+            session.id,
+            "spawn_agent",
+            json!({"taskName":"audit", "prompt":"fixture", "forkHistory":false}),
+        )
+        .await;
+        let id = store.list_agent_threads(session.id).await.unwrap()[0].id;
+        assert_eq!(wait_terminal(&store, id).await.status, "completed");
+        for _ in 0..100 {
+            if !svc.inner.active.lock().await.contains_key(&id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!svc.inner.active.lock().await.contains_key(&id));
+        call(
+            &svc,
+            session.id,
+            "send_message",
+            json!({"id":id,"message":"queued fixture"}),
+        )
+        .await;
+        call(
+            &svc,
+            session.id,
+            "followup_task",
+            json!({"id":id,"message":"resume fixture"}),
+        )
+        .await;
+        assert_eq!(wait_terminal(&store, id).await.status, "completed");
+        for _ in 0..100 {
+            if model.requests().len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let followup_reached_model = model.requests().len() == 2;
+        let history = serde_json::to_string(&model.requests()[1].messages).unwrap();
+        assert!(history.contains("queued fixture") && history.contains("resume fixture"));
+        call(&svc, session.id, "list_agents", json!({})).await;
+        call(
+            &svc,
+            session.id,
+            "wait_agent",
+            json!({"id":id,"timeoutMs":1000}),
+        )
+        .await;
+        let batch = call(
+            &svc,
+            session.id,
+            "spawn_agents",
+            json!({"tasks":[
+            {"taskName":"batch_a","prompt":"a","forkHistory":false},
+            {"taskName":"batch_b","prompt":"b","forkHistory":false}]}),
+        )
+        .await;
+        call(
+            &svc,
+            session.id,
+            "wait_agent",
+            json!({"batchId":batch.details["batchId"],"timeoutMs":2000}),
+        )
+        .await;
+        assert_eq!(store.list_agent_threads(session.id).await.unwrap().len(), 3);
+        let hanging = service(store.clone(), Arc::new(HangingModel), &root);
+        call(
+            &hanging,
+            session.id,
+            "spawn_agent",
+            json!({"taskName":"cancel_me","prompt":"wait","forkHistory":false}),
+        )
+        .await;
+        let cancel_id = store
+            .list_agent_threads(session.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|a| a.task_name == "cancel_me")
+            .unwrap()
+            .id;
+        for _ in 0..100 {
+            if hanging.inner.active.lock().await.contains_key(&cancel_id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        call(
+            &hanging,
+            session.id,
+            "interrupt_agent",
+            json!({"id":cancel_id}),
+        )
+        .await;
+        assert_eq!(wait_terminal(&store, cancel_id).await.status, "interrupted");
+        assert!(
+            followup_reached_model,
+            "followup_task accepted and completed, but never invoked the model again"
+        );
+    }
+
+    #[tokio::test]
+    async fn followup_during_execution_is_durable_and_runs_once() {
+        struct GatedModel {
+            gate: Semaphore,
+            requests: StdMutex<Vec<ModelRequest>>,
+        }
+        #[async_trait]
+        impl ModelAdapter for GatedModel {
+            async fn generate(
+                &self,
+                request: ModelRequest,
+                _events: EventEmitter,
+                _cancellation: CancellationToken,
+            ) -> Result<ModelOutput, ModelError> {
+                self.requests.lock().unwrap().push(request);
+                self.gate.acquire().await.unwrap().forget();
+                Ok(ModelOutput::complete(AssistantMessage::text(
+                    "finished fixture",
+                )))
+            }
+        }
+        let root = TempDir::new().unwrap();
+        let store = Store::in_memory().await.unwrap();
+        let session = store.create_session("active followup").await.unwrap();
+        let model = Arc::new(GatedModel {
+            gate: Semaphore::new(0),
+            requests: StdMutex::new(vec![]),
+        });
+        let svc = service(store.clone(), model.clone(), &root);
+        let tools = svc.tools();
+        let spawn = tools
+            .iter()
+            .find(|t| t.definition().name == "spawn_agent")
+            .unwrap();
+        spawn.execute(&ToolCall{id:"start".into(),name:"spawn_agent".into(),arguments:json!({"taskName":"active","prompt":"first task","forkHistory":false})},tool_context(session.id)).await.unwrap();
+        let record = store
+            .list_agent_threads(session.id)
+            .await
+            .unwrap()
+            .remove(0);
+        for _ in 0..100 {
+            if model.requests.lock().unwrap().len() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(model.requests.lock().unwrap().len(), 1);
+        let followup = tools
+            .iter()
+            .find(|t| t.definition().name == "followup_task")
+            .unwrap();
+        followup
+            .execute(
+                &ToolCall {
+                    id: "next".into(),
+                    name: "followup_task".into(),
+                    arguments: json!({"id":record.id,"message":"second task marker"}),
+                },
+                tool_context(session.id),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .pending_agent_messages(session.id, &record.agent_path)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        model.gate.add_permits(2);
+        for _ in 0..200 {
+            if model.requests.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(wait_terminal(&store, record.id).await.status, "completed");
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let history = serde_json::to_string(&requests[1].messages).unwrap();
+        assert!(history.contains("first task"));
+        assert!(history.contains("second task marker"));
+        drop(requests);
+        assert!(
+            store
+                .pending_agent_messages(session.id, &record.agent_path)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     struct ReplyModel {

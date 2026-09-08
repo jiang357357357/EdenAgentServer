@@ -1420,7 +1420,25 @@ pub struct SelfAwakeRunInfo {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+pub struct SelfAwakeScheduleInfo {
+    pub status: String,
+    pub next_wake_at: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SelfAwakeExecutionParams { pub run_id: String }
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SelfAwakeExecutionInfo { pub path: String, pub record: Value }
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct SelfAwakePage {
+    #[serde(default)]
+    pub schedule: Option<SelfAwakeScheduleInfo>,
     pub count: u64,
     pub page: u32,
     pub page_size: u32,

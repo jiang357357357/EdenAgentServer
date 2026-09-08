@@ -131,6 +131,13 @@ pub struct SessionRecord {
     pub updated_at: i64,
 }
 
+impl SessionRecord {
+    pub fn is_background(&self) -> bool {
+        self.environment.get("sessionPurpose").and_then(Value::as_str) == Some("self_awake")
+            || self.environment.get("selfAwakeUserId").is_some_and(|v| !v.is_null())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionRuntimeOrigin {
@@ -1776,6 +1783,21 @@ impl Store {
         after_seq: i64,
     ) -> Result<Vec<EventRecord>, StoreError> {
         self.read_event_storage(session_id, after_seq, None).await
+    }
+
+    pub async fn self_awake_execution_events(&self, run_id: uuid::Uuid) -> Result<Vec<EventRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT e.* FROM session_events e
+             WHERE (e.turn_id IN (SELECT turn_id FROM session_events
+                 WHERE event_type='self_awake.started' AND json_extract(payload_json, '$.runId')=?)
+                 OR (e.event_type='self_awake.dispatch_failed' AND json_extract(e.payload_json, '$.runId')=?))
+             AND e.event_type IN ('self_awake.action_applied', 'self_awake.dispatch_failed', 'self_awake.started', 'self_awake.failed', 'self_awake.safe_check',
+                 'self_awake.sync_context', 'agent.tool_execution_start', 'agent.tool_execution_end',
+                 'turn.completed', 'turn.failed', 'permission.requested', 'permission.resolved',
+                 'question.requested', 'question.resolved')
+             ORDER BY e.created_at, e.seq"
+        ).bind(run_id.to_string()).bind(run_id.to_string()).fetch_all(&self.pool).await?;
+        rows.iter().map(event_from_row).collect()
     }
 
     pub async fn list_director_events(

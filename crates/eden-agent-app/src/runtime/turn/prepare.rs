@@ -48,6 +48,7 @@ pub(super) async fn prepare_turn(
         .await?;
     let _ = started;
 
+    let is_self_awake = input.payload.get("jobKind").and_then(Value::as_str) == Some("self_awake");
     let force_compaction = input
         .payload
         .get("compact")
@@ -59,7 +60,7 @@ pub(super) async fn prepare_turn(
         .model_spec_for(Some(&session_key))
         .await
         .unwrap_or_else(|| inner.model_spec.clone());
-    if let Err(error) = compact_if_needed(
+    if !is_self_awake && let Err(error) = compact_if_needed(
         inner,
         input,
         &active_model_spec,
@@ -98,7 +99,11 @@ pub(super) async fn prepare_turn(
         inner.store.complete_input(input).await?;
         return Ok(PrepareOutcome::Completed);
     }
-    let session_events = inner.store.list_context_events(input.session_id).await?;
+    // Each wake has an explicitly bounded request with current facts, memories
+    // and attributed recent diaries. Replaying every prior wake multiplies those
+    // snapshots and carries the previous duty character into the next turn.
+    let session_events = if is_self_awake { Vec::new() }
+        else { inner.store.list_context_events(input.session_id).await? };
     let base_system_prompt = inner
         .system_prompt
         .read()
@@ -174,7 +179,7 @@ pub(super) async fn prepare_turn(
         .get("internalHandoff")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let memory_candidates = if let Some(character_id) =
+    let memory_candidates = if is_self_awake { Vec::new() } else if let Some(character_id) =
         prompt::primary_character_id(&runtime_participants)
     {
         inner
@@ -214,15 +219,11 @@ pub(super) async fn prepare_turn(
             .and_then(|value| value.parse().ok())
             .ok_or_else(|| AgentError::Hook("self-awake input has no valid jobId".to_owned()))?;
         let job = inner.store.get_job(job_id).await?;
-        let diaries = inner
-            .store
-            .list_self_awake_diaries(input.session_id, 5)
-            .await?;
         let request = self_awake::build_request(
             &job,
             &runtime_participants,
             &memory_candidates,
-            &diaries,
+            &[],
             &session.environment,
         );
         let author_snapshot = self_awake::author_snapshot(&request);

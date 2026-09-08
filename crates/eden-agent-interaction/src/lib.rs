@@ -828,4 +828,58 @@ mod tests {
         assert_eq!(persisted.state, "rejected");
         assert_eq!(persisted.error.as_deref(), Some("media request cancelled"));
     }
+    #[tokio::test]
+    async fn remaining_tools_audit_screen_image_response() {
+        let (_store, session_id, turn_id, service) = media_fixture().await;
+        let png = b"\x89PNG\r\n\x1a\nfixture";
+        let blob = service
+            .blobs
+            .put("image/png", png)
+            .await
+            .expect("image blob");
+        let [screen, _screen] = service.tools();
+        let worker = tokio::spawn(async move {
+            screen
+                .execute(
+                    &ToolCall {
+                        id: "screen-valid".to_owned(),
+                        name: "analyze_screen".to_owned(),
+                        arguments: json!({"source":"desktop","prompt":"inspect"}),
+                    },
+                    tool_context(session_id, turn_id),
+                )
+                .await
+        });
+        let request = wait_for_media(&service, "screen").await;
+        service
+            .resolve(
+                request.id,
+                Some(json!({
+                    "blobId":blob.id,
+                    "mime":"image/png",
+                    "width":640,
+                    "height":480,
+                    "source":"desktop"
+                })),
+                None,
+            )
+            .await
+            .expect("resolve screen");
+        let output = worker.await.expect("worker").expect("screen output");
+        assert!(output.success);
+        assert!(output.content.iter().any(|content| matches!(
+            content,
+            ContentBlock::Image { mime_type, .. } if mime_type == "image/png"
+        )));
+        assert_eq!(output.details["width"], 640);
+        assert!(
+            service
+                .list_pending(Some("screen"))
+                .await
+                .expect("pending")
+                .is_empty()
+        );
+    }
+
+
 }

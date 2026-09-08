@@ -1278,6 +1278,12 @@ impl Store {
         self.get_self_awake_run_by_job(job.id).await
     }
 
+    pub async fn get_self_awake_run(&self, id: Uuid) -> Result<SelfAwakeRunRecord, StoreError> {
+        let row = sqlx::query("SELECT * FROM self_awake_runs WHERE id=?")
+            .bind(id.to_string()).fetch_one(&self.pool).await?;
+        self_awake_run_from_row(&row)
+    }
+
     pub async fn get_self_awake_run_by_job(
         &self,
         job_id: Uuid,
@@ -1404,7 +1410,12 @@ impl Store {
             sqlx::query(
                 "INSERT OR IGNORE INTO self_awake_diaries(
                     id, run_id, session_id, assistant_id, character_id, title, content, mood, metadata_json, created_at
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(run_id) DO UPDATE SET title=excluded.title, content=excluded.content,
+                    mood=excluded.mood, metadata_json=excluded.metadata_json,
+                    assistant_id=excluded.assistant_id, character_id=excluded.character_id,
+                    created_at=excluded.created_at
+                 WHERE json_extract(self_awake_diaries.metadata_json, '$.hostFailure')=1",
             )
             .bind(Uuid::now_v7().to_string())
             .bind(run.id.to_string())
@@ -1505,16 +1516,109 @@ impl Store {
     }
 
     pub async fn fail_self_awake_run(&self, job_id: Uuid, error: &str) -> Result<(), StoreError> {
+        let now = now_ms();
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "UPDATE self_awake_runs SET status='failed', last_error=?, completed_at=?, updated_at=?
              WHERE job_id=? AND status!='completed'",
-        )
-        .bind(error)
-        .bind(now_ms())
-        .bind(now_ms())
-        .bind(job_id.to_string())
-        .execute(&self.pool)
-        .await?;
+        ).bind(error).bind(now).bind(now).bind(job_id.to_string())
+            .execute(&mut *transaction).await?;
+        // A failed attempt is still a wake worth recording. If a later retry
+        // succeeds, complete_self_awake_run replaces this host-written diary.
+        sqlx::query(
+            "INSERT INTO self_awake_diaries(id, run_id, session_id, assistant_id, character_id,
+                title, content, mood, metadata_json, created_at)
+             SELECT ?, id, session_id, COALESCE(json_extract(author_snapshot_json, '$.assistantId'), ''),
+                COALESCE(json_extract(author_snapshot_json, '$.characterId'), ''),
+                '自醒失败记录', ?, '', '{\"hostFailure\":true}', ?
+             FROM self_awake_runs WHERE job_id=? AND status='failed'
+             ON CONFLICT(run_id) DO UPDATE SET content=excluded.content, metadata_json=excluded.metadata_json
+             WHERE json_extract(self_awake_diaries.metadata_json, '$.hostFailure')=1"
+        ).bind(Uuid::now_v7().to_string())
+            .bind(format!("【程序记录】本轮自醒未完成，未生成有效的模型日记。\n失败原因：{}\n已发生的工具调用和重试过程请查看执行记录。", error.chars().take(4000).collect::<String>()))
+            .bind(now).bind(job_id.to_string()).execute(&mut *transaction).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn self_awake_contact_history(&self, session_id: SessionId, limit: u32) -> Result<Vec<Value>, StoreError> {
+        let rows = sqlx::query("SELECT n.* FROM self_awake_notifications n JOIN self_awake_runs r ON r.id=n.run_id WHERE r.session_id=? ORDER BY n.created_at DESC LIMIT ?")
+            .bind(session_id.to_string()).bind(limit.clamp(1,20) as i64).fetch_all(&self.pool).await?;
+        let mut history: Vec<Value> = rows.iter().map(|row| Ok(json!({
+            "runId":row.try_get::<String,_>("run_id")?,"state":row.try_get::<String,_>("state")?,
+            "message":serde_json::from_str::<Value>(&row.try_get::<String,_>("payload_json")?)?,
+            "result":row.try_get::<Option<String>,_>("result_json")?.map(|value|serde_json::from_str::<Value>(&value)).transpose()?,
+            "lastError":row.try_get::<Option<String>,_>("last_error")?,
+            "createdAt":row.try_get::<i64,_>("created_at")?,"updatedAt":row.try_get::<i64,_>("updated_at")?,
+            "userRead":null
+        }))).collect::<Result<_,StoreError>>()?;
+        let windows=sqlx::query("SELECT * FROM desktop_reminders WHERE session_id=? AND run_id IS NOT NULL ORDER BY created_at DESC LIMIT ?").bind(session_id.to_string()).bind(limit.clamp(1,20) as i64).fetch_all(&self.pool).await?;
+        for row in windows {
+            history.push(json!({"runId":row.try_get::<String,_>("run_id")?,"source":"show_desktop_reminder","channel":"desktop","state":row.try_get::<String,_>("state")?,"message":{"title":row.try_get::<String,_>("title")?,"message":row.try_get::<String,_>("message")?},"createdAt":row.try_get::<i64,_>("created_at")?,"updatedAt":row.try_get::<i64,_>("updated_at")?,"userRead":null}));
+        }
+        history.sort_by_key(|value|std::cmp::Reverse(value["createdAt"].as_i64().unwrap_or(0)));
+        history.truncate(limit.clamp(1,20) as usize);
+        Ok(history)
+    }
+
+    pub async fn get_self_awake_notification(&self, run_id: Uuid) -> Result<Option<Value>, StoreError> {
+        let row=sqlx::query("SELECT state,result_json,last_error,attempts FROM self_awake_notifications WHERE run_id=?")
+            .bind(run_id.to_string()).fetch_optional(&self.pool).await?;
+        row.map(|row| Ok(json!({"state":row.try_get::<String,_>("state")?,
+            "result":row.try_get::<Option<String>,_>("result_json")?.map(|value|serde_json::from_str::<Value>(&value)).transpose()?,
+            "error":row.try_get::<Option<String>,_>("last_error")?,"attempts":row.try_get::<i64,_>("attempts")?
+        }))).transpose()
+    }
+
+    pub async fn reserve_desktop_reminder(&self, session: SessionId, operation: &str, title: &str, message: &str) -> Result<(Value,bool), StoreError> {
+        let run: Option<String>=sqlx::query_scalar("SELECT id FROM self_awake_runs WHERE session_id=? AND status='running' ORDER BY created_at DESC LIMIT 1").bind(session.to_string()).fetch_optional(&self.pool).await?;
+        let operation=run.as_ref().map(|id|format!("self-awake:{id}")).unwrap_or_else(||operation.to_owned());
+        let id=Uuid::now_v7();
+        let inserted=sqlx::query("INSERT OR IGNORE INTO desktop_reminders(id,session_id,operation_key,run_id,title,message,state,created_at,updated_at) VALUES(?,?,?,(SELECT id FROM self_awake_runs WHERE session_id=? AND status='running' ORDER BY created_at DESC LIMIT 1),?,?,'launching',?,?)")
+            .bind(id.to_string()).bind(session.to_string()).bind(&operation).bind(session.to_string()).bind(title).bind(message).bind(now_ms()).bind(now_ms()).execute(&self.pool).await?.rows_affected()==1;
+        let row=sqlx::query("SELECT id FROM desktop_reminders WHERE session_id=? AND operation_key=?").bind(session.to_string()).bind(&operation).fetch_one(&self.pool).await?;
+        let id: String=row.try_get("id")?;
+        Ok((self.get_desktop_reminder(session,&id).await?.ok_or_else(||StoreError::InvalidValue("reminder missing".into()))?,inserted))
+    }
+
+    pub async fn get_desktop_reminder(&self, session: SessionId, id: &str) -> Result<Option<Value>, StoreError> {
+        let row=sqlx::query("SELECT * FROM desktop_reminders WHERE session_id=? AND id=?").bind(session.to_string()).bind(id).fetch_optional(&self.pool).await?;
+        row.map(|row| Ok(json!({"id":row.try_get::<String,_>("id")?,"title":row.try_get::<String,_>("title")?,"message":row.try_get::<String,_>("message")?,"state":row.try_get::<String,_>("state")?,"createdAt":row.try_get::<i64,_>("created_at")?,"updatedAt":row.try_get::<i64,_>("updated_at")?,"userRead":null}))).transpose()
+    }
+
+    pub async fn record_desktop_reminder_state(&self, id: &str, state: &str) -> Result<(), StoreError> {
+        sqlx::query("UPDATE desktop_reminders SET state=?,updated_at=? WHERE id=?").bind(state).bind(now_ms()).bind(id).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn desktop_reminders_for_run(&self, run_id: Uuid) -> Result<Vec<Value>, StoreError> {
+        let rows=sqlx::query("SELECT id,session_id FROM desktop_reminders WHERE run_id=? ORDER BY created_at").bind(run_id.to_string()).fetch_all(&self.pool).await?;
+        let mut result=Vec::new();
+        for row in rows {
+            let session: String=row.try_get("session_id")?;
+            let session=session.parse().map_err(|_|StoreError::InvalidValue("invalid session".into()))?;
+            if let Some(value)=self.get_desktop_reminder(session,&row.try_get::<String,_>("id")?).await? { result.push(value); }
+        }
+        Ok(result)
+    }
+
+    /// Window acknowledgement is independent of channel acceptance. Keep it
+    /// when the delivery worker later stores its receipt.
+    pub async fn record_self_awake_desktop_state(&self, run_id: Uuid, state: &str) -> Result<(), StoreError> {
+        if !matches!(state, "open" | "closed" | "failed" | "unknown") {
+            return Err(StoreError::InvalidValue("invalid desktop window state".into()));
+        }
+        sqlx::query("UPDATE self_awake_notifications SET result_json=json_set(COALESCE(result_json,'{}'),'$.desktopWindow',json(?)), updated_at=? WHERE run_id=?")
+            .bind(serde_json::to_string(&json!({"state":state,"updatedAt":now_ms(),"userRead":null}))?)
+            .bind(now_ms()).bind(run_id.to_string()).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn recover_self_awake_desktop_states(&self) -> Result<(), StoreError> {
+        sqlx::query("UPDATE desktop_reminders SET state='unknown',updated_at=? WHERE state IN ('open','launching')").bind(now_ms()).execute(&self.pool).await?;
+        // A restarted host cannot observe the old child's eventual exit.
+        sqlx::query("UPDATE self_awake_notifications SET result_json=json_set(result_json,'$.desktopWindow.state','unknown'),updated_at=? WHERE json_extract(result_json,'$.desktopWindow.state')='open'")
+            .bind(now_ms()).execute(&self.pool).await?;
         Ok(())
     }
 
@@ -1531,7 +1635,7 @@ impl Store {
             )));
         }
         sqlx::query(
-            "UPDATE self_awake_notifications SET state=?, result_json=?, attempts=attempts+1,
+            "UPDATE self_awake_notifications SET state=?, result_json=json_patch(COALESCE(result_json,'{}'),COALESCE(?,'{}')), attempts=attempts+1,
              last_error=?, updated_at=? WHERE run_id=? AND state!='delivered'",
         )
         .bind(state)

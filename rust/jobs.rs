@@ -1,6 +1,7 @@
 use super::*;
 
 pub(crate) async fn run_durable_jobs(
+    host_services: HostServices,
     store: Store,
     runtime: SessionRuntime,
     core_models: CoreModelClient,
@@ -36,6 +37,9 @@ pub(crate) async fn run_durable_jobs(
                         &job.payload,
                     )
                     .await;
+                }
+                if job.kind == "self_awake" && job.payload["scheduler"] == "monos" {
+                    self_awake_bridge::prepare_job(&store, &core_models, &models, &host_services, &core_sync, session_id, job.id).await?;
                 }
                 let prompt = match job.kind.as_str() {
                     "memo.reminder" => {
@@ -93,6 +97,25 @@ pub(crate) async fn run_durable_jobs(
                             "durable job committed, but its post-commit wake notification failed"
                         );
                         continue;
+                    }
+                    if job.kind == "self_awake" {
+                        // Preflight failures happen before a turn exists. Keep a
+                        // run and a failure diary rather than disappearing from history.
+                        let existing = store.get_self_awake_run_by_job(job.id).await.ok()
+                            .filter(|run| !run.request["author"]["assistantId"].is_null());
+                        let request = existing.as_ref().map(|run| run.request.clone())
+                            .unwrap_or_else(|| json!({"trigger":job.payload["trigger"], "phase":"dispatch"}));
+                        let author = if let Some(run) = existing { run.author_snapshot }
+                        else if let Some(session_id) = job.session_id {
+                            store.get_session(session_id).await.ok()
+                                .and_then(|session| session.participants.first().cloned()).unwrap_or_else(|| json!({}))
+                        } else { json!({}) };
+                        if let Ok(run) = store.start_self_awake_run(&job, "self-awake.v1",
+                            job.payload["eventId"].as_str().unwrap_or(""), request, author).await {
+                            let _ = store.fail_self_awake_run(job.id, &error.to_string()).await;
+                            let _ = store.append_event(run.session_id, None, "self_awake.dispatch_failed",
+                                json!({"runId":run.id,"jobId":job.id,"attempt":run.attempts,"error":error.to_string()})).await;
+                        }
                     }
                     if job.kind == "assistant.handoff"
                         && assistant_handoff_waits_for_core_credential(&error)

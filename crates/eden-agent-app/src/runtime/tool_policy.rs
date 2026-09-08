@@ -2,6 +2,13 @@ use crate::prompt;
 use eden_agent_core::ToolRegistry;
 
 const SELF_AWAKE_ALLOWED_TOOLS: &[&str] = &[
+    "get_self_awake_context",
+    "show_desktop_reminder",
+    "get_desktop_reminder",
+    "search_memories",
+    "bash",
+    "powershell",
+    "write_stdin",
     "get_self_awake_state",
     "list_self_awake_diaries",
     "read_self_awake_diary",
@@ -25,9 +32,6 @@ const SELF_AWAKE_ALLOWED_TOOLS: &[&str] = &[
     "qq_bot_list",
     "qq_bot_targets",
     "read_qq_messages",
-    "send_qq_message",
-    "send_external_email",
-    "contact_user",
     "list_connectors",
     "describe_connector",
     "register_connector",

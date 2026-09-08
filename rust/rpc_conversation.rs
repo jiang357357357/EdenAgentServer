@@ -42,6 +42,7 @@ pub(crate) async fn execute_conversation_rpc(
                 )
                 .await
                 .map_err(|error| RpcFailure::application(error.to_string()))?;
+            sessions.retain(|session| !session.is_background());
             sessions.truncate(params.limit.clamp(1, 500) as usize);
             serde_json::to_value(
                 sessions

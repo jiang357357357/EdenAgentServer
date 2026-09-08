@@ -75,6 +75,7 @@ async fn test_state() -> AppState {
         1,
     );
     AppState {
+        self_awake_audit: self_awake_audit::SelfAwakeAudit::new(store.clone(), &workspace_directory.join("agent.db")),
         runtime_origin: RuntimeOrigin::Mon,
         capability_token: Arc::from("0123456789abcdef0123456789abcdef"),
         allowed_origins: Arc::new(HashSet::from(["http://localhost:40091".to_owned()])),

@@ -152,6 +152,9 @@ impl HostServices {
     pub fn tools(&self) -> Vec<Arc<dyn Tool>> {
         let mut registered = tools::tools(self.clone());
         registered.push(Arc::new(WebTool(self.clone())));
+        for read in [false,true] {
+            registered.push(Arc::new(crate::desktop_reminder::DesktopReminderTool { store:self.store.clone(),read }));
+        }
         registered.extend(core_tools::tools(self.clone()));
         registered
     }

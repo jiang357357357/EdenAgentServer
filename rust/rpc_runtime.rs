@@ -483,6 +483,18 @@ pub(crate) async fn execute_runtime_rpc(
             serde_json::to_value(catalog)
                 .map_err(|error| RpcFailure::application(error.to_string()))
         }
+        "self_awake.execution" => {
+            let params: eden_agent_api::SelfAwakeExecutionParams = parse_params(params)?;
+            let id = params.run_id.parse::<uuid::Uuid>()
+                .map_err(|_| RpcFailure::application("invalid self-awake run ID"))?;
+            let run = state.store.get_self_awake_run(id).await
+                .map_err(|error| RpcFailure::application(error.to_string()))?;
+            if !session_is_visible(state, runtime_origin, run.session_id).await {
+                return Err(RpcFailure::application("runtime_origin_mismatch"));
+            }
+            state.self_awake_audit.export(id).await
+                .map_err(|error| RpcFailure::application(format!("执行记录保存失败：{error}")))
+        }
         "self_awake.list" => {
             let params: SelfAwakeListParams = parse_params(params)?;
             let page = params.page.max(1);
@@ -547,6 +559,7 @@ pub(crate) async fn execute_runtime_rpc(
                 .unwrap_or(u32::MAX)
                 .max(1);
             serde_json::to_value(SelfAwakePage {
+                schedule: self_awake_bridge::schedule(state).await,
                 count,
                 page,
                 page_size,

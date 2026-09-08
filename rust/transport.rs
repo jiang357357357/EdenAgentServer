@@ -34,6 +34,8 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/readyz", get(readiness))
         .route("/metrics", get(metrics))
         .route("/rpc", get(rpc_upgrade))
+        .route("/internal/self-awake/run", post(self_awake_bridge::submit))
+        .route("/internal/self-awake/status", post(self_awake_bridge::status))
         .route("/voice/stt/realtime", get(realtime_stt_upgrade))
         .route("/blobs", post(blob_upload))
         .route("/blobs/{id}", get(blob_read))
@@ -729,7 +731,8 @@ async fn event_belongs_to_origin(
         .store
         .get_session(event.session_id)
         .await
-        .is_ok_and(|session| session_origin(&session) == origin)
+        .is_ok_and(|session| session_origin(&session) == origin && (!session.is_background()
+            || event.event_type.starts_with("permission.") || event.event_type.starts_with("question.")))
 }
 
 fn initialize_connection(

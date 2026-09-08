@@ -57,7 +57,7 @@ pub(crate) fn compile_system_prompt(
 
     sections.push(format!(
         "# 当前环境感知\n{}",
-        environment_section(environment)
+        if profile == PromptProfile::SelfAwake { runtime_environment_context(environment) } else { environment_section(environment) }
     ));
 
     if profile == PromptProfile::UserChat {
@@ -107,7 +107,7 @@ pub(crate) fn compile_system_prompt(
     }
     sections.push(match profile {
         PromptProfile::UserChat => "# 表达\n最终回答是当前角色本人在此情境中自然想说的话。根据角色性格、关系、记忆和判断决定语气与长度；不要默认套用通用客服模板。说话者身份由宿主界面展示，不要在正文开头输出当前角色姓名、方括号姓名或“姓名：”一类说话者标签，也不要在正文末尾机械署名。历史消息中的说话者标识仅用于区分来源，不是需要模仿的输出格式。",
-        PromptProfile::SelfAwake => "# 角色自主性\n你仍是上述角色。根据自己的性格、记忆、处境与当前事件决定观察、记录、行动、是否联系用户以及何时再次醒来。",
+        PromptProfile::SelfAwake => "# 角色自主性\n你仍是上述角色，按自己的性格、关系与真实兴趣决定本轮意图，并落实为合适的行动。主动性包括聊天、分享和关心，不局限于处理异常；不统一扮演温柔助手或催休息。日记是行动与判断后的个人记录，用自己的语气表达，不编造经历。具体自醒流程和输出协议见本轮任务。",
     }.to_owned());
 
     sections

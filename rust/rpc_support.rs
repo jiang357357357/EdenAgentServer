@@ -43,6 +43,9 @@ pub(crate) async fn enforce_request_origin(
         .get_session(session_id)
         .await
         .map_err(|error| RpcFailure::application(error.to_string()))?;
+    if session.is_background() && !method.starts_with("permission.") && !method.starts_with("question.") {
+        return Err(RpcFailure::application("background_session: 后台自醒会话请通过自醒页面查看"));
+    }
     if session_origin(&session) == origin {
         return Ok(());
     }
