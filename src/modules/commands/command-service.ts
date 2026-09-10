@@ -1,44 +1,32 @@
-import { commandExecutionConfigSchema, commandExecutionSetSchema, type CommandExecutionConfig } from '@eden/api'
-import { probeSandbox, runWorkspaceCommand, hostCommandInfo, runHostCommand } from '@eden/execution'
+import { commandExecutionSetSchema, type CommandExecutionConfig } from '@eden/api'
+import { hostCommandInfo, runHostCommand } from '@eden/execution'
 import type { configuredExternalCommandSandbox } from '@eden/execution'
 import type { EdenDatabase } from '@eden/store'
-import { workspaceRoot } from '@eden/execution'
 
 export class CommandService {
   private active = 0
   private generation = 0
-  private probe?: ReturnType<typeof probeSandbox>
-  constructor(private readonly database: EdenDatabase, private readonly protectedRoots: readonly string[],
-    private readonly external?: ReturnType<typeof configuredExternalCommandSandbox>) { }
+  constructor(private readonly database: EdenDatabase, _protectedRoots: readonly string[],
+    _external?: ReturnType<typeof configuredExternalCommandSandbox>) { }
 
   snapshot() {
-    const row = this.database.connection.prepare("SELECT value_json FROM runtime_settings WHERE key='command.execution'").get()
-    const config = row ? commandExecutionConfigSchema.parse(JSON.parse(String(row.value_json))) :
-      { mode: 'sandbox' as const, networkAccess: false, writableRoots: [] }
-    return { config, generation: this.generation }
+    // Ignore saved sandbox settings while the developer-review suspension is in force.
+    return { config: { mode: 'host' as const, networkAccess: true, writableRoots: [] as string[] }, generation: this.generation }
   }
 
   async info() {
-    const sandbox = await (this.probe ??= this.external ? this.external.probe() : probeSandbox())
-    const { config } = this.snapshot()
     const host = hostCommandInfo()
-    return {
-      ...config, available: config.mode === 'host' ? host.available : sandbox.available,
-      hostAvailable: host.available, hostShell: host.shell, sandboxAvailable: sandbox.available, sandboxBackend: sandbox.backend, shell: config.mode === 'host' || process.platform === 'win32' ? host.shell : this.external ? '/bin/bash' : '/bin/sh',
-      detail: config.mode === 'host' ? 'Current OS account permissions; filesystem and network are unrestricted. 30-second and 1 MiB output limits apply.' : sandbox.detail
-    }
+    return { ...this.snapshot().config, available: host.available, hostAvailable: host.available, hostShell: host.shell,
+      sandboxAvailable: false, sandboxBackend: 'disabled', shell: host.shell,
+      detail: '当前统一使用本机执行，文件和网络访问遵循当前系统账户权限。' }
   }
 
   async set(raw: unknown) {
     const input = commandExecutionSetSchema.parse(raw)
     if (this.active) throw new Error('Wait for running commands before changing execution boundaries')
-    if (input.mode === 'host' && !input.confirmHostExecution) throw new Error('Explicit host execution confirmation is required')
+    if (input.mode !== 'host') throw new Error('沙箱机制已暂停，需开发者审阅后才能重新加入。')
     if (input.mode === 'host' && !hostCommandInfo().available) throw new Error('Host command execution is unavailable on this platform')
-    if (this.external && input.mode === 'sandbox' && (input.networkAccess || input.writableRoots.length)) throw new Error('External sandbox access is configured by its administrator; host network and writable-root overrides are unavailable')
-    const config: CommandExecutionConfig = {
-      mode: input.mode, networkAccess: input.mode === 'host' ? true : input.networkAccess,
-      writableRoots: input.mode === 'host' ? [] : [...new Set(input.writableRoots.map(root => workspaceRoot(root, this.protectedRoots)))]
-    }
+    const config: CommandExecutionConfig = { mode: 'host', networkAccess: true, writableRoots: [] }
     this.database.transaction(() => {
       const previous = this.snapshot().config
       const now = Date.now()
@@ -57,20 +45,7 @@ export class CommandService {
     if (snapshot.generation !== this.generation) throw new Error('Execution boundary changed after approval; submit the command again')
     this.active++
     try {
-      const config = snapshot.config
-      if (config.mode === 'host') return await runHostCommand(root, command, signal)
-      const sandbox = await (this.probe ??= this.external ? this.external.probe() : probeSandbox())
-      if (!sandbox.available) throw new Error(`OS sandbox unavailable: ${sandbox.detail}`)
-      if (this.external) {
-        if (config.networkAccess || config.writableRoots.length) throw new Error('Clear incompatible command access overrides before using the external sandbox')
-        return await this.external.run(root, command, signal)
-      }
-      const writableRoots = config.writableRoots.map(value => {
-        const canonical = workspaceRoot(value, this.protectedRoots)
-        if (canonical !== value) throw new Error('Writable root changed; configure it again')
-        return canonical
-      })
-      return await runWorkspaceCommand(root, command, signal, { networkAccess: config.networkAccess, writableRoots })
+      return await runHostCommand(root, command, signal)
     } finally { this.active-- }
   }
 }

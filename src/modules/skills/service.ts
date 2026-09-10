@@ -6,10 +6,10 @@ import { skillInspectSchema, skillCreateSchema } from '@eden/api'
 import { readLocalSnapshot } from './snapshot.ts'
 import { generatedSkillSnapshot } from './generated-snapshot.ts'
 import { SkillRepository } from './repository.ts'
-import { probeSandbox, type ExternalCommandSandbox } from '@eden/execution'
+import { probeHostExecution, type ExternalCommandSandbox } from '@eden/execution'
 import type { SystemSkillCatalog } from './system-catalog.ts'
 export class SkillService {
-  private sandboxAvailable = false
+  private executionAvailable = false
   private refreshTimer?: ReturnType<typeof setInterval>
   private refreshing: Promise<void> | undefined
   private refreshFailure: string | undefined
@@ -28,12 +28,12 @@ export class SkillService {
     void task.finally(() => { if (this.refreshing === task) this.refreshing = undefined }).catch(() => {})
     return task
   }
-  get codeToolsAvailable() { return this.sandboxAvailable && !this.abort.signal.aborted }
+  get codeToolsAvailable() { return this.executionAvailable && !this.abort.signal.aborted }
   async start() {
     await this.refresh()
-    const result = await (this.external ? this.external.probeProgram() : probeSandbox())
+    const result = await probeHostExecution()
     this.abort.signal.throwIfAborted()
-    this.sandboxAvailable = result.available
+    this.executionAvailable = result.available
     this.refreshTimer = setInterval(() => { void this.refresh().catch(() => {}) }, 2000)
     this.refreshTimer.unref()
   }
@@ -43,7 +43,7 @@ export class SkillService {
   constructor(readonly repository: SkillRepository, private readonly systemCatalog?: SystemSkillCatalog, private readonly projectCatalog?: SystemSkillCatalog, private readonly external?: ExternalCommandSandbox) {}
   execute(data: SkillSnapshot, tool: SkillCodeTool, input: unknown, signal: AbortSignal) {
     this.abort.signal.throwIfAborted()
-    if (!this.codeToolsAvailable) throw new Error('Skill code isolation is unavailable; restart the host after configuring its sandbox')
+    if (!this.codeToolsAvailable) throw new Error('Skill code execution is unavailable; restart the host')
     if (this.pending.size >= 4) throw new Error('Skill operation concurrency limit reached')
     const task = executeSkillCode(data, tool, input, AbortSignal.any([signal, this.abort.signal]), this.external)
     this.pending.add(task)

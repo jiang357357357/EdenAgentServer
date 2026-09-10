@@ -3,7 +3,7 @@ import path from 'node:path'
 import type { ConnectorPermissions } from './permissions.ts'
 import type { ConnectorCatalog } from './catalog.ts'
 
-/** Resolve approved setting paths to fixed guest mounts; no package-supplied host paths are mounted implicitly. */
+/** Resolve approved settings to host paths. Sandbox path rewriting is paused pending developer review. */
 export async function connectorMounts(dataRoot: string, settings: Record<string, unknown>, descriptor: ReturnType<ConnectorCatalog['descriptor']>, grants: ReturnType<ConnectorPermissions['require']>) {
   const workerSettings = { ...settings }, readMounts: { source: string; target: string }[] = [], writeMounts: { source: string; target: string }[] = []
   const workerGrants: { capability: string; resource: string; access: string }[] = []
@@ -19,7 +19,7 @@ export async function connectorMounts(dataRoot: string, settings: Record<string,
     if (!key || typeof resource !== 'string' || !['filesystem.read', 'filesystem.write'].includes(permission.capability)) throw new Error('Connector plugin requires a dedicated adapter for non-filesystem permissions')
     const { write, source } = await resolveConnectorMount(resource, permission, privateRoot, dataRoot)
     if (workerGrants.length >= 16) throw new Error('Connector plugin exceeds mount count limit')
-    const target = `${write ? '/outputs' : '/inputs'}/resource_${workerGrants.length}`
+    const target = source
     const mounts = write ? writeMounts : readMounts
     mounts.push({ source, target })
     workerSettings[key] = target

@@ -1,3 +1,4 @@
+import { readExternalSchedule } from './external-schedule.ts'
 import { readNotificationHistory } from './notification-history.ts'
 import { previewNotificationReview, resolveNotificationReview } from './notification-review.ts'
 import { previewRunReview, resolveRunReview } from './run-review.ts'
@@ -10,7 +11,7 @@ import { selfAwakeListSchema, selfAwakeExecutionSchema, toJson } from '@eden/api
 import type { JobInfo, JsonValue, SelfAwakeDecision } from '@eden/api'
 
 export class SelfAwakeRepository {
-  constructor(readonly database: EdenDatabase) {}
+  constructor(readonly database: EdenDatabase, private readonly scheduleStateFile?: string) {}
   runReview(runId: string) { this.read(runId); return previewRunReview(this.database, runId) }
   resolveRun(runId: string, fingerprint: string, decision: 'completed' | 'failed', note: string) {
     this.read(runId)
@@ -77,13 +78,15 @@ export class SelfAwakeRepository {
 
   list(params: unknown) {
     const input = selfAwakeListSchema.parse(params), query = input.query?.trim() ?? ''
-    const where = "(?='' OR instr(lower(request_json),lower(?))>0 OR instr(lower(COALESCE(decision_json,'')),lower(?))"
+    const where = "(?='' OR instr(lower(request_json),lower(?))>0 OR instr(lower(COALESCE(decision_json,'')),lower(?))>0)"
     const count = Number(this.database.connection.prepare(`SELECT COUNT(*) AS count FROM self_awake_runs WHERE ${where}`).get(query, query, query)?.count ?? 0)
     const rows = this.database.connection.prepare(`SELECT * FROM self_awake_runs WHERE ${where} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`)
       .all(query, query, query, input.pageSize, (input.page - 1) * input.pageSize)
     const next = this.database.connection.prepare("SELECT due_at,payload_json FROM jobs WHERE kind='self_awake' AND state='queued' ORDER BY due_at LIMIT 1").get()
-    return { schedule: next ? { status: 'scheduled', nextWakeAt: new Date(Number(next.due_at)).toISOString(), reason: String(object(JSON.parse(String(next.payload_json))).prompt ?? '') } : null,
-      count, page: input.page, pageSize: input.pageSize, totalPages: Math.ceil(count / input.pageSize), results: rows.map(row => this.fromRow(row)) }
+    const external = readExternalSchedule(this.scheduleStateFile)
+    const local = next ? { status: 'scheduled', nextWakeAt: new Date(Number(next.due_at)).toISOString(), reason: String(object(JSON.parse(String(next.payload_json))).prompt ?? '') } : null
+    const schedule = !local ? external : !external || Date.parse(local.nextWakeAt) <= Date.parse(external.nextWakeAt) ? local : external
+    return { schedule, count, page: input.page, pageSize: input.pageSize, totalPages: Math.ceil(count / input.pageSize), results: rows.map(row => this.fromRow(row)) }
   }
 
   pendingResults(): { id: string; inputId: string; state: string; turnId: string }[] {
@@ -135,8 +138,8 @@ export class SelfAwakeRepository {
   execution(id: string) {
     const run = this.read(id)
     const row = this.database.connection.prepare('SELECT turn_id,action_result_json FROM self_awake_runs WHERE id=?').get(id)
-    const events = this.database.connection.prepare('SELECT kind,payload_json,created_at FROM events WHERE session_id=? AND turn_id=? ORDER BY seq').all(run.sessionId, row?.turn_id ?? null)
-    return { path: `eden-self-awake://${id}`, record: toJson({ run, notificationHistory: readNotificationHistory(this.database, id), actionResult: row?.action_result_json ? JSON.parse(String(row.action_result_json)) : null, events: events.map(event => ({ kind: event.kind, payload: JSON.parse(String(event.payload_json)), createdAt: event.created_at })) }) }
+    const events = this.database.connection.prepare("SELECT seq,kind,CASE WHEN kind='model.request' THEN json_object('requestId',json_extract(payload_json,'$.requestId'),'model',json_extract(payload_json,'$.model'),'provider',json_extract(payload_json,'$.provider')) ELSE payload_json END AS payload_json,created_at FROM events WHERE session_id=? AND turn_id=? AND kind NOT IN ('agent.message_update','agent.agent_end','agent.turn_end','agent.message_start','agent.tools_update') ORDER BY seq").all(run.sessionId, row?.turn_id ?? null)
+    return { path: `eden-self-awake://${id}`, record: toJson({ run, notificationHistory: readNotificationHistory(this.database, id), recordNote: '执行记录省略流式文本快照、模型请求正文及重复消息容器；原始事件仍保存在数据库。', actionResult: row?.action_result_json ? JSON.parse(String(row.action_result_json)) : null, events: events.map(event => ({ kind: event.kind, payload: JSON.parse(String(event.payload_json)), createdAt: event.created_at })) }) }
   }
 
   private fromRow(row: Record<string, SQLOutputValue>) {

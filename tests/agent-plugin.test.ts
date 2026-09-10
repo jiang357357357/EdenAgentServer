@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { PluginService } from '@eden/plugin-host'
-import { probeSandbox } from '@eden/execution'
+import { probeHostExecution } from '@eden/execution'
 import { EdenDatabase } from '@eden/store'
 import { recordedModel } from '@eden/runtime-pi/testing'
 import { loadConfig } from '../src/bootstrap/config.ts'
@@ -20,7 +20,7 @@ const manifest = { schemaVersion: 1, id: 'double', name: 'Double', description: 
 const source = 'export default (input: {value: number}) => input.value * 2'
 
 test('agent authors, tests, activates, and invokes its plugin through durable user approvals', async context => {
-  if (!(await probeSandbox()).available) { context.skip('Requires verified OS sandbox'); return }
+  if (!(await probeHostExecution()).available) { context.skip('Requires host runtime'); return }
   const temporary = new EdenDatabase(':memory:', 'local')
   const registry = new PluginService(temporary)
   registry.drafts.save(manifest, source)

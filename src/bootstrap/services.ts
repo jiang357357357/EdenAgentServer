@@ -53,7 +53,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
   const attachments = new AttachmentService(blobs)
   const media = new MediaService(repository, attachments)
   const attachmentRepository = new AttachmentRepository(database)
-  const selfAwakeRepository = new SelfAwakeRepository(database)
+  const selfAwakeRepository = new SelfAwakeRepository(database, config.selfAwakeScheduleFile)
   const selfAwakeContext = new SelfAwakeContext(selfAwakeRepository, repository, config.monIdentity)
   const jobs = new JobRepository(database)
   const connectorEvents = new ConnectorEventRepository(repository, connectors, connectorCatalog, jobs)

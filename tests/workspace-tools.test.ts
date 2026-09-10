@@ -5,13 +5,13 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync } from 'node:f
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { EdenDatabase } from '@eden/store'
-import { probeSandbox } from '@eden/execution'
+import { probeHostExecution } from '@eden/execution'
 import { WorkspaceService, workspaceTools } from '../src/modules/workspace/index.ts'
 import { PermissionService } from '../src/modules/permissions/index.ts'
 import { SessionRepository } from '../src/modules/sessions/index.ts'
 
 test('workspace writes and commands wait for approval and execute within the selected directory', async context => {
-  if (!(await probeSandbox()).available) { context.skip('Requires OS sandbox'); return }
+  if (!(await probeHostExecution()).available) { context.skip('Requires host runtime'); return }
   const directory = mkdtempSync(path.join(tmpdir(), 'eden-workspace-effects-'))
   const project = path.join(directory, 'project')
   mkdirSync(project)
@@ -44,7 +44,7 @@ test('workspace writes and commands wait for approval and execute within the sel
     approve()
     const result = await command as { stdout: string; exitCode: number }
     assert.equal(result.exitCode, 0)
-    assert.match(result.stdout, /\/workspace/)
+    assert.ok(result.stdout.includes(project))
     assert.match(result.stdout, /你好，老师。/)
     assert.equal(readFileSync(path.join(project, 'result.txt'), 'utf8'), 'done')
     const escaping = execute('eden_write_file', { path: '../outside.txt', content: 'Escape' })

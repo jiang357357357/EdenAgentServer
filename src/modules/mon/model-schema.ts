@@ -11,7 +11,7 @@ export const coreDetailSchema = coreEntitySchema.extend({ api_key: z.string().mi
 export const coreAssistantSchema = z.object({ id: coreIdSchema, name: z.string().default(''), character: z.object({
   id: coreIdSchema, name: z.string().default(''), ai_talk_entity_id: coreIdSchema.nullish(), vision_ai_entity_id: coreIdSchema.nullish(),
 }).passthrough() }).passthrough()
-export const coreSettingsSchema = z.object({ default_model: coreIdSchema.nullish() }).passthrough()
+export const coreSettingsSchema = z.object({ default_model: z.preprocess(value => typeof value === 'string' && !value.trim() ? null : value, coreIdSchema.nullish()) }).passthrough()
 export type CoreEntity = z.infer<typeof coreEntitySchema>
 
 export function parseCoreAssistant(raw: unknown, expectedId?: string | number) {

@@ -1,3 +1,4 @@
+import os from 'node:os'
 import { open, readdir } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import path from 'node:path'
@@ -25,6 +26,17 @@ export class WorkspaceService {
     const canonical = workspaceRoot(saved, this.protectedRoots)
     if (canonical !== saved) throw new Error('Workspace path changed; select it again')
     return canonical
+  }
+
+  commandRoot(): string {
+    return this.repository.read() ? this.root() : workspaceRoot(os.homedir(), [])
+  }
+
+  async mutateCommand<T>(root: string, signal: AbortSignal, work: () => Promise<T>): Promise<T> {
+    return this.mutations.run(signal, async () => {
+      if (this.commandRoot() !== root) throw new Error('Workspace changed after permission request')
+      return work()
+    })
   }
 
   switch(root: string) {

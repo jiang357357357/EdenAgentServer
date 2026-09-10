@@ -2,13 +2,15 @@ export const writeProgram = String.raw`
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-const within = name => name.startsWith('/workspace/');
+
 const hash = value => createHash('sha256').update(value).digest('hex');
-export default async function(input) {
-  const filename = path.resolve('/workspace', input.path);
+export default async function(input, context) {
+  const root = context.workspaceRoot;
+  const within = name => { const relative = path.relative(root, name); return relative !== '' && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative); };
+  const filename = path.resolve(root, input.path);
   if (!within(filename)) throw new Error('Write path escapes workspace');
   const parent = await fs.realpath(path.dirname(filename));
-  if (parent !== '/workspace' && !within(parent)) throw new Error('Parent link escapes workspace');
+  if (parent !== root && !within(parent)) throw new Error('Parent link escapes workspace');
   let old, mode = 0o600;
   try {
     const canonical = await fs.realpath(filename);

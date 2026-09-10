@@ -16,7 +16,8 @@ test('selected workspace persists, bounds reads, skips links, and limits binary 
   try {
     assert.equal(workspace.info().path, '')
     await assert.rejects(workspace.read('README.md'), /Select/)
-    assert.throws(() => workspace.switch(directory), /private/)
+    assert.equal(workspace.switch(directory).currentPath, directory)
+    assert.equal(workspace.switch(privateRoot).currentPath, privateRoot)
     writeFileSync(path.join(root, 'README.md'), '你好，老师。')
     writeFileSync(path.join(root, 'binary.bin'), Buffer.from([0, 1, 2]))
     writeFileSync(path.join(root, 'large.txt'), 'x'.repeat(1024 * 1024 + 10))

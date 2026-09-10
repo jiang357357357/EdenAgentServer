@@ -46,7 +46,7 @@ export async function launchComponent(id: string, dataRoot: string, repository: 
     try {
       await runtime.initialize({ protocolVersion: 1, connectorInstanceId: id, connectorKey: descriptor.manifest.id,
         packageVersion: descriptor.manifest.version, settings: { ...mounts.workerSettings, ...network?.settings },
-        grantedPermissions: mounts.workerGrants, dataDirectory: '/data' }, current.settings)
+        grantedPermissions: mounts.workerGrants, dataDirectory: directory }, current.settings)
       authorize()
     } catch (error) { await runtime.close(); throw error }
     return { runtime, generation: current.generation, revision: artifact.revision, exited }

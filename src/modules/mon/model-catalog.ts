@@ -1,8 +1,17 @@
+import { ZodError } from 'zod'
 import { MonClient } from '@eden/integrations'
 import { parseCoreAssistant, coreSettingsSchema, coreEntities, resolveCoreModel, coreIdSchema } from './model-schema.ts'
 import { publicVendors, modelOption, selectEntity } from './model-options.ts'
 
 export async function loadMonCatalog(client: MonClient, assistantId?: string | number, signal?: AbortSignal) {
+  try { return await readMonCatalog(client, assistantId, signal) }
+  catch (error) {
+    if (error instanceof ZodError) throw new Error('Core 模型目录数据格式不兼容，请检查 Core 的模型配置。')
+    throw error
+  }
+}
+
+async function readMonCatalog(client: MonClient, assistantId?: string | number, signal?: AbortSignal) {
   const assistantPath = assistantId === undefined ? '/api/assistants/current/' : `/api/assistants/${encodeURIComponent(String(coreIdSchema.parse(assistantId)))}/`
   const [assistantRaw, settingsRaw, vendorsRaw, entitiesRaw] = await Promise.all([
     client.get(assistantPath, signal), client.get('/api/agent/settings/my/', signal), client.get('/api/core/vendors/ai/', signal), client.getCollection('/api/ai/entities/', signal),

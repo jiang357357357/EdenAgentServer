@@ -30,7 +30,12 @@ export class SelfAwakeBridgeRepository {
     if (!this.database.connection.prepare('SELECT 1 FROM self_awake_submissions WHERE user_id=? AND job_id=?').get(user, id)) throw new Error('Self-awake job owner mismatch')
     const job = this.jobs.read(id)
     const run = this.database.connection.prepare('SELECT id,state,decision_json,last_error,updated_at FROM self_awake_runs WHERE job_id=?').get(id)
-    return { id: run ? String(run.id) : id, status: job.state === 'failed' ? 'failed' : String(run?.state ?? job.state),
+    const state = job.state === 'failed' ? 'failed' : String(run?.state ?? job.state)
+    // MonOs polls only pending/running; exposing queued would finish the wake prematurely.
+    const status = ['queued', 'preparing'].includes(state) ? 'pending'
+      : ['running', 'dispatched', 'awaiting_action', 'action_running'].includes(state) ? 'running'
+      : state === 'completed' ? 'completed' : 'failed'
+    return { id: run ? String(run.id) : id, status,
       decision_payload: run?.decision_json ? JSON.parse(String(run.decision_json)) : null,
       error: run?.last_error ?? job.error, updated_at: new Date(Number(run?.updated_at ?? job.updatedAt)).toISOString() }
   }
