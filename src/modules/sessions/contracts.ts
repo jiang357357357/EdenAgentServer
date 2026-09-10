@@ -3,6 +3,8 @@ import type { JsonValue, RuntimeOrigin } from '@eden/api'
 export interface SessionSummary {
   id: string
   title: string
+  contextTokens?: number
+  tokenBreakdown?: JsonValue
   titleSource: string
   status: 'active' | 'closed'
   runtimeOrigin: RuntimeOrigin

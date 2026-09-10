@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { EdenDatabase } from '@eden/store'
-import { runtimeCheckpointSchema, runtimeOriginSchema, toJson } from '@eden/api'
+import { modelContextUsage, runtimeCheckpointSchema, runtimeOriginSchema, toJson } from '@eden/api'
 import type { JsonValue, RuntimeCheckpoint, RuntimeOrigin } from '@eden/api'
 import type { SessionSummary } from './contracts.ts'
 import { SessionEvents } from './session-events.ts'
@@ -27,7 +27,10 @@ export class SessionRepository {
     if (!row) throw new Error('Session not found')
     const created = this.database.connection.prepare("SELECT payload_json FROM events WHERE session_id=? AND kind IN ('session.created','session.metadata.updated') ORDER BY seq DESC LIMIT 1").get(id)
     const metadata: Record<string, unknown> = JSON.parse(String(created?.payload_json ?? '{}'))
+    const latestUsage = this.database.connection.prepare("SELECT payload_json FROM events WHERE session_id=? AND kind='model.response' AND json_type(payload_json,'$.usage.input') IN ('integer','real') AND json_extract(payload_json,'$.usage.input')>=0 AND json_type(payload_json,'$.usage.output') IN ('integer','real') AND json_extract(payload_json,'$.usage.output')>=0 ORDER BY seq DESC LIMIT 1").get(id)
+    const usage = latestUsage ? modelContextUsage(JSON.parse(String(latestUsage.payload_json))) : undefined
     return {
+      ...(usage ?? {}),
       id: String(row.id), title: String(row.title), titleSource: 'user',
       status: row.status === 'closed' ? 'closed' : 'active', runtimeOrigin: runtimeOriginSchema.parse(row.origin),
       participants: Array.isArray(metadata.participants) ? metadata.participants.map(toJson) : [],
