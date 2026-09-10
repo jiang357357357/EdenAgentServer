@@ -7,8 +7,8 @@ Eden Agent 的 TypeScript / Node.js 宿主，包含业务模块、JSON-RPC 服�
 ## 开发
 
 ```sh
-git clone --recurse-submodules https://github.com/jiang357357357/opencode-assistant.git
-cd opencode-assistant
+git clone --recurse-submodules https://github.com/jiang357357357/EdenAgent.git
+cd EdenAgent
 npm ci --ignore-scripts
 npm run build:server
 ```
