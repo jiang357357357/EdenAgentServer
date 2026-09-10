@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "official.openttd",
+  "name": "本地 OpenTTD",
+  "description": "Official isolated Worker plugin for the loopback OpenTTD Admin Port and EdenAgentBridge.",
+  "version": "2.0.0",
+  "components": {
+    "runtimes": [
+      {
+        "id": "openttd",
+        "kind": "connector",
+        "manifest": "connector.json",
+        "enabledByDefault": true
+      }
+    ]
+  },
+  "permissions": [
+    {
+      "capability": "network.connect",
+      "resource": "loopback",
+      "access": "connect",
+      "required": true,
+      "description": "仅连接本机 OpenTTD Admin Port。"
+    },
+    {
+      "capability": "filesystem.read",
+      "resource": "settings.instanceRegistry",
+      "access": "read",
+      "required": false,
+      "description": "读取受管实例注册文件。"
+    },
+    {
+      "capability": "environment.read",
+      "resource": "connector.identityCredential",
+      "access": "read",
+      "required": true,
+      "description": "读取此身份隔离的 Admin Port 密码。"
+    }
+  ]
+}

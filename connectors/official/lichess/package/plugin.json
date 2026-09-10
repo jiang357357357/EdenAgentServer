@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "official.lichess",
+  "name": "Lichess",
+  "description": "Official isolated Worker plugin for Lichess Bot API events and actions.",
+  "version": "2.0.0",
+  "components": {
+    "runtimes": [
+      {
+        "id": "lichess",
+        "kind": "connector",
+        "manifest": "connector.json",
+        "enabledByDefault": true
+      }
+    ]
+  },
+  "permissions": [
+    {
+      "capability": "network.connect",
+      "resource": "settings.baseUrl",
+      "access": "connect",
+      "required": true,
+      "description": "连接用户配置的兼容 Lichess API。"
+    },
+    {
+      "capability": "environment.read",
+      "resource": "connector.identityCredential",
+      "access": "read",
+      "required": true,
+      "description": "读取此身份隔离的 Lichess Bot API 令牌。"
+    }
+  ]
+}
