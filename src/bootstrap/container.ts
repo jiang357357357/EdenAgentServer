@@ -36,6 +36,10 @@ import { healthHandler } from '../transport/http/health.ts'
 import { memoryExtractionRoutes } from '../transport/rpc/memory-extraction.routes.ts'
 
 export async function startServer(config: ServerConfig) {
+  const started = performance.now()
+  const progress = (stage: string) => process.stdout.write(JSON.stringify({ event: 'server.startup', origin: config.origin,
+    stage, elapsedMs: Math.round(performance.now() - started) }) + '\n')
+  progress('database')
   const releaseProcessLock = acquireProcessLock(config.dataRoot)
   try { assertRuntimeSelection(config) } catch (error) { releaseProcessLock(); throw error }
   let releaseReviewLock: (() => void) | undefined
@@ -45,6 +49,7 @@ export async function startServer(config: ServerConfig) {
   let database: EdenDatabase
   try { database = new EdenDatabase(config.databasePath, config.origin, config.migrationReview ? 'migration-review' : 'runtime') }
   catch (error) { releaseLock(); throw error }
+  progress('services')
   let services: ReturnType<typeof createServices>
   try { services = createServices(database, config) }
   catch (error) { database.close(); releaseLock(); throw error }
@@ -76,14 +81,18 @@ export async function startServer(config: ServerConfig) {
     ...pluginAssetRoutes(services.packageAssets), ...pluginMarketRoutes(services.pluginMarket), ...skillRoutes(services.skills), ...pluginRoutes(plugins, services.pluginMarket.installed), ...permissionRoutes(permissions), ...workspaceRoutes(workspace, sessions), ...modelRoutes(models, sessions, config.origin === 'mon' ? mon : undefined),
   }, config.migrationReview ? undefined : sessionId => services.realtimeVoice.prepare(sessionId))
   try {
+    progress('skills')
     if (!config.migrationReview) await services.skills.start()
+    progress('memory-recovery')
     if (!config.migrationReview) await memoryExtractions.start()
+    progress('http-listen')
     await new Promise<void>((resolve, reject) => {
       http.once('error', reject)
       http.listen(config.port, config.host, () => { http.removeListener('error', reject); resolve() })
     })
     persistToken(config)
     if (!config.migrationReview) {
+    progress('background-services')
     await services.subagentLifecycle.start()
     sessions.resumePending()
     services.memos.recoverSchedules()
@@ -100,6 +109,7 @@ export async function startServer(config: ServerConfig) {
     await drainServices()
     http.closeAllConnections(); http.close(); websocket.close(); database.close(); releaseLock(); throw error
   }
+  progress('ready')
   const address = http.address() as AddressInfo
   let closing: Promise<void> | undefined
   return {

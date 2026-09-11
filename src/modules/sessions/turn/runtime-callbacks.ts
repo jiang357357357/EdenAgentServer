@@ -1,4 +1,5 @@
 import { chargeSubagentBudget, assertSubagentTool, recordSubagentRequest, recordSubagentResponse } from '../../subagent-execution/index.ts'
+import { requestContext } from './request-context.ts'
 import { randomUUID } from 'node:crypto'
 import type { RuntimeCallbacks } from '@eden/runtime-pi'
 import { toJson } from '@eden/api'
@@ -30,6 +31,7 @@ function messageRole(value: Record<string, JsonValue>) {
 export function runtimeCallbacks(repository: SessionRepository, input: SessionInput, scope: RuntimeCallbackScope = {}): RuntimeCallbacks {
   let messageId: string | undefined
   let initialUserEnded = false
+  const contexts = new Map<string, Record<string, JsonValue>>()
   const signals = new SignalRepository(repository.database, repository.events)
   const append = (kind: string, payload: Parameters<RuntimeCallbacks['event']>[1]) => {
     repository.events.append(input.sessionId, input.turnId, kind, scoped(payload))
@@ -53,9 +55,14 @@ export function runtimeCallbacks(repository: SessionRepository, input: SessionIn
     async request(snapshot) {
       const event = repository.database.transaction(() => {
         const value = snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot) ? snapshot : {}
+        const previous = repository.database.connection.prepare(`SELECT json_extract(payload_json,'$.contextEstimate') AS context_estimate FROM events
+          WHERE session_id=? AND kind='model.request' AND COALESCE(CAST(json_extract(payload_json,'$.actor.assistantID') AS TEXT),'')=?
+          ORDER BY seq DESC LIMIT 1`).get(input.sessionId, String(scope.actor?.assistantID ?? '')) as { context_estimate: string | null } | undefined
+        const contextEstimate = requestContext(value, input.metadata, previous?.context_estimate ? JSON.parse(previous.context_estimate) : undefined, scope.actor?.assistantID)
+        contexts.set(String(value.requestId), contextEstimate)
         chargeSubagentBudget(repository.database, input.sessionId, 'model', value.costConfigured === true)
         recordSubagentRequest(repository.database, input.sessionId, input.turnId, snapshot)
-        return repository.events.insert(input.sessionId, input.turnId, 'model.request', scoped(snapshot))
+        return repository.events.insert(input.sessionId, input.turnId, 'model.request', scoped({ ...value, contextEstimate }))
       })
       repository.events.publish(event)
     },
@@ -66,9 +73,11 @@ export function runtimeCallbacks(repository: SessionRepository, input: SessionIn
         recordSubagentResponse(repository.database, input.sessionId, input.turnId, snapshot)
         return repository.events.insert(input.sessionId, input.turnId, 'model.response', scoped({
           requestId: value.requestId ?? null,
+          contextEstimate: contexts.get(String(value.requestId)) ?? null,
           usage: message.usage ?? null, stopReason: message.stopReason ?? null, costConfigured: value.costConfigured === true
         }))
       })
+      contexts.delete(String(value.requestId))
       repository.events.publish(event)
     },
     async beforeTool(name, callId, revision, args) {

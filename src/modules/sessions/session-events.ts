@@ -1,3 +1,5 @@
+import { RequestPersistence } from './request-persistence.ts'
+import { StreamPersistence, restoreStreamPayload } from './stream-persistence.ts'
 import { randomUUID } from 'node:crypto'
 import type { JsonValue, DurableEvent } from '@eden/api'
 import { durableEventSchema, jsonValue } from '@eden/api'
@@ -5,14 +7,16 @@ import type { EdenDatabase } from '@eden/store'
 import type { SQLOutputValue } from 'node:sqlite'
 
 export class SessionEvents {
+  private readonly streams = new StreamPersistence()
   private readonly listeners = new Set<(event: DurableEvent) => void>()
-  constructor(private readonly database: EdenDatabase) {}
+  private readonly requests: RequestPersistence
+  constructor(private readonly database: EdenDatabase) { this.requests = new RequestPersistence(database) }
 
   insert(sessionId: string, turnId: string | null, kind: string, payload: JsonValue): DurableEvent {
     const row = this.database.connection.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM events WHERE session_id=?').get(sessionId)
     const event = durableEventSchema.parse({ id: randomUUID(), sessionId, turnId, seq: String(row?.seq), kind, payload, createdAt: Date.now() })
     this.database.connection.prepare('INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(event.id, sessionId, turnId, BigInt(event.seq), kind, JSON.stringify(payload), event.createdAt)
+      .run(event.id, sessionId, turnId, BigInt(event.seq), kind, JSON.stringify(this.requests.encode(kind, this.streams.encode(event))), event.createdAt)
     return event
   }
 
@@ -23,6 +27,7 @@ export class SessionEvents {
   }
 
   publish(event: DurableEvent): void {
+    this.streams.committed(event)
     for (const listener of this.listeners) {
       try { listener(event) }
       catch (error) { process.stderr.write(`Event subscriber failed: ${error instanceof Error ? error.message : 'unknown'}\n`) }
@@ -37,7 +42,25 @@ export class SessionEvents {
   list(sessionId: string, afterSeq = '0', limit = 100): DurableEvent[] {
     const statement = this.database.connection.prepare('SELECT * FROM events WHERE session_id=? AND seq>? ORDER BY seq LIMIT ?')
     statement.setReadBigInts(true)
-    return statement.all(sessionId, BigInt(afterSeq), Math.min(limit, 1001)).map(eventFromRow)
+    const restored = new Map<string, DurableEvent>()
+    return statement.all(sessionId, BigInt(afterSeq), Math.min(limit, 1001)).map(row => this.restore(eventFromRow(row), restored))
+  }
+
+  private restore(event: DurableEvent, cache: Map<string, DurableEvent>, depth = 0): DurableEvent {
+    if (depth > 129) throw new Error('Persisted message delta chain exceeds snapshot interval')
+    const existing = cache.get(event.seq)
+    if (existing) return existing
+    const payload = restoreStreamPayload(this.requests.restore(event.kind, event.payload), seq => {
+      if (!/^[1-9][0-9]*$/.test(seq) || BigInt(seq) >= BigInt(event.seq)) throw new Error('Invalid persisted message delta sequence')
+      const statement = this.database.connection.prepare('SELECT * FROM events WHERE session_id=? AND seq=?')
+      statement.setReadBigInts(true)
+      const row = statement.get(event.sessionId, BigInt(seq))
+      if (!row || row.turn_id !== event.turnId) throw new Error('Missing persisted message delta event')
+      return this.restore(eventFromRow(row), cache, depth + 1).payload
+    })
+    const result = { ...event, payload }
+    cache.set(event.seq, result)
+    return result
   }
 
   messages(sessionId: string, before: string | undefined, limit: number): { items: DurableEvent[]; hasMore: boolean; nextCursor: string | null } {

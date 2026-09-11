@@ -20,7 +20,7 @@ function identity(metadata: Record<string, unknown>, actorId?: string | number) 
 
 function assistantReply(database: EdenDatabase, sessionId: string, turnId: string, owner: { actorId: string; multi: boolean }): string {
   const messages = database.connection.prepare("SELECT payload_json FROM events WHERE session_id=? AND turn_id=? AND kind='agent.message_end' ORDER BY seq DESC")
-    .all(sessionId, turnId)
+    .iterate(sessionId, turnId)
   let assistantText = ''
   for (const event of messages) {
     const payload = object(JSON.parse(String(event.payload_json)))
