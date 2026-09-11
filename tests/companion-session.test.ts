@@ -17,7 +17,7 @@ async function fixture(wait = false) {
   const second = await recordedModel([{ text: 'Second reply' }])
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-companion-session-'))
   const db = new EdenDatabase(':memory:', 'mon')
-  const services = createServices(db, loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'mon', EDEN_AGENT_V2_DATA_ROOT: root }))
+  const services = createServices(db, loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'mon', EDEN_AGENT_DATA_ROOT: root }))
   const session = services.repository.create('Production multi-actor', [{ assistantId: 1 }, { assistantId: 2 }])
   const bindings = [{ assistantId: 1, characterId: 1, main: { model: first.config, entityId: 1, label: 'First' } },
     { assistantId: 2, characterId: 2, main: { model: second.config, entityId: 2, label: 'Second' } }]

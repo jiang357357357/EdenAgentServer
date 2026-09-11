@@ -38,7 +38,7 @@ for (const scenario of ['approved', 'deny-read', 'deny-handoff']) {
     await new Promise<void>(resolve => core.listen(0, '127.0.0.1', resolve))
     t.after(async () => { core.closeAllConnections(); await new Promise<void>(resolve => core.close(() => resolve())) })
     const address = core.address(); assert.ok(address && typeof address !== 'string')
-    const services = createServices(db, loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'mon', EDEN_AGENT_V2_DATA_ROOT: root }))
+    const services = createServices(db, loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'mon', EDEN_AGENT_DATA_ROOT: root }))
     const session = services.repository.create('Switch tool', [{ assistantId: 1 }])
     const approvals: string[] = []
     services.repository.events.subscribe(event => {

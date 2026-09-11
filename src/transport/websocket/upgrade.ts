@@ -7,7 +7,6 @@ import type { SessionService } from '../../modules/sessions/index.ts'
 import { RpcRouter } from '../rpc/router.ts'
 import { sessionRoutes, wireEvent } from '../rpc/session.routes.ts'
 import type { JsonValue } from '@eden/api'
-import { reviewRoutes } from '../rpc/review-routes.ts'
 
 function authenticated(request: IncomingMessage, config: ServerConfig): boolean {
   const origin = request.headers.origin
@@ -44,7 +43,7 @@ export function attachWebsocket(server: HttpServer, config: ServerConfig, sessio
   })
   websocket.on('connection', client => {
     const routes = { ...sessionRoutes(sessions), ...extraRoutes }
-    const router = new RpcRouter(config.origin, config.migrationReview ? reviewRoutes(routes) : routes)
+    const router = new RpcRouter(config.origin, routes)
     let initialized = false
     const send = (value: unknown) => {
       if (client.readyState !== WebSocket.OPEN) return

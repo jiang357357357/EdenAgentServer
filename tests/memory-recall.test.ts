@@ -12,7 +12,7 @@ import { selectMemories } from '../src/modules/memories/index.ts'
 async function fixture(context: test.TestContext) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-memory-recall-'))
   const db = new EdenDatabase(':memory:', 'mon')
-  const services = createServices(db, loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'mon', EDEN_AGENT_V2_DATA_ROOT: root }))
+  const services = createServices(db, loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'mon', EDEN_AGENT_DATA_ROOT: root }))
   context.after(async () => {
     await Promise.all([services.sessions.close(), services.plugins.close(), services.companion.close(), services.mon.close()])
     services.questions.close(); db.close(); await rm(root, { recursive: true, force: true })

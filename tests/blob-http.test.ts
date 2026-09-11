@@ -10,7 +10,7 @@ import { startServer } from '../src/bootstrap/container.ts'
 
 async function fixture(context: test.TestContext, max = 1024, origin: 'mon' | 'local' = 'local') {
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-blob-http-'))
-  const config = loadConfig({ EDEN_AGENT_V2_DATA_ROOT: root, EDEN_AGENT_PORT: '0', EDEN_AGENT_MAX_BLOB_BYTES: String(max), EDEN_AGENT_RUNTIME_ORIGIN: origin })
+  const config = loadConfig({ EDEN_AGENT_DATA_ROOT: root, EDEN_AGENT_PORT: '0', EDEN_AGENT_MAX_BLOB_BYTES: String(max), EDEN_AGENT_RUNTIME_ORIGIN: origin })
   let server = await startServer(config)
   context.after(async () => { await server.close(); await rm(root, { recursive: true, force: true }) })
   return {

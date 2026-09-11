@@ -36,7 +36,7 @@ const initialize = (origin: string) => ({ protocolVersion: 2, runtimeOrigin: ori
 test('authenticated websocket runs a durable turn and restores it after restart', async () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'eden-server-'))
   const model = await recordedModel([{ text: 'A durable answer' }, { text: 'I remember' }])
-  const config = { ...loadConfig({ EDEN_AGENT_V2_DATA_ROOT: directory, EDEN_AGENT_PORT: '0' }), model: model.config }
+  const config = { ...loadConfig({ EDEN_AGENT_DATA_ROOT: directory, EDEN_AGENT_PORT: '0' }), model: model.config }
   let server = await startServer(config)
   try {
     const client = await connect(server.port, config.token)
@@ -66,7 +66,7 @@ test('authenticated websocket runs a durable turn and restores it after restart'
 
 test('rejects wrong tokens, hostile origins, and duplicate realm owners', async () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'eden-auth-'))
-  const config = loadConfig({ EDEN_AGENT_V2_DATA_ROOT: directory, EDEN_AGENT_PORT: '0' })
+  const config = loadConfig({ EDEN_AGENT_DATA_ROOT: directory, EDEN_AGENT_PORT: '0' })
   const server = await startServer(config)
   try {
     await assert.rejects(connect(server.port, 'x'.repeat(43)))

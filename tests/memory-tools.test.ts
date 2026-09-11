@@ -15,7 +15,7 @@ async function fixture(context: test.TestContext) {
   const db = new EdenDatabase(':memory:', 'local')
   const model = await recordedModel([{ tool: 'remember_memory', input: { content: 'User prefers tea', kind: 'preference' } },
     { tool: 'search_memories', input: {} }, { text: 'Finished memory request' }])
-  const services = createServices(db, { ...loadConfig({ EDEN_AGENT_V2_DATA_ROOT: root }), model: model.config })
+  const services = createServices(db, { ...loadConfig({ EDEN_AGENT_DATA_ROOT: root }), model: model.config })
   context.after(async () => {
     await Promise.all([services.sessions.close(), services.plugins.close(), services.companion.close(), services.mon.close()])
     services.questions.close(); db.close(); await model.close(); await rm(root, { recursive: true, force: true })

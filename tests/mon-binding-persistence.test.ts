@@ -31,7 +31,7 @@ test('production Mon catalogue commits durable single/vision/actor/director bind
   })
   await new Promise<void>(resolve => core.listen(0, '127.0.0.1', resolve))
   const filename = path.join(root, 'test.sqlite')
-  const config = loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'mon', EDEN_AGENT_V2_DATA_ROOT: root })
+  const config = loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'mon', EDEN_AGENT_DATA_ROOT: root })
   let db = new EdenDatabase(filename, 'mon')
   let services = createServices(db, config)
   const close = async () => {

@@ -12,7 +12,7 @@ import type { DurableEvent } from '@eden/api'
 test('real runtime persists compact events and restart RPC restores exact public stream payloads', async context => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-stream-restart-'))
   const model = await recordedModel([{ text: 'Recorded reply' }])
-  const config = { ...loadConfig({ EDEN_AGENT_V2_DATA_ROOT: root, EDEN_AGENT_PORT: '0' }), model: model.config }
+  const config = { ...loadConfig({ EDEN_AGENT_DATA_ROOT: root, EDEN_AGENT_PORT: '0' }), model: model.config }
   let server = await startServer(config)
   context.after(async () => { await server.close(); await model.close(); await rm(root, { recursive: true, force: true }) })
   const session = server.sessions.repository.create('Stream restart')

@@ -16,7 +16,7 @@ async function fixture(context: test.TestContext) {
   const database = new EdenDatabase(path.join(root, 'test.sqlite'), 'local')
   const readInput = { action: 'read', blobId: '' }
   const model = await recordedModel([{ tool: 'eden_attachment', input: { action: 'list' } }, { tool: 'eden_attachment', input: readInput }, { text: 'Finished' }])
-  const config = { ...loadConfig({ EDEN_AGENT_V2_DATA_ROOT: root }), model: model.config }
+  const config = { ...loadConfig({ EDEN_AGENT_DATA_ROOT: root }), model: model.config }
   const services = createServices(database, config)
   context.after(async () => {
     await services.sessions.close(); await services.plugins.close(); await services.mon.close(); await services.companion.close(); services.questions.close()

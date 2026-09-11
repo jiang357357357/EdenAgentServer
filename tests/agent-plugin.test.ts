@@ -35,7 +35,7 @@ test('agent authors, tests, activates, and invokes its plugin through durable us
   ]
   const model = await recordedModel([...replies.map(input => ({ tool: 'eden_plugin', input })), { text: 'The plugin returned 42' }])
   const directory = mkdtempSync(path.join(tmpdir(), 'eden-agent-plugin-'))
-  const server = await startServer({ ...loadConfig({ EDEN_AGENT_V2_DATA_ROOT: directory, EDEN_AGENT_PORT: '0' }), model: model.config })
+  const server = await startServer({ ...loadConfig({ EDEN_AGENT_DATA_ROOT: directory, EDEN_AGENT_PORT: '0' }), model: model.config })
   const router = new RpcRouter('local', { ...pluginRoutes(server.plugins), ...permissionRoutes(server.permissions) })
   const failures: unknown[] = []
   await router.dispatch({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 2, runtimeOrigin: 'local', clientName: 'test-user', clientVersion: '1', capabilities: [] } })
@@ -72,7 +72,7 @@ test('agent authors, tests, activates, and invokes its plugin through durable us
 test('denied plugin mutation remains absent', async () => {
   const model = await recordedModel([{ tool: 'eden_plugin', input: { action: 'draft', args: { manifest, source } } }, { text: 'Permission denied' }])
   const directory = mkdtempSync(path.join(tmpdir(), 'eden-agent-denial-'))
-  const server = await startServer({ ...loadConfig({ EDEN_AGENT_V2_DATA_ROOT: directory, EDEN_AGENT_PORT: '0' }), model: model.config })
+  const server = await startServer({ ...loadConfig({ EDEN_AGENT_DATA_ROOT: directory, EDEN_AGENT_PORT: '0' }), model: model.config })
   const unsubscribe = server.sessions.repository.events.subscribe(event => {
     if (event.kind === 'permission.requested') queueMicrotask(() => server.permissions.resolve(server.permissions.list()[0]!.id, false))
   })
@@ -88,7 +88,7 @@ test('denied plugin mutation remains absent', async () => {
 test('cancelling a tool waiting for permission leaves no live waiter or draft', async () => {
   const model = await recordedModel([{ tool: 'eden_plugin', input: { action: 'draft', args: { manifest, source } } }])
   const directory = mkdtempSync(path.join(tmpdir(), 'eden-agent-cancel-'))
-  const server = await startServer({ ...loadConfig({ EDEN_AGENT_V2_DATA_ROOT: directory, EDEN_AGENT_PORT: '0' }), model: model.config })
+  const server = await startServer({ ...loadConfig({ EDEN_AGENT_DATA_ROOT: directory, EDEN_AGENT_PORT: '0' }), model: model.config })
   let requested!: () => void
   const waiting = new Promise<void>(resolve => { requested = resolve })
   const unsubscribe = server.sessions.repository.events.subscribe(event => { if (event.kind === 'permission.requested') requested() })

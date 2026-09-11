@@ -12,10 +12,9 @@ const second = { scopeType: 'agent_character' as const, scopeKey: '2' }
 
 test('long-term memory preserves legacy fields through disk reopen and isolates character scopes', async context => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-memory-'))
-  context.after(() => rm(root, { recursive: true, force: true }))
   const filename = path.join(root, 'memory.sqlite')
   let database = new EdenDatabase(filename, 'mon')
-  context.after(() => database.close())
+  context.after(async () => { database.close(); await rm(root, { recursive: true, force: true }) })
   let repository = new MemoryRepository(database)
   const source = randomUUID()
   const stored = repository.create(first, '  Tea\n without   sugar  ', 'preference', source, { source: 'explicit_tool' })

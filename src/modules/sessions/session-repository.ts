@@ -85,15 +85,6 @@ export class SessionRepository {
 
   assertContextReady(sessionId: string): void {
     this.read(sessionId)
-    const db = this.database.connection
-    if (!db.prepare("SELECT 1 FROM realm_meta WHERE key='legacy_import_state'").get()) return
-    const imported = db.prepare("SELECT 1 FROM legacy_conversion_ids WHERE target_id=? AND domain IN ('sessions','agent_child_sessions')").get(sessionId)
-    if (!imported) return
-    const context = db.prepare('SELECT state FROM legacy_runtime_contexts WHERE session_id=?').get(sessionId)
-    if (context?.state !== 'prepared') throw new Error('Historical session context requires recovery before continuation')
-    const child = db.prepare(`SELECT c.state FROM legacy_subagent_context c JOIN subagent_threads t ON t.id=c.agent_id
-      WHERE t.child_session_id=?`).get(sessionId)
-    if (child && child.state !== 'ready') throw new Error('Historical subagent policies require recovery before continuation')
   }
 
   saveCheckpoint(snapshot: RuntimeCheckpoint, turnId: string): void {

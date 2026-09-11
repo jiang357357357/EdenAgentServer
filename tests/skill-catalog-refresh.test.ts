@@ -54,7 +54,7 @@ test('workspace switch immediately invalidates discovery and persists enablement
 test('workspace discovery rejects symlink packages without publishing partial contents', async t => {
   const f = await fixture(t)
   await f.skill(f.first, 'safe', 'safe'); await f.service.refresh()
-  await symlink(f.second, path.join(f.first, '.agents/skills/redirect'), 'dir')
+  await symlink(f.second, path.join(f.first, '.agents/skills/redirect'), process.platform === 'win32' ? 'junction' : 'dir')
   await assert.rejects(f.service.refresh(), /redirected/)
   assert.deepEqual(f.repository.list().map(skill => skill.name), ['safe'])
 })

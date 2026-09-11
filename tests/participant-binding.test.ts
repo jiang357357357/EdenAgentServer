@@ -11,7 +11,7 @@ import { sessionRoutes } from '../src/transport/rpc/session.routes.ts'
 test('participant changes share the configuration lock and invalidate Mon bindings only after commit', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-participants-'))
   const database = new EdenDatabase(':memory:', 'mon')
-  const services = createServices(database, loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'mon', EDEN_AGENT_V2_DATA_ROOT: root }))
+  const services = createServices(database, loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'mon', EDEN_AGENT_DATA_ROOT: root }))
   const { repository, models, sessions } = services
   const session = repository.create('Change actors', [{ assistantId: 1 }])
   const model = { id: 'old-actor-model', provider: 'test', baseUrl: 'https://model.invalid/v1', contextWindow: 32000, maxTokens: 1024 }

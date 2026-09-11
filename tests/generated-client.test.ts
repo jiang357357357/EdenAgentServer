@@ -9,7 +9,7 @@ import { EdenAgentRpcClient } from '../../frontend/web/src/generated/eden-agent-
 
 test('existing generated Web client initializes and consumes session events', async () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'eden-generated-client-'))
-  const config = loadConfig({ EDEN_AGENT_V2_DATA_ROOT: directory, EDEN_AGENT_PORT: '0' })
+  const config = loadConfig({ EDEN_AGENT_DATA_ROOT: directory, EDEN_AGENT_PORT: '0' })
   const server = await startServer(config)
   const client = new EdenAgentRpcClient()
   try {

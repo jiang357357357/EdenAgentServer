@@ -19,7 +19,7 @@ async function fixture(context: test.TestContext, replies?: Parameters<typeof re
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-extraction-service-'))
   const model = await recordedModel(replies ?? [{ text: 'I will remember your preference.' },
     { text: '{"memories":[{"kind":"preference","content":"User prefers tea","confidence":0.95}]}' }])
-  const config = { ...loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'local', EDEN_AGENT_V2_DATA_ROOT: root, EDEN_AGENT_PORT: '0' }), model: model.config }
+  const config = { ...loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'local', EDEN_AGENT_DATA_ROOT: root, EDEN_AGENT_PORT: '0' }), model: model.config }
   let server = await startServer(config)
   context.after(async () => { await server.close().catch(() => {}); await model.close(); await rm(root, { recursive: true, force: true }) })
   return { model, get server() { return server }, async restart() { await server.close(); server = await startServer(config) } }

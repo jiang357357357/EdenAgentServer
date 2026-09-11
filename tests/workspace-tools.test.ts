@@ -39,7 +39,9 @@ test('workspace writes and commands wait for approval and execute within the sel
     approve()
     await rejected
     assert.equal(readFileSync(path.join(project, 'note.md'), 'utf8'), '你好，老师。')
-    const command = execute('eden_exec', { command: 'pwd; cat note.md; printf done > result.txt' })
+    const command = execute('eden_exec', { command: process.platform === 'win32'
+      ? "(Get-Location).Path; Get-Content -Encoding UTF8 note.md; [IO.File]::WriteAllText((Join-Path (Get-Location) 'result.txt'), 'done')"
+      : 'pwd; cat note.md; printf done > result.txt'  })
     assert.equal(existsSync(path.join(project, 'result.txt')), false)
     approve()
     const result = await command as { stdout: string; exitCode: number }

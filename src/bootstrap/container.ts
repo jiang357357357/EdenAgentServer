@@ -15,15 +15,13 @@ import { jobRoutes } from '../transport/rpc/job.routes.ts'
 import { memoRoutes } from '../transport/rpc/memo.routes.ts'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { EdenDatabase, readLegacyConversionStatus } from '@eden/store'
-import { rpcMethods, toJson } from '@eden/api'
+import { EdenDatabase, } from '@eden/store'
+import { rpcMethods } from '@eden/api'
 import { contractHandler } from '../transport/rpc/contract-handler.ts'
-import { acquireReviewLock } from './review-lock.ts'
 import { attachWebsocket } from '../transport/websocket/upgrade.ts'
 import type { ServerConfig } from './config.ts'
 import { persistToken } from './config.ts'
 import { acquireProcessLock } from './process-lock.ts'
-import { assertRuntimeSelection } from './runtime-selection.ts'
 import { pluginRoutes } from '../transport/rpc/plugin.routes.ts'
 import { permissionRoutes } from '../transport/rpc/permission.routes.ts'
 import { workspaceRoutes } from '../transport/rpc/workspace.routes.ts'
@@ -41,13 +39,9 @@ export async function startServer(config: ServerConfig) {
     stage, elapsedMs: Math.round(performance.now() - started) }) + '\n')
   progress('database')
   const releaseProcessLock = acquireProcessLock(config.dataRoot)
-  try { assertRuntimeSelection(config) } catch (error) { releaseProcessLock(); throw error }
-  let releaseReviewLock: (() => void) | undefined
-  try { if (config.migrationReview) releaseReviewLock = acquireReviewLock(config.dataRoot) }
-  catch (error) { releaseProcessLock(); throw error }
-  const releaseLock = () => { try { releaseReviewLock?.() } finally { releaseProcessLock() } }
+  const releaseLock = releaseProcessLock
   let database: EdenDatabase
-  try { database = new EdenDatabase(config.databasePath, config.origin, config.migrationReview ? 'migration-review' : 'runtime') }
+  try { database = new EdenDatabase(config.databasePath, config.origin) }
   catch (error) { releaseLock(); throw error }
   progress('services')
   let services: ReturnType<typeof createServices>
@@ -58,40 +52,35 @@ export async function startServer(config: ServerConfig) {
   const blobHttp = new BlobHttp(services.blobs, config)
   const drainServices = () => { services.realtimeVoice.close(); services.scheduler.close(); services.pluginHooks.close(); services.selfAwake.close(); return Promise.allSettled([services.mcpResults.close(), services.mcp.close(), services.connectorLifecycle.close(), services.speech.close(), services.voice.close(), services.subagentLifecycle.close(), services.packageAssets.close(), services.pluginMarket.close(), services.skills.close(), selfAwakeHttp.close(), services.selfAwakeActions.close(), memoryExtractions.close(), blobHttp.close(), plugins.close(), sessions.close(),
     mon.close(), companion.close(), Promise.resolve().then(() => services.media.close()), Promise.resolve().then(() => questions.close())]) }
-  const health = healthHandler(config.origin, () => ({ migrationReview: Boolean(config.migrationReview), model: Boolean(config.model), sessionFaults: sessions.faultCount(),
+  const health = healthHandler(config.origin, () => ({ model: Boolean(config.model), sessionFaults: sessions.faultCount(),
     memoryExtraction: memoryExtractions.fault === undefined, jobs: services.scheduler.fault === undefined, pluginHooks: services.pluginHooks.fault === undefined, subagents: services.subagentLifecycle.fault === undefined, selfAwake: services.selfAwake.fault === undefined && services.selfAwakeActions.fault === undefined }))
   const http = createServer((request, response) => {
-    if (!config.migrationReview && selfAwakeHttp.handle(request, response)) return
-    if ((!config.migrationReview || ['GET','OPTIONS'].includes(request.method ?? '')) && blobHttp.handle(request, response)) return
+    if (selfAwakeHttp.handle(request, response)) return
+    if (blobHttp.handle(request, response)) return
     health(request, response)
   })
   const websocket = attachWebsocket(http, config, sessions, {
     'memo.job.resubmit': contractHandler(rpcMethods['memo.job.resubmit'], input => services.memoJobRecovery.resubmit(input.id, input.expectedUpdatedAt, input.note)),
     'plugin.hook.resubmit': contractHandler(rpcMethods['plugin.hook.resubmit'], input => services.pluginHooks.resubmit(input.id, input.expectedUpdatedAt, input.note)),
-    'runtime.status': contractHandler(rpcMethods['runtime.status'], () => ({ mode: config.migrationReview ? 'migration-review' : 'runtime', runtimeOrigin: config.origin, automaticExecution: !config.migrationReview })),
-    'migration.status': contractHandler(rpcMethods['migration.status'], async () => {
-      if (!config.migrationReview) throw new Error('Migration status requires review mode')
-      return toJson(await readLegacyConversionStatus(config.dataRoot, config.origin))
-    }),
+    'runtime.status': contractHandler(rpcMethods['runtime.status'], () => ({ mode: 'runtime', runtimeOrigin: config.origin, automaticExecution: true })),
     ...operationRoutes(services.repository), ...commandRoutes(services.commands), ...mcpRoutes(services.mcp, database, services.mcpResults), ...connectorRoutes(services.connectorCatalog, services.connectors, services.connectorEvents, services.connectorPermissions, services.connectorCredentials), ...mediaRoutes(services.media), ...voiceRoutes(services.voiceConfig, services.voice, services.speech), ...subagentRoutes(services.subagents), ...memoryExtractionRoutes(memoryExtractions), ...memoRoutes(services.memos, services.memoNotifications),
     ...notificationRoutes(services.desktopReminders),
     ...selfAwakeRoutes(services.selfAwake.repository, services.selfAwakeActions, services.selfAwake),
     ...directorRoutes(directors), ...jobRoutes(services.jobs),
     ...questionRoutes(questions),
     ...pluginAssetRoutes(services.packageAssets), ...pluginMarketRoutes(services.pluginMarket), ...skillRoutes(services.skills), ...pluginRoutes(plugins, services.pluginMarket.installed), ...permissionRoutes(permissions), ...workspaceRoutes(workspace, sessions), ...modelRoutes(models, sessions, config.origin === 'mon' ? mon : undefined),
-  }, config.migrationReview ? undefined : sessionId => services.realtimeVoice.prepare(sessionId))
+  }, sessionId => services.realtimeVoice.prepare(sessionId))
   try {
     progress('skills')
-    if (!config.migrationReview) await services.skills.start()
+    await services.skills.start()
     progress('memory-recovery')
-    if (!config.migrationReview) await memoryExtractions.start()
+    await memoryExtractions.start()
     progress('http-listen')
     await new Promise<void>((resolve, reject) => {
       http.once('error', reject)
       http.listen(config.port, config.host, () => { http.removeListener('error', reject); resolve() })
     })
     persistToken(config)
-    if (!config.migrationReview) {
     progress('background-services')
     await services.subagentLifecycle.start()
     sessions.resumePending()
@@ -103,7 +92,6 @@ export async function startServer(config: ServerConfig) {
     services.mon.startSync()
     services.mcp.start()
     services.connectorLifecycle.start()
-    }
   } catch (error) {
     for (const client of websocket.clients) client.terminate()
     await drainServices()

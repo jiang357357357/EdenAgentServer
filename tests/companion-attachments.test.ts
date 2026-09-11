@@ -17,7 +17,7 @@ test('production companion actors receive shared images and scoped files without
   const director = await recordedModel([{ text: '{"beats":[{"assistantId":1},{"assistantId":2}]}' }])
   const first = await recordedModel([{ tool: 'eden_attachment', input: read }, { text: 'First public image reply' }])
   const second = await recordedModel([{ text: 'Second public image reply' }])
-  const services = createServices(db, loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'mon', EDEN_AGENT_V2_DATA_ROOT: root }))
+  const services = createServices(db, loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'mon', EDEN_AGENT_DATA_ROOT: root }))
   context.after(async () => {
     await Promise.all([services.sessions.close(), services.companion.close(), services.mon.close(), services.plugins.close()])
     services.questions.close(); db.close()

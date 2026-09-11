@@ -39,9 +39,9 @@ test('authenticated WebSocket candidate denial, explicit resume, approval and re
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-memory-rpc-'))
   const model = await recordedModel([{ text: 'Confirmed preference' },
     { text: '{"memories":[{"kind":"preference","content":"User prefers tea","confidence":0.95}]}' }])
-  const config = { ...loadConfig({ EDEN_AGENT_V2_DATA_ROOT: root, EDEN_AGENT_PORT: '0' }), model: model.config }
+  const config = { ...loadConfig({ EDEN_AGENT_DATA_ROOT: root, EDEN_AGENT_PORT: '0' }), model: model.config }
   let host = await startServer(config)
-  const other = await startServer(loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'mon', EDEN_AGENT_V2_DATA_ROOT: path.join(root, 'other'), EDEN_AGENT_PORT: '0' }))
+  const other = await startServer(loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'mon', EDEN_AGENT_DATA_ROOT: path.join(root, 'other'), EDEN_AGENT_PORT: '0' }))
   const sockets: WebSocket[] = []
   context.after(async () => { for (const socket of sockets) socket.terminate(); await Promise.all([host.close(), other.close()]); await model.close(); await rm(root, { recursive: true, force: true }) })
   const connect = async () => {

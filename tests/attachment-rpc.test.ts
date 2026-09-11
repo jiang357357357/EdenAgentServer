@@ -28,7 +28,7 @@ test('HTTP upload and authenticated RPC accept attachment-only input, execute fi
   const read = { action: 'read', blobId: '' }
   const model = await recordedModel([{ tool: 'eden_attachment', input: read }, { text: 'Read both attachments' }])
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-attachment-rpc-'))
-  const config = { ...loadConfig({ EDEN_AGENT_V2_DATA_ROOT: root, EDEN_AGENT_PORT: '0' }), model: model.config }
+  const config = { ...loadConfig({ EDEN_AGENT_DATA_ROOT: root, EDEN_AGENT_PORT: '0' }), model: model.config }
   let server = await startServer(config)
   let client: WebSocket | undefined
   context.after(async () => { client?.terminate(); await server.close(); await model.close(); await rm(root, { recursive: true, force: true }) })

@@ -15,7 +15,7 @@ import { recoverMemoryExtractions } from '../src/modules/memories/extraction-rec
 test('Mon host upgrades a populated history and recovers memories before serving health', async context => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-startup-history-'))
   context.after(() => rm(root, { recursive: true, force: true }))
-  const config = loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'mon', EDEN_AGENT_V2_DATA_ROOT: root, EDEN_AGENT_PORT: '0' })
+  const config = loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'mon', EDEN_AGENT_DATA_ROOT: root, EDEN_AGENT_PORT: '0' })
   const db = new EdenDatabase(config.databasePath, 'mon')
   try {
     const sessions = new SessionRepository(db, 'mon')
