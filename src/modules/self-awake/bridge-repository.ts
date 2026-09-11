@@ -12,10 +12,25 @@ export class SelfAwakeBridgeRepository {
     })
   }
   existing(user: string, key: string, hash: string) {
-    const row = this.database.connection.prepare('SELECT job_id,request_hash FROM self_awake_submissions WHERE user_id=? AND request_key=?').get(user, key)
+    const row = this.database.connection.prepare('SELECT job_id,request_hash FROM self_awake_submissions WHERE user_id=? AND request_key=? UNION ALL SELECT job_id,request_hash FROM self_awake_submission_aliases WHERE user_id=? AND request_key=?').get(user, key, user, key)
     if (!row) return undefined
     if (row.request_hash !== hash) throw new Error('Idempotency key was used with a different request')
     return this.jobs.read(String(row.job_id))
+  }
+  coalesce(user: string, key: string, hash: string) {
+    return this.database.transaction(() => {
+      const existing = this.existing(user, key, hash)
+      if (existing) return existing
+      const row = this.database.connection.prepare(`SELECT j.id FROM jobs j
+        JOIN self_awake_submissions s ON s.job_id=j.id LEFT JOIN self_awake_runs r ON r.job_id=j.id
+        WHERE s.user_id=? AND j.kind='self_awake' AND
+          (j.state IN ('queued','running','dispatched','unknown') OR r.state IN ('running','awaiting_action','action_running','action_interrupted'))
+        ORDER BY j.created_at LIMIT 1`).get(user)
+      if (!row) return undefined
+      this.database.connection.prepare('INSERT INTO self_awake_submission_aliases(user_id,request_key,request_hash,job_id) VALUES(?,?,?,?)')
+        .run(user, key, hash, row.id!)
+      return this.jobs.read(String(row.id))
+    })
   }
   submit(user: string, key: string, hash: string, input: JobSchedule) {
     return this.database.transaction(() => {
@@ -29,13 +44,14 @@ export class SelfAwakeBridgeRepository {
   status(user: string, id: string) {
     if (!this.database.connection.prepare('SELECT 1 FROM self_awake_submissions WHERE user_id=? AND job_id=?').get(user, id)) throw new Error('Self-awake job owner mismatch')
     const job = this.jobs.read(id)
-    const run = this.database.connection.prepare('SELECT id,state,decision_json,last_error,updated_at FROM self_awake_runs WHERE job_id=?').get(id)
+    const run = this.database.connection.prepare('SELECT id,state,decision_json,last_error,started_at,updated_at FROM self_awake_runs WHERE job_id=?').get(id)
     const state = job.state === 'failed' ? 'failed' : String(run?.state ?? job.state)
     // MonOs polls only pending/running; exposing queued would finish the wake prematurely.
     const status = ['queued', 'preparing'].includes(state) ? 'pending'
       : ['running', 'dispatched', 'awaiting_action', 'action_running'].includes(state) ? 'running'
       : state === 'completed' ? 'completed' : 'failed'
     return { id: run ? String(run.id) : id, status,
+      started_at: run?.started_at == null ? null : new Date(Number(run.started_at)).toISOString(),
       decision_payload: run?.decision_json ? JSON.parse(String(run.decision_json)) : null,
       error: run?.last_error ?? job.error, updated_at: new Date(Number(run?.updated_at ?? job.updatedAt)).toISOString() }
   }

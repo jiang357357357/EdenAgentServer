@@ -16,16 +16,17 @@ export class SelfAwakeService {
   constructor(readonly repository: SelfAwakeRepository, private readonly jobs: JobRepository, private readonly sessions: SessionService, private readonly onDecision: () => void = () => {}) {
     this.recovery = new SelfAwakeJobRecovery(repository.database, jobs, sessions)
   }
-  get fault(): string | undefined { return this.error }
+  get fault(): string | undefined { return this.error ?? this.repository.timerPublication.fault }
 
   start(): void {
     if (this.unsubscribe || this.closed) return
+    this.repository.timerPublication.start()
     this.unsubscribe = this.sessions.repository.events.subscribe(event => {
       if (event.kind.startsWith('input.') || event.kind.startsWith('turn.')) this.wake()
     })
     this.wake()
   }
-  close(): void { this.closed = true; this.unsubscribe?.(); this.unsubscribe = undefined }
+  close(): void { this.repository.timerPublication.close(); this.closed = true; this.unsubscribe?.(); this.unsubscribe = undefined }
 
   dispatch(job: JobInfo): void {
     if (this.closed) throw new Error('Self-awake service is closed')

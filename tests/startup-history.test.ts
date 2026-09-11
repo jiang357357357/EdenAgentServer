@@ -34,7 +34,7 @@ test('Mon host upgrades a populated history and recovers memories before serving
       for (let i = 0; i < 12000; i++) insert.run(`filler-${i}`, session.id, 'other-turn', 1000 + i, 'agent.message_update', payload, 0)
     })
     // Reproduce the preceding schema using synthetic data only.
-    db.connection.exec('DROP INDEX events_session_kind_seq; DROP INDEX events_session_turn_kind_seq; DROP TABLE request_contents')
+    db.connection.exec('DROP INDEX events_session_kind_seq; DROP INDEX events_session_turn_kind_seq; DROP TABLE request_contents; DROP INDEX jobs_one_pending_self_awake; DROP TABLE self_awake_timer_publications; DROP TABLE self_awake_submission_aliases')
     const indexMigration = migrations.findIndex(sql => sql.includes('CREATE INDEX events_session_kind_seq'))
     db.connection.prepare('DELETE FROM schema_migrations WHERE version>?').run(indexMigration)
     db.connection.prepare("DELETE FROM realm_meta WHERE key='event_payload_format'").run()

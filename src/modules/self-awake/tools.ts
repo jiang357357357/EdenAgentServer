@@ -15,16 +15,20 @@ export function selfAwakeTools(repository: SelfAwakeRepository, jobs: JobReposit
     parameters: toJson(z.toJSONSchema(selfAwakeTimerSchema, { io: 'input' })) as Record<string, JsonValue>,
     async execute(raw, context) {
       const input = selfAwakeTimerSchema.parse(raw)
-      const dueAt = input.at ?? Date.now() + input.afterMinutes! * 60000
-      if (dueAt <= Date.now() || dueAt > Date.now() + 10080 * 60000) throw new Error('Self-awake timer must be within the next seven days')
+      repository.timerPublication.assertAvailable()
+      const requestedAt = input.at ?? Date.now() + input.afterMinutes! * 60000
+      if (requestedAt <= Date.now() || requestedAt > Date.now() + 10080 * 60000) throw new Error('Self-awake timer must be within the next seven days')
+      const dueAt = Math.min(requestedAt, repository.deadline())
       const parent = repository.parentJob(sessionId, turnId)
       const depth = parent ? parent.depth + 1 : 0
       if (depth > 8) throw new Error('Self-awake scheduling depth exceeded; a new user instruction is required')
       await permissions.request({ ...context, sessionId, turnId }, 'job.schedule', `self-awake:${sessionId}`, toJson({ dueAt, reason: input.reason, depth }))
       context.signal.throwIfAborted()
-      return toJson(jobs.schedule({ kind: 'self_awake', sessionId, dueAt,
+      const job = jobs.schedule({ kind: 'self_awake', sessionId, dueAt,
         payload: { prompt: input.reason, trigger: { type: 'scheduled', source: 'agent', reason: input.reason } },
-        key: `self-awake:${sessionId}:${turnId}:${context.callId}`, causationId: parent?.id ?? turnId, depth }))
+        key: `self-awake:${sessionId}:${turnId}:${context.callId}`, causationId: parent?.id ?? turnId, depth })
+      repository.timerPublication.publish()
+      return toJson(job)
     },
   }, {
     name: 'get_self_awake_context', revision: 'eden.self-awake.v1', executionMode: 'sequential',

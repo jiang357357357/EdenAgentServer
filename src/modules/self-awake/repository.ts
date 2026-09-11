@@ -1,3 +1,5 @@
+import { wakeDeadline } from './deadline.ts'
+import { SelfAwakeTimerPublication } from './timer-publication.ts'
 import { readExternalSchedule } from './external-schedule.ts'
 import { readNotificationHistory } from './notification-history.ts'
 import { previewNotificationReview, resolveNotificationReview } from './notification-review.ts'
@@ -11,7 +13,11 @@ import { selfAwakeListSchema, selfAwakeExecutionSchema, toJson } from '@eden/api
 import type { JobInfo, JsonValue, SelfAwakeDecision } from '@eden/api'
 
 export class SelfAwakeRepository {
-  constructor(readonly database: EdenDatabase, private readonly scheduleStateFile?: string) {}
+  readonly timerPublication: SelfAwakeTimerPublication
+  constructor(readonly database: EdenDatabase, private readonly scheduleStateFile?: string, externalScheduler = Boolean(scheduleStateFile)) {
+    this.timerPublication = new SelfAwakeTimerPublication(database, scheduleStateFile, externalScheduler)
+  }
+  deadline(now = Date.now()) { return wakeDeadline(this.database, this.scheduleStateFile, now) }
   runReview(runId: string) { this.read(runId); return previewRunReview(this.database, runId) }
   resolveRun(runId: string, fingerprint: string, decision: 'completed' | 'failed', note: string) {
     this.read(runId)
@@ -85,7 +91,7 @@ export class SelfAwakeRepository {
     const next = this.database.connection.prepare("SELECT due_at,payload_json FROM jobs WHERE kind='self_awake' AND state='queued' ORDER BY due_at LIMIT 1").get()
     const external = readExternalSchedule(this.scheduleStateFile)
     const local = next ? { status: 'scheduled', nextWakeAt: new Date(Number(next.due_at)).toISOString(), reason: String(object(JSON.parse(String(next.payload_json))).prompt ?? '') } : null
-    const schedule = !local ? external : !external || Date.parse(local.nextWakeAt) <= Date.parse(external.nextWakeAt) ? local : external
+    const schedule = local ?? external
     return { schedule, count, page: input.page, pageSize: input.pageSize, totalPages: Math.ceil(count / input.pageSize), results: rows.map(row => this.fromRow(row)) }
   }
 

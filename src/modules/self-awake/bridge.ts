@@ -30,7 +30,7 @@ export class SelfAwakeBridge {
     const task = this.tail.then(async () => {
       this.abort.signal.throwIfAborted()
       const hash = createHash('sha256').update(JSON.stringify(input)).digest('hex')
-      let job = this.repository.existing(input.user_id, input.idempotency_key, hash)
+      let job = this.repository.coalesce(input.user_id, input.idempotency_key, hash)
       if (!job) {
         const token = await acquireMonServiceToken(this.identity, this.abort.signal)
         const client = new MonClient(this.identity.coreBaseUrl, token)

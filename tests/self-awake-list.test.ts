@@ -28,7 +28,7 @@ for (const origin of ['mon', 'local'] as const) {
       assert.equal(first.results.length, 1)
       assert.equal(second.results.length, 1)
       assert.notEqual(first.results[0]!.id, second.results[0]!.id)
-      assert.deepEqual(first.schedule, { status: 'scheduled', nextWakeAt: new Date(dueAt).toISOString(), reason: 'Alpha observation' })
+      assert.deepEqual(first.schedule, { status: 'scheduled', nextWakeAt: new Date(dueAt + 1000).toISOString(), reason: '日记内容' })
       for (const query of [' ALPHA ', '日记', 'beta']) assert.equal(repository.list({ query }).count, 1)
       const missing = repository.list({ query: "missing' OR 1=1 --" })
       assert.equal(missing.count, 0)

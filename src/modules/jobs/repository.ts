@@ -1,3 +1,4 @@
+import { replacePendingWake, recoverWakes, wakeBusy } from './self-awake-queue.ts'
 import { randomUUID } from 'node:crypto'
 import { resolveJobOutcome } from './outcome-review.ts'
 import { jobScheduleSchema, jobInfoSchema, jobListSchema, jobIdSchema, jobPageSchema } from '@eden/api'
@@ -7,7 +8,7 @@ import type { SQLOutputValue } from 'node:sqlite'
 
 /** Jobs dispatch durable inputs/notifications only. External effects belong to turn operation ledgers. */
 export class JobRepository {
-  constructor(private readonly database: EdenDatabase) {}
+  constructor(private readonly database: EdenDatabase, private readonly externalSelfAwake = false) {}
 
   schedule(value: JobSchedule): JobInfo { return this.database.transaction(() => this.scheduleInTransaction(value)) }
   byKey(key: string): JobInfo | undefined {
@@ -28,7 +29,10 @@ export class JobRepository {
       if (job.kind !== input.kind || job.sessionId !== input.sessionId || JSON.stringify(job.payload) !== JSON.stringify(input.payload)) throw new Error('Job key belongs to a different operation')
       return job
     }
-    const id = randomUUID(), now = Date.now()
+    const id = randomUUID()
+    const previousTime = input.kind === 'self_awake' ? Number(this.database.connection.prepare("SELECT COALESCE(MAX(created_at),0) AS stamp FROM jobs WHERE kind='self_awake'").get()?.stamp) : 0
+    const now = Math.max(Date.now(), previousTime + 1)
+    if (input.kind === 'self_awake') replacePendingWake(this.database.connection, now)
     this.database.connection.prepare(`INSERT INTO jobs(id,kind,session_id,due_at,payload_json,operation_key,causation_id,depth,state,attempts,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,'queued',0,?,?)`).run(id, input.kind, input.sessionId, input.dueAt, JSON.stringify(input.payload), input.key, input.causationId, input.depth, now, now)
     return this.read(id)
@@ -60,13 +64,16 @@ export class JobRepository {
 
   recover(): void {
     this.database.transaction(() => {
+      recoverWakes(this.database.connection, Date.now())
       this.database.connection.prepare("UPDATE jobs SET state='queued',error='Interrupted before durable dispatch',updated_at=? WHERE state='running'").run(Date.now())
     })
   }
 
   claim(now = Date.now()): JobInfo | undefined {
     return this.database.transaction(() => {
-      const row = this.database.connection.prepare("SELECT id FROM jobs WHERE state='queued' AND due_at<=? ORDER BY due_at,id LIMIT 1").get(now)
+      const row = this.database.connection.prepare(`SELECT id FROM jobs WHERE state='queued' AND due_at<=?
+        AND (kind!='self_awake' OR (?=0 AND (?=0 OR json_extract(payload_json,'$.scheduler')='monos')))
+        ORDER BY due_at,id LIMIT 1`).get(now, Number(wakeBusy(this.database.connection)), Number(this.externalSelfAwake))
       if (!row) return undefined
       this.database.connection.prepare("UPDATE jobs SET state='running',attempts=attempts+1,updated_at=? WHERE id=?").run(now, row.id!)
       return this.read(String(row.id))
@@ -81,8 +88,12 @@ export class JobRepository {
   }
 
   defer(id: string, error: string, delayMs = 30000): void {
-    this.database.connection.prepare("UPDATE jobs SET state='queued',due_at=?,error=?,updated_at=? WHERE id=? AND state='running'")
-      .run(Date.now() + delayMs, error.slice(0, 4000), Date.now(), id)
+    this.database.transaction(() => {
+      const current = this.read(id)
+      const superseded = current.kind === 'self_awake' && this.database.connection.prepare("SELECT 1 FROM jobs WHERE kind='self_awake' AND state='queued'").get()
+      this.database.connection.prepare("UPDATE jobs SET state=?,due_at=?,error=?,updated_at=? WHERE id=? AND state='running'")
+        .run(superseded ? 'cancelled' : 'queued', Date.now() + delayMs, superseded ? 'Superseded while dispatch was deferred' : error.slice(0, 4000), Date.now(), id)
+    })
   }
 
   fail(id: string, error: string): void {
