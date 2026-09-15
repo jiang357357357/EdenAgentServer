@@ -39,7 +39,7 @@ export class RequestPersistence {
     }
     const stored = { ...payload }
     // Keep request ID, actor, model/provider and contextEstimate directly queryable by SQL.
-    for (const key of ['payload', 'tools', 'snapshot']) if (Object.hasOwn(stored, key)) stored[key] = visit(stored[key]!, [key])
+    for (const key of ['payload', 'tools', 'snapshot', 'contextSources']) if (Object.hasOwn(stored, key)) stored[key] = visit(stored[key]!, [key])
     if (!references.length) return payload
     return { ...stored, requestStorage: { format, references } }
   }

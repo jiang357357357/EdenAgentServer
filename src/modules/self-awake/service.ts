@@ -1,4 +1,4 @@
-import { selfAwakeDecisionSchema, toJson } from '@eden/api'
+import { toJson } from '@eden/api'
 import type { JobInfo } from '@eden/api'
 import { DeferredJob } from '../jobs/index.ts'
 import type { JobRepository } from '../jobs/index.ts'
@@ -13,7 +13,7 @@ export class SelfAwakeService {
   private closed = false
   private queued = false
   private error: string | undefined
-  constructor(readonly repository: SelfAwakeRepository, private readonly jobs: JobRepository, private readonly sessions: SessionService, private readonly onDecision: () => void = () => {}) {
+  constructor(readonly repository: SelfAwakeRepository, private readonly jobs: JobRepository, private readonly sessions: SessionService) {
     this.recovery = new SelfAwakeJobRecovery(repository.database, jobs, sessions)
   }
   get fault(): string | undefined { return this.error ?? this.repository.timerPublication.fault }
@@ -59,14 +59,11 @@ export class SelfAwakeService {
       try {
         const results = this.repository.pendingResults()
         for (const result of results) {
-          if (result.state !== 'completed') { this.repository.fail(result.id, `Self-awake input ${result.state}`); continue }
+          if (result.state !== 'completed') { this.repository.fail(result.id, this.repository.inputFailure(this.repository.read(result.id).sessionId, result.inputId, result.state)); continue }
           const run = this.repository.read(result.id)
           const text = this.repository.finalText(run.sessionId, result.turnId)
-          let decision
-          try { decision = selfAwakeDecisionSchema.parse(JSON.parse(text)) }
-          catch (error) { this.repository.fail(result.id, `Invalid self-awake decision: ${error instanceof Error ? error.message : String(error)}`); continue }
-          this.repository.finish(result.id, decision)
-          this.onDecision()
+          if (!text.trim()) { this.repository.fail(result.id, '自醒完成但没有日记正文'); continue }
+          this.repository.finish(result.id, text)
         }
         if (results.length === 100) this.wake()
       } catch (error) {

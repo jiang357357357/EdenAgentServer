@@ -10,11 +10,11 @@ import { randomUUID } from 'node:crypto'
 import type { SQLOutputValue } from 'node:sqlite'
 import type { EdenDatabase } from '@eden/store'
 import { selfAwakeListSchema, selfAwakeExecutionSchema, toJson } from '@eden/api'
-import type { JobInfo, JsonValue, SelfAwakeDecision } from '@eden/api'
+import type { JobInfo, JsonValue } from '@eden/api'
 
 export class SelfAwakeRepository {
   readonly timerPublication: SelfAwakeTimerPublication
-  constructor(readonly database: EdenDatabase, private readonly scheduleStateFile?: string, externalScheduler = Boolean(scheduleStateFile)) {
+  constructor(readonly database: EdenDatabase, private readonly scheduleStateFile?: string, private readonly externalScheduler = Boolean(scheduleStateFile)) {
     this.timerPublication = new SelfAwakeTimerPublication(database, scheduleStateFile, externalScheduler)
   }
   deadline(now = Date.now()) { return wakeDeadline(this.database, this.scheduleStateFile, now) }
@@ -61,7 +61,8 @@ export class SelfAwakeRepository {
     })
   }
 
-  finish(id: string, decision: SelfAwakeDecision): void {
+  finish(id: string, text: string): void {
+    if (!text.trim()) throw new Error('自醒日记正文不能为空')
     this.database.transaction(() => {
       const run = this.read(id)
       if (run.status !== 'running') return
@@ -69,9 +70,9 @@ export class SelfAwakeRepository {
       const author = object(run.authorSnapshot)
       this.database.connection.prepare(`INSERT INTO self_awake_diaries(id,run_id,session_id,assistant_id,character_id,title,content,mood,metadata_json,created_at)
         VALUES(?,?,?,?,?,?,?,?,?,?)`).run(randomUUID(), id, run.sessionId, String(author.assistantId ?? ''), String(author.characterId ?? ''),
-          decision.diary.title, decision.diary.content, decision.mood, JSON.stringify({ action: decision.action }), now)
-      this.database.connection.prepare("UPDATE self_awake_runs SET state=?,decision_json=?,completed_at=?,updated_at=? WHERE id=?")
-        .run(decision.action === 'write_diary' ? 'completed' : 'awaiting_action', JSON.stringify(decision), now, now, id)
+          '自醒日记', text, '', '{}', now)
+      this.database.connection.prepare("UPDATE self_awake_runs SET state='completed',decision_json=NULL,completed_at=?,updated_at=? WHERE id=?")
+        .run(now, now, id)
     })
   }
 
@@ -91,8 +92,18 @@ export class SelfAwakeRepository {
     const next = this.database.connection.prepare("SELECT due_at,payload_json FROM jobs WHERE kind='self_awake' AND state='queued' ORDER BY due_at LIMIT 1").get()
     const external = readExternalSchedule(this.scheduleStateFile)
     const local = next ? { status: 'scheduled', nextWakeAt: new Date(Number(next.due_at)).toISOString(), reason: String(object(JSON.parse(String(next.payload_json))).prompt ?? '') } : null
-    const schedule = local ?? external
+    const schedule = this.externalScheduler ? external : local
     return { schedule, count, page: input.page, pageSize: input.pageSize, totalPages: Math.ceil(count / input.pageSize), results: rows.map(row => this.fromRow(row)) }
+  }
+
+  inputFailure(sessionId: string, inputId: string, state: string): string {
+    const event = this.database.connection.prepare(`SELECT payload_json FROM events WHERE session_id=?
+      AND kind IN ('input.interrupted','input.failed','input.cancelled') AND json_extract(payload_json,'$.inputId')=?
+      ORDER BY seq DESC LIMIT 1`).get(sessionId, inputId)
+    const payload = event ? object(JSON.parse(String(event.payload_json))) : {}
+    const rawReason = payload.reason ?? payload.error
+    const reason = rawReason === 'Server restarted during execution' ? '服务在执行期间重启，原任务已中断' : rawReason
+    return `自醒输入未完成（${state}）${reason ? `：${String(reason)}` : ''}`
   }
 
   pendingResults(): { id: string; inputId: string; state: string; turnId: string }[] {
@@ -151,14 +162,17 @@ export class SelfAwakeRepository {
   private fromRow(row: Record<string, SQLOutputValue>) {
     const review = this.database.connection.prepare('SELECT decision,note,created_at FROM self_awake_run_reviews WHERE run_id=?').get(row.id!)
     const diaries = this.database.connection.prepare('SELECT * FROM self_awake_diaries WHERE run_id=? ORDER BY created_at,id').all(row.id!)
+    const lastError = row.last_error === 'Self-awake input interrupted' && row.input_id
+      ? this.inputFailure(String(row.session_id), String(row.input_id), 'interrupted')
+      : row.last_error === null ? null : String(row.last_error)
     return { id: String(row.id), jobId: String(row.job_id), sessionId: String(row.session_id), schemaVersion: 'self-awake.v1', eventId: String(row.event_id),
       outcomeReview: review ? { decision: String(review.decision), note: String(review.note), reviewedAt: Number(review.created_at) } : null,
       status: String(row.state), request: toJson(JSON.parse(String(row.request_json))), decision: row.decision_json === null ? null : toJson(JSON.parse(String(row.decision_json))),
-      authorSnapshot: toJson(JSON.parse(String(row.author_json))), attempts: Number(row.attempts), lastError: row.last_error === null ? null : String(row.last_error),
+      authorSnapshot: toJson(JSON.parse(String(row.author_json))), attempts: Number(row.attempts), lastError,
       startedAt: row.started_at === null ? null : Number(row.started_at), completedAt: row.completed_at === null ? null : Number(row.completed_at),
       createdAt: Number(row.created_at), updatedAt: Number(row.updated_at), diaries: diaries.map(diary => ({ id: String(diary.id), runId: String(diary.run_id),
         sessionId: String(diary.session_id), assistantId: String(diary.assistant_id), characterId: String(diary.character_id), title: String(diary.title),
-        content: String(diary.content), mood: String(diary.mood), metadata: toJson(JSON.parse(String(diary.metadata_json))), createdAt: Number(diary.created_at) })) }
+        content: diary.content === 'Self-awake input interrupted' && lastError ? lastError : String(diary.content), mood: String(diary.mood), metadata: toJson(JSON.parse(String(diary.metadata_json))), createdAt: Number(diary.created_at) })) }
   }
 }
 function object(value: unknown): Record<string, unknown> { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {} }

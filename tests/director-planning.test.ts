@@ -65,7 +65,7 @@ test('cancelling a pending director response creates no plan and does not retry'
 })
 
 test('director tool calls produce a deterministic fallback without executing the requested tool', async () => {
-  const setup = await fixture({ tool: 'eden_exec', input: { command: 'should never run' } })
+  const setup = await fixture({ tool: 'exec_command', input: { command: 'should never run' } })
   try {
     const run = await setup.planner.plan(setup.request)
     assert.equal(run.source, 'fallback')

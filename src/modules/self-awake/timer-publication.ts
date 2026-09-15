@@ -1,3 +1,4 @@
+import { publishWakeActivation } from './activation-publication.ts'
 import { mkdirSync, writeFileSync, renameSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import type { EdenDatabase } from '@eden/store'
@@ -18,7 +19,7 @@ export class SelfAwakeTimerPublication {
   }
   close() { clearInterval(this.timer); this.timer = undefined }
   publish(): void {
-    try { this.assertAvailable(); if (!this.stateFile) return; this.deliver(); this.error = undefined }
+    try { this.assertAvailable(); if (!this.stateFile) return; publishWakeActivation(this.database, this.stateFile); this.deliver(); this.error = undefined }
     catch (error) { this.error = `Self-awake timer saved, MonOs delivery pending: ${error instanceof Error ? error.message : String(error)}`; throw new Error(this.error) }
   }
   private deliver(): void {

@@ -1,3 +1,4 @@
+import { loadReply } from './integration/capabilities/load-reply.ts'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createServer } from 'node:http'
@@ -12,7 +13,8 @@ import { loadConfig } from '../src/bootstrap/config.ts'
 for (const scenario of ['approved', 'deny-read', 'deny-handoff']) {
   const allowed = scenario === 'approved'
   test(`production switch_assistant ${allowed ? 'schedules the approved target and resumes as it' : `does not schedule after ${scenario}`}`, { timeout: 15000 }, async t => {
-    const first = await recordedModel([{ tool: 'switch_assistant', input: { assistantId: 2 } }, { text: 'Original assistant finishes' }])
+    const script: Parameters<typeof recordedModel>[0] = [{ tool: 'switch_assistant', input: { assistantId: 2 } }, { text: 'Original assistant finishes' }]
+    const first = await recordedModel(script)
     t.after(() => first.close())
     const next = await recordedModel([{ text: 'New assistant begins' }])
     t.after(() => next.close())
@@ -40,6 +42,7 @@ for (const scenario of ['approved', 'deny-read', 'deny-handoff']) {
     const address = core.address(); assert.ok(address && typeof address !== 'string')
     const services = createServices(db, loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'mon', EDEN_AGENT_DATA_ROOT: root }))
     const session = services.repository.create('Switch tool', [{ assistantId: 1 }])
+    script.unshift(loadReply(services.sessions, 'switch_assistant'))
     const approvals: string[] = []
     services.repository.events.subscribe(event => {
       if (event.kind !== 'permission.requested') return
@@ -55,7 +58,7 @@ for (const scenario of ['approved', 'deny-read', 'deny-handoff']) {
       assert.equal(services.sessions.faultCount(), 0)
       assert.deepEqual(approvals, scenario === 'deny-read' ? ['mon.assistants.read'] : ['mon.assistants.read', 'assistant.handoff'])
       if (scenario === 'deny-read') assert.equal(targetReads, 0)
-      assert.equal(first.requests.length, 2)
+      assert.equal(first.requests.length, 3)
       assert.equal(next.requests.length, allowed ? 1 : 0)
       assert.equal(db.connection.prepare('SELECT COUNT(*) AS count FROM assistant_handoffs').get()?.count, allowed ? 1 : 0)
       if (allowed) {

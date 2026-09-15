@@ -26,11 +26,12 @@ export class PermissionService {
 
   async requestWithId(context: PermissionContext, capability: string, resource: string, details: JsonValue): Promise<string> {
     context.signal.throwIfAborted()
+    context.assertCurrent?.()
     const request: PermissionRequest = { id: randomUUID(), sessionId: context.sessionId, turnId: context.turnId,
       operationId: `${context.turnId}:${context.callId}`, capability, resource, details, state: 'pending', createdAt: Date.now() }
     if (this.modeStore.allows(capability) || this.repository.granted(request)) request.state = 'allowed'
     const event = this.repository.insert(request)
-    if (request.state === 'allowed') { this.repository.events.publish(event); return request.id }
+    if (request.state === 'allowed') { this.repository.events.publish(event); context.assertCurrent?.(); return request.id }
     await new Promise<void>((resolve, reject) => {
       const abort = () => {
         try { this.resolve(request.id, false, 'cancelled') }
@@ -44,6 +45,7 @@ export class PermissionService {
       this.repository.events.publish(event)
       if (context.signal.aborted && this.pending.has(request.id)) abort()
     })
+    context.assertCurrent?.()
     return request.id
   }
 
@@ -61,7 +63,7 @@ export class PermissionService {
     const waiter = this.pending.get(id)
     this.pending.delete(id)
     if (allowed) waiter?.resolve()
-    else waiter?.reject(new Error(`Permission ${deniedState}: ${request.capability}`))
+    else waiter?.reject(Object.assign(new Error(`Permission ${deniedState}: ${request.capability}`), { toolOutcome: deniedState === 'cancelled' ? 'cancelled' : 'failed' }))
     this.repository.events.publish(event)
   }
 

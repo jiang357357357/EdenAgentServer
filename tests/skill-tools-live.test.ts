@@ -41,7 +41,7 @@ test('legacy load_skill and subagent profiles read the same approved catalog wit
   await f.install(['user_chat'])
   assert.throws(() => captureRoleSkills(['echo-skill'], f.repository), /subagent profile/)
   assert.equal(f.tools('subagent').some(tool => tool.name === 'echo_skill'), false)
-  await assert.rejects(load.execute({ name: 'echo-skill' }, f.context), /profile/)
+  await assert.rejects(load.execute({ name: 'echo-skill' }, f.context), /当前会话场景/)
 })
 
 test('original skill code name waits for approval and executes JSON stdin in a real sandbox', async t => {

@@ -4,10 +4,11 @@ import { screenRequestSchema, cameraRequestSchema, toJson } from '@eden/api'
 import type { JsonValue } from '@eden/api'
 import type { RuntimeTool } from '@eden/runtime-pi'
 import type { MediaService } from './service.ts'
+import { mediaCaptureDescription } from '../../model-prompts/tool-descriptions.ts'
 export function mediaTools(service: MediaService, permissions: PermissionService, sessionId: string, turnId: string): RuntimeTool[] {
   return (['screen', 'camera'] as const).map(kind => ({
     name: kind === 'screen' ? 'analyze_screen' : 'capture_camera', revision: 'eden.media.v1', executionMode: 'sequential',
-    description: `Ask the user to approve and provide a ${kind} capture. Wait for the authenticated client; capture may be rejected.`,
+    description: mediaCaptureDescription(kind),
     parameters: toJson(z.toJSONSchema(kind === 'screen' ? screenRequestSchema : cameraRequestSchema)) as Record<string, JsonValue>,
     resultImages: (result, signal) => service.images(result, signal),
     async execute(raw, context) {

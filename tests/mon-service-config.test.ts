@@ -12,6 +12,7 @@ test('explicit Mon installation identity stays isolated and environment override
   try {
     assert.equal(monServiceIdentity('mon', monServiceConfig('mon', root, {}).env), undefined)
     const authFile = path.join(root, 'service-auth.env'), scheduleStateFile = path.join(root, 'state.json')
+    writeFileSync(scheduleStateFile, '{}')
     writeFileSync(authFile, 'MON_SERVICE_SHARED_SECRET="test-secret"\nMON_SERVICE_USER_ID=2\nUNRELATED_TOKEN=hidden\n')
     writeFileSync(path.join(root, 'mon-service.json'), JSON.stringify({ authFile, scheduleStateFile, coreBaseUrl: 'http://127.0.0.1:40011' }))
     const loaded = monServiceConfig('mon', root, {})
@@ -20,9 +21,7 @@ test('explicit Mon installation identity stays isolated and environment override
     assert.equal(loaded.env.UNRELATED_TOKEN, undefined)
     assert.equal(loaded.scheduleStateFile, scheduleStateFile)
     assert.deepEqual(monServiceConfig('local', root, {}), { env: {} })
-    const override = monServiceConfig('mon', root, { MON_SERVICE_USER_ID: '3' })
-    assert.equal(override.scheduleStateFile, undefined)
-    assert.throws(() => monServiceIdentity('mon', override.env))
+    assert.throws(() => monServiceConfig('mon', root, { MON_SERVICE_USER_ID: '3' }), /缺少 MON_SERVICE_SHARED_SECRET/)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

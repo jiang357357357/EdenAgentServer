@@ -7,7 +7,7 @@ import type { AcceptedInput, SessionInput, SessionTurnExtension, SessionBoundary
 import { SessionRepository } from './session-repository.ts'
 import { InputRepository } from './input/input-repository.ts'
 import { runtimeCallbacks } from './turn/runtime-callbacks.ts'
-import { sessionPrompt } from './turn/session-prompt.ts'
+import { sessionPromptContent } from './turn/session-prompt.ts'
 import { SignalRepository } from './input/signal-repository.ts'
 import { modelDescriptor, assertModelSnapshot } from './turn/model-snapshot.ts'
 import { inputAttachments, type AttachmentService } from '../attachments/index.ts'
@@ -196,8 +196,11 @@ export class SessionService {
     const checkpoint = this.repository.checkpoint(input.sessionId)
     const images = await this.imagesFor(input)
     this.controllers.get(input.sessionId)?.signal.throwIfAborted()
+    const context = sessionPromptContent(input.metadata ?? {})
+    const memory = this.memoryRecall?.prompt(input.sessionId, input.turnId, input.text) ?? ''
     const runtime = createRuntime({
-      sessionId: input.sessionId, systemPrompt: sessionPrompt(input.metadata ?? {}) + (this.memoryRecall?.prompt(input.sessionId, input.turnId, input.text) ?? ''),
+      sessionId: input.sessionId, systemPrompt: context.prompt + memory,
+      contextSources: toJson([...context.sources, { kind: 'memory', title: '召回记忆', content: memory }]) as JsonValue[],
       model, tools: this.tools(input.sessionId, input.turnId), refreshTools: () => this.tools(input.sessionId, input.turnId), transientInput,
       callbacks: runtimeCallbacks(this.repository, input, { privateUserInput: transientInput }),
       ...(checkpoint ? { checkpoint } : {}),
@@ -282,11 +285,14 @@ export class SessionService {
   runningCount(): number { return this.tasks.size }
   faultCount(): number { return this.faults.size }
   toolCatalog() {
-    return this.tools('00000000-0000-4000-8000-000000000000', '00000000-0000-4000-8000-000000000000').map(tool => ({
-      name: tool.name, label: tool.name, description: tool.description, parameters: tool.parameters,
-      source: tool.name.startsWith('plugin_') ? 'plugin' : 'builtin', version: tool.revision,
-      namespace: tool.name.startsWith('plugin_') ? 'plugin' : 'eden', executionMode: tool.executionMode ?? 'parallel', exposure: 'direct',
-    }))
+    return this.tools('00000000-0000-4000-8000-000000000000', '00000000-0000-4000-8000-000000000000').map(tool => {
+      if (tool.parameters.type !== 'object') throw new Error(`Tool "${tool.name}" parameters must have an object root`)
+      return {
+        name: tool.name, label: tool.name, description: tool.description, parameters: tool.parameters,
+        source: tool.source ?? 'builtin', version: tool.revision,
+        namespace: tool.source ?? 'builtin', executionMode: tool.executionMode ?? 'sequential', exposure: tool.exposure ?? 'direct',
+      }
+    })
   }
   async close(): Promise<void> {
     this.closed = true

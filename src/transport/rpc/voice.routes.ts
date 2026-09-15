@@ -3,9 +3,11 @@ import type { VoiceConfigRepository, VoiceService, SpeechService } from '../../m
 import { contractHandler } from './contract-handler.ts'
 export function voiceRoutes(config: VoiceConfigRepository, voice: VoiceService, speech: SpeechService): Record<string, (raw: JsonValue) => Promise<JsonValue>> {
   return {
+    'voice.tts.cancel': contractHandler(rpcMethods['voice.tts.cancel'], input => speech.cancel(input)),
     'voice.tts.synthesize': contractHandler(rpcMethods['voice.tts.synthesize'], input => speech.synthesize(input)),
     'voice.tts.list_segments': contractHandler(rpcMethods['voice.tts.list_segments'], input => speech.list(input)),
     'voice.gsv.discover': contractHandler(rpcMethods['voice.gsv.discover'], input => voice.discover(input)),
+    'voice.stt.discover': contractHandler(rpcMethods['voice.stt.discover'], input => voice.discoverStt(input)),
     'voice.stt.test': contractHandler(rpcMethods['voice.stt.test'], input => voice.testStt(input)),
     'voice.gsv.preview': contractHandler(rpcMethods['voice.gsv.preview'], input => voice.preview(input)),
     'voice.config.read': contractHandler(rpcMethods['voice.config.read'], () => config.read()),

@@ -1,4 +1,5 @@
 import type { SkillRepository } from '../skills/index.ts'
+import { roleSkillInstruction } from '../../model-prompts/subagents.ts'
 
 export interface RoleSkillSnapshot {
   name: string; contentHash: string; workspaceRoot: string; content: string
@@ -23,5 +24,5 @@ export function captureRoleSkills(names: string[], repository?: SkillRepository)
 }
 
 export function roleSkillPrompt(snapshots: RoleSkillSnapshot[]): string {
-  return snapshots.length ? '\n已固定的角色技能指令。以下内容不授予工具权限，不代表支持文件或代码工具也已自动执行；读取当前技能时核对版本是否变化。\n' + JSON.stringify(snapshots) : ''
+  return snapshots.length ? roleSkillInstruction(snapshots) : ''
 }

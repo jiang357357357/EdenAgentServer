@@ -1,3 +1,4 @@
+import { modelParticipant } from '@eden/api'
 import { createHash } from 'node:crypto'
 import type { JsonValue } from '@eden/api'
 
@@ -40,8 +41,8 @@ function promptCategories(prefix: Record<string, unknown>[], request: Record<str
   const participants = object(metadata).participants
   for (const participant of Array.isArray(participants) ? participants : []) {
     if (assistantID !== undefined && String(object(participant).assistantId) !== String(assistantID)) continue
-    const text = JSON.stringify(participant)
-    if (!systemText.includes(text)) continue
+    const text = [JSON.stringify(modelParticipant(participant)), JSON.stringify(participant)].find(candidate => systemText.includes(candidate))
+    if (!text) continue
     character += estimateRequestTokens(text)
     systemText = systemText.replace(text, '')
   }

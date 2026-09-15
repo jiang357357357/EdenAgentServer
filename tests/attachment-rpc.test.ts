@@ -26,7 +26,7 @@ function rpc(client: WebSocket, method: string, params: unknown): Promise<Record
 test('HTTP upload and authenticated RPC accept attachment-only input, execute file reads and replay after restart', async context => {
   const data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII='
   const read = { action: 'read', blobId: '' }
-  const model = await recordedModel([{ tool: 'eden_attachment', input: read }, { text: 'Read both attachments' }])
+  const model = await recordedModel([{ tool: 'read_attachment', input: read }, { text: 'Read both attachments' }])
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-attachment-rpc-'))
   const config = { ...loadConfig({ EDEN_AGENT_DATA_ROOT: root, EDEN_AGENT_PORT: '0' }), model: model.config }
   let server = await startServer(config)

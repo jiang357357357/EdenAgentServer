@@ -11,7 +11,8 @@ export class SkillRepository {
   constructor(private readonly database: EdenDatabase, private readonly workspace: () => string = () => '', private readonly contributions: () => ContributedSkill[] = () => [],
     private readonly capabilities: () => SkillCapabilities = () => ({ tools: [], codeToolsAvailable: false }),
     private readonly systemSkills: () => readonly SkillSnapshot[] = () => [],
-    private readonly projectSkills: () => readonly SkillSnapshot[] = () => []) {}
+    private readonly projectSkills: () => readonly SkillSnapshot[] = () => [],
+    private readonly builtinSkills: () => readonly SkillSnapshot[] = () => []) {}
   target(scope: string): string {
     if (scope === 'user') return ''
     if (scope !== 'project') throw new Error('Unsupported skill scope')
@@ -74,7 +75,7 @@ export class SkillRepository {
     const capabilities = this.capabilities(), host = new Set(capabilities.tools)
     const local = new Set(capabilities.codeToolsAvailable ? (data.codeTools ?? []).map(tool => tool.name) : [])
     return data.tools.map(tool => ({ name: tool, alternatives: [
-      ...(host.has(tool) ? [tool] : []), ...(local.has(tool) && host.has('run_skill_tool') ? [tool, 'run_skill_tool'] : []),
+      ...(host.has(tool) ? [tool] : []), ...(local.has(tool) && host.has(tool) ? [tool] : []),
     ] }))
   }
   file(name: string, filename: string, expected: Expected = {}) {
@@ -143,7 +144,9 @@ export class SkillRepository {
     })
   }
   private systemRows(): Row[] {
-    return this.systemSkills().map(data => {
+    const configured = this.systemSkills()
+    const names = new Set(configured.map(skill => skill.name))
+    return [...configured, ...this.builtinSkills().filter(skill => !names.has(skill.name))].map(data => {
       const saved = this.database.connection.prepare('SELECT value_json FROM runtime_settings WHERE key=?').get(`skill.system.enabled:${data.name}`)
       const enabled: unknown = saved ? JSON.parse(String(saved.value_json)) : true
       if (typeof enabled !== 'boolean') throw new Error('Invalid persisted system skill enabled state')

@@ -15,7 +15,7 @@ async function fixture(context: test.TestContext) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-attachment-tool-'))
   const database = new EdenDatabase(path.join(root, 'test.sqlite'), 'local')
   const readInput = { action: 'read', blobId: '' }
-  const model = await recordedModel([{ tool: 'eden_attachment', input: { action: 'list' } }, { tool: 'eden_attachment', input: readInput }, { text: 'Finished' }])
+  const model = await recordedModel([{ tool: 'read_attachment', input: { action: 'list' } }, { tool: 'read_attachment', input: readInput }, { text: 'Finished' }])
   const config = { ...loadConfig({ EDEN_AGENT_DATA_ROOT: root }), model: model.config }
   const services = createServices(database, config)
   context.after(async () => {
@@ -60,7 +60,7 @@ test('attachment reader paginates Unicode text and binary without crossing activ
   await assert.rejects(run({ action: 'read', blobId: binary.id }), /UTF-8/)
   assert.deepEqual(await run({ action: 'read', blobId: binary.id, encoding: 'base64', offset: 1, limit: 2 }), { blobId: binary.id, encoding: 'base64', offsetUnit: 'bytes', content: 'AIE=', nextOffset: 3 })
   const unrelated = await f.services.blobs.put(Buffer.from('other file'), 'text/plain')
-  await assert.rejects(run({ action: 'read', blobId: unrelated.id }), /current input/)
+  await assert.rejects(run({ action: 'read', blobId: unrelated.id }), /当前输入/)
   const other = f.services.repository.create('Other session')
   const foreign = attachmentTool(new AttachmentRepository(f.database), f.services.attachments, other.id, input.turnId)
   await assert.rejects(foreign.execute({ action: 'list' }, { callId: 'foreign', signal: new AbortController().signal }), /active input/)

@@ -50,9 +50,10 @@ export class SelfAwakeBridgeRepository {
     const status = ['queued', 'preparing'].includes(state) ? 'pending'
       : ['running', 'dispatched', 'awaiting_action', 'action_running'].includes(state) ? 'running'
       : state === 'completed' ? 'completed' : 'failed'
+    const diary = run && state === 'completed' ? this.database.connection.prepare('SELECT title,content FROM self_awake_diaries WHERE run_id=?').get(run.id!) : undefined
     return { id: run ? String(run.id) : id, status,
       started_at: run?.started_at == null ? null : new Date(Number(run.started_at)).toISOString(),
-      decision_payload: run?.decision_json ? JSON.parse(String(run.decision_json)) : null,
+      decision_payload: run?.decision_json ? JSON.parse(String(run.decision_json)) : diary ? { diary: { title: String(diary.title), content: String(diary.content) } } : null,
       error: run?.last_error ?? job.error, updated_at: new Date(Number(run?.updated_at ?? job.updatedAt)).toISOString() }
   }
 }

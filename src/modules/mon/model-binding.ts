@@ -179,6 +179,38 @@ export class MonBindingService {
     return deliverOwnerEmail(this.sessions.repository.database, this.assistantClient(sessionId), sessionId, raw, signal)
   }
 
+  listEsp32Devices(sessionId: string, signal: AbortSignal) {
+    return this.assistantClient(sessionId).getCollection('/api/agent/devices/esp32/', signal)
+  }
+
+  async issueEsp32Command(sessionId: string, raw: JsonValue, signal: AbortSignal) {
+    let request = raw
+    const identityActions = new Set(['call.start', 'message.send', 'notification.show'])
+    if (raw && typeof raw === 'object' && !Array.isArray(raw) && typeof raw.action === 'string' && identityActions.has(raw.action)) {
+      const assistantId = Number(this.assistantId(sessionId))
+      if (!Number.isSafeInteger(assistantId) || assistantId <= 0) {
+        throw new Error('当前 Agent 会话没有可用于 ESP 联系设备的 Core 助手身份')
+      }
+      const argumentsValue = raw.arguments && typeof raw.arguments === 'object' && !Array.isArray(raw.arguments)
+        ? raw.arguments
+        : {}
+      request = toJson({ ...raw, arguments: { ...argumentsValue, assistant_id: assistantId } })
+    }
+    try {
+      return await this.assistantClient(sessionId).post('/api/agent/devices/esp32/commands/', request, signal)
+    } catch (error) {
+      if (!(error instanceof MonHttpError)) throw error
+      if (error.status === 404) throw new Error('ESP32 设备不存在或不属于当前用户')
+      if (error.status === 409) throw new Error('ESP32 设备当前离线，请先检查设备连接')
+      if (error.status === 400) throw new Error('ESP32 拒绝了参数、助手身份不可用或设备尚未声明该控制能力')
+      throw error
+    }
+  }
+
+  esp32CommandStatus(sessionId: string, commandId: string, signal: AbortSignal) {
+    return this.assistantClient(sessionId).get(`/api/agent/devices/esp32/commands/${encodeURIComponent(commandId)}/`, signal)
+  }
+
   realtimeSttUrl(sessionId: string): string { return this.assistantClient(sessionId).realtimeSttUrl() }
 
   async synthesizeSpeech(input: VoiceSynthesizeInput, signal: AbortSignal) {

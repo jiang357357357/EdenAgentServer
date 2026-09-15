@@ -7,21 +7,22 @@ import type { RuntimeTool } from '@eden/runtime-pi'
 import type { JobRepository } from '../jobs/index.ts'
 import type { PermissionService } from '../permissions/index.ts'
 import type { SelfAwakeRepository } from './repository.ts'
+import { toolDescription } from '../../model-prompts/tool-descriptions.ts'
 
 export function selfAwakeTools(repository: SelfAwakeRepository, jobs: JobRepository, permissions: PermissionService, activity: SelfAwakeContext, sessionId: string, turnId: string): RuntimeTool[] {
   return [{
     name: 'set_self_awake_timer', revision: 'eden.self-awake.v1', executionMode: 'sequential',
-    description: 'Schedule a future activation in this session after approval. Repeated autonomous scheduling is limited to eight generations. Use an ISO date, millisecond timestamp, or afterMinutes.',
+    description: toolDescription('set_self_awake_timer'),
     parameters: toJson(z.toJSONSchema(selfAwakeTimerSchema, { io: 'input' })) as Record<string, JsonValue>,
     async execute(raw, context) {
       const input = selfAwakeTimerSchema.parse(raw)
       repository.timerPublication.assertAvailable()
       const requestedAt = input.at ?? Date.now() + input.afterMinutes! * 60000
-      if (requestedAt <= Date.now() || requestedAt > Date.now() + 10080 * 60000) throw new Error('Self-awake timer must be within the next seven days')
+      if (requestedAt <= Date.now() || requestedAt > Date.now() + 10080 * 60000) throw new Error('自醒时间必须在未来七天以内')
       const dueAt = Math.min(requestedAt, repository.deadline())
       const parent = repository.parentJob(sessionId, turnId)
       const depth = parent ? parent.depth + 1 : 0
-      if (depth > 8) throw new Error('Self-awake scheduling depth exceeded; a new user instruction is required')
+      if (depth > 8) throw new Error('自醒连续安排深度已超过限制，需要新的用户指令')
       await permissions.request({ ...context, sessionId, turnId }, 'job.schedule', `self-awake:${sessionId}`, toJson({ dueAt, reason: input.reason, depth }))
       context.signal.throwIfAborted()
       const job = jobs.schedule({ kind: 'self_awake', sessionId, dueAt,
@@ -32,7 +33,7 @@ export function selfAwakeTools(repository: SelfAwakeRepository, jobs: JobReposit
     },
   }, {
     name: 'get_self_awake_context', revision: 'eden.self-awake.v1', executionMode: 'sequential',
-    description: 'Read one self-awake context section: request, desktop_window, desktop_session, audio_state, recent_events, recent_diaries or recent_contacts. Check snapshot age; missing data is unknown.',
+    description: toolDescription('get_self_awake_context'),
     parameters: toJson(z.toJSONSchema(selfAwakeContextSchema, { io: 'input' })) as Record<string, JsonValue>,
     async execute(raw, context) {
       return activity.read(sessionId, turnId, raw, context.signal)

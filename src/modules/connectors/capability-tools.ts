@@ -9,28 +9,29 @@ import type { ConnectorCatalog } from './catalog.ts'
 import type { ConnectorLifecycle } from './lifecycle.ts'
 import { capabilityInput } from './capability-input.ts'
 import { WorkerRemoteError } from './worker-channel.ts'
+import { connectorCapabilityDescription } from '../../model-prompts/tool-descriptions.ts'
 const inputSchema = z.object({ connectorId: z.string().uuid(), capability: z.string().min(1).max(128), payload: jsonValue.default({}) }).strict()
 export function connectorCapabilityTools(database: EdenDatabase, connectors: ConnectorRepository, catalog: ConnectorCatalog,
   lifecycle: ConnectorLifecycle, permissions: PermissionService, sessionId: string, turnId: string): RuntimeTool[] {
   return (['query', 'execute'] as const).map(method => ({
     name: method === 'query' ? 'query_connector' : 'execute_connector', revision: 'eden.connectors.capabilities.v1', executionMode: 'sequential',
-    description: `${method === 'query' ? 'Query' : 'Execute'} a declared capability on a connector bound to this session, after approval. Failed or unknown actions must not be automatically repeated.`,
+    description: connectorCapabilityDescription(method),
     parameters: toJson(z.toJSONSchema(inputSchema, { io: 'input' })) as Record<string, JsonValue>,
     async execute(raw, context) {
       const input = inputSchema.parse(raw), current = connectors.read(input.connectorId)
-      if (current.settings.boundSessionId !== sessionId) throw new Error('Connector is not bound to this session')
+      if (current.settings.boundSessionId !== sessionId) throw new Error('该连接器未绑定到当前会话')
       const descriptor = catalog.descriptor(current.connectorKey)
       const schema = descriptor.manifest[method === 'query' ? 'queries' : 'actions'][input.capability]
-      if (!schema) throw new Error('Connector capability is not declared')
+      if (!schema) throw new Error('连接器未声明该能力')
       const payload = toJson(capabilityInput(schema).parse(input.payload))
-      if (JSON.stringify(payload).length > 65536) throw new Error('Connector capability input exceeds limit')
+      if (JSON.stringify(payload).length > 65536) throw new Error('连接器能力输入超过长度限制')
       await permissions.request({ ...context, sessionId, turnId }, `connector.${method}`, `${current.id}:${input.capability}`,
         { generation: current.generation, revision: descriptor.revision, payload })
       context.signal.throwIfAborted()
       const updated = connectors.read(current.id)
-      if (updated.generation !== current.generation || updated.settings.boundSessionId !== sessionId) throw new Error('Connector changed during approval')
+      if (updated.generation !== current.generation || updated.settings.boundSessionId !== sessionId) throw new Error('连接器在审批期间发生变化，请重新提交')
       const operationId = `${turnId}:${context.callId}`, db = database.connection
-      if (db.prepare('SELECT 1 FROM connector_operations WHERE id=?').get(operationId)) throw new Error('Connector operation already exists; inspect its outcome before retrying')
+      if (db.prepare('SELECT 1 FROM connector_operations WHERE id=?').get(operationId)) throw new Error('连接器操作已经存在；重试前请先检查其结果')
       db.prepare("INSERT INTO connector_operations VALUES(?,?,?,?,?,?,'running',NULL,NULL,?,?)")
         .run(operationId, current.id, sessionId, current.generation, method, JSON.stringify({ capability: input.capability, payload }), Date.now(), Date.now())
       try {
@@ -40,7 +41,8 @@ export function connectorCapabilityTools(database: EdenDatabase, connectors: Con
       } catch (error) {
         db.prepare('UPDATE connector_operations SET state=?,error=?,updated_at=? WHERE id=?').run(error instanceof WorkerRemoteError ? 'failed' : 'unknown',
           error instanceof WorkerRemoteError ? 'Worker rejected this capability call' : 'Connector call outcome was not confirmed', Date.now(), operationId)
-        throw error
+        throw Object.assign(new Error(error instanceof Error ? error.message : String(error), { cause: error }),
+          { toolOutcome: error instanceof WorkerRemoteError ? 'failed' : 'unknown' })
       }
     },
   }))

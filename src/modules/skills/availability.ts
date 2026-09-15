@@ -4,7 +4,6 @@ export interface SkillCapabilities { tools: readonly string[]; codeToolsAvailabl
 
 export function skillAvailability(skill: Pick<SkillSnapshot, 'tools' | 'codeTools'>, capabilities: SkillCapabilities) {
   const known = new Set(capabilities.tools)
-  if (capabilities.codeToolsAvailable) for (const tool of skill.codeTools ?? []) known.add(tool.name)
   const missingTools = skill.tools.filter(name => !known.has(name))
   return { available: missingTools.length === 0, missingTools }
 }

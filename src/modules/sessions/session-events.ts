@@ -1,3 +1,4 @@
+import { historicalContextSources } from './context-sources.ts'
 import { RequestPersistence } from './request-persistence.ts'
 import { StreamPersistence, restoreStreamPayload } from './stream-persistence.ts'
 import { randomUUID } from 'node:crypto'
@@ -44,6 +45,18 @@ export class SessionEvents {
     statement.setReadBigInts(true)
     const restored = new Map<string, DurableEvent>()
     return statement.all(sessionId, BigInt(afterSeq), Math.min(limit, 1001)).map(row => this.restore(eventFromRow(row), restored))
+  }
+
+  latestContextRequests(sessionId: string): DurableEvent[] {
+    const statement = this.database.connection.prepare(`SELECT * FROM events WHERE session_id=? AND seq IN
+      (SELECT MAX(seq) FROM events WHERE session_id=? AND kind='model.request'
+       GROUP BY COALESCE(CAST(json_extract(payload_json,'$.actor.assistantID') AS TEXT),''))
+      ORDER BY seq DESC LIMIT 32`)
+    statement.setReadBigInts(true)
+    return statement.all(sessionId, sessionId).map(row => {
+      const event = this.restore(eventFromRow(row), new Map())
+      return { ...event, payload: historicalContextSources(event.payload) }
+    })
   }
 
   private restore(event: DurableEvent, cache: Map<string, DurableEvent>, depth = 0): DurableEvent {

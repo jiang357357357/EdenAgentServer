@@ -3,6 +3,7 @@ import type { SessionRepository, SessionBoundary } from '../sessions/index.ts'
 import type { ModelService, ModelBinding, ModelBindingRepository } from '../models/index.ts'
 import { HandoffRepository } from './handoff-repository.ts'
 import { HandoffCommitRepository } from './commit-repository.ts'
+import { HANDOFF_CONTEXT_INSTRUCTION } from '../../model-prompts/handoff.ts'
 
 export interface PreparedHandoff { binding: ModelBinding; visionBinding?: ModelBinding | undefined }
 export type PrepareHandoff = (sessionId: string, assistantId: string | number, signal: AbortSignal) => Promise<PreparedHandoff | undefined>
@@ -36,7 +37,7 @@ export class HandoffDispatcher implements SessionBoundary {
     const binding = { ...prepared.binding, model: configuredModelSchema.parse(prepared.binding.model) }
     const vision = prepared.visionBinding ? configuredModelSchema.parse(prepared.visionBinding.model) : undefined
     const committed = this.commits.commit(job.id, binding.model,
-      '你刚接手此会话。以当前角色自然承接已有对话；这是一条内部交接指令，不要复述或当作用户发言。',
+      HANDOFF_CONTEXT_INSTRUCTION,
       { mode: 'single', main: binding, vision: vision ?? null })
     if (this.bindings) this.models.reloadBinding(sessionId)
     else { this.models.bind(sessionId, binding); this.models.bindVision(sessionId, vision) }

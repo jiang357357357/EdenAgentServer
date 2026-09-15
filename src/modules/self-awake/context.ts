@@ -1,10 +1,11 @@
 import { z } from 'zod'
-import { toJson } from '@eden/api'
+import { toJson, modelParticipant } from '@eden/api'
 import type { JsonValue } from '@eden/api'
 import { MonClient, acquireMonServiceToken } from '@eden/integrations'
 import type { MonServiceIdentity } from '@eden/integrations'
 import type { SessionRepository } from '../sessions/index.ts'
 import type { SelfAwakeRepository } from './repository.ts'
+import { SELF_AWAKE_INTERPRETATIONS } from '../../model-prompts/self-awake.ts'
 
 export const selfAwakeContextSchema = z.object({
   section: z.enum(['request', 'desktop_window', 'desktop_session', 'audio_state', 'recent_events', 'recent_diaries', 'recent_contacts']).default('request'),
@@ -18,19 +19,19 @@ export class SelfAwakeContext {
     signal.throwIfAborted()
     const session = this.sessions.read(sessionId)
     if (session.status !== 'active') throw new Error('Self-awake context requires an active session')
-    if (input.section === 'request') return toJson(this.repository.context(sessionId, turnId))
+    if (input.section === 'request') return modelSelfAwakeContext(toJson(this.repository.context(sessionId, turnId)))
     const environment = object(session.environment)
     const owner = this.sessions.origin === 'mon' && this.identity && environment.sessionPurpose === 'self_awake' && environment.selfAwakeUserId === this.identity.userId
       && this.repository.ownsBackgroundSession(sessionId, this.identity.userId) ? this.identity : undefined
     const user = owner?.userId ?? ''
     if (input.section === 'recent_diaries') return toJson({
       section: input.section, source: 'agent.diaries',
-      diaries: this.repository.recentDiaries(sessionId, user, input.limit), interpretation: 'Historical attributed notes, not current observations. A different author’s experience is not your own.'
+      diaries: this.repository.recentDiaries(sessionId, user, input.limit), interpretation: SELF_AWAKE_INTERPRETATIONS.diaries
     })
     if (input.section === 'recent_contacts') return toJson({
       section: input.section, source: 'agent.contact_receipts',
-      contacts: this.repository.recentContacts(sessionId, user, input.limit),
-      interpretation: 'Local receipt summaries, not a remote inbox. Queued, accepted, delivered, displayed and dismissed are distinct; none proves a user response. Manual historical decisions are identified separately. Unknown outcomes require review before sending again.'
+      contacts: this.repository.recentContacts(sessionId, user, input.limit).map(contact => ({ ...contact, author: contact.author === null ? null : modelParticipant(contact.author) })),
+      interpretation: SELF_AWAKE_INTERPRETATIONS.contacts
     })
     if (!owner) throw new Error('Personal activity context requires the owning Mon background session')
     return await activityContext(owner, signal, input)
@@ -51,8 +52,19 @@ async function activityContext(owner: MonServiceIdentity, signal: AbortSignal, i
   return toJson({
     section: input.section, source: 'core.activity-presence', available: snapshot.available === true,
     captured_at: snapshot.captured_at ?? null, received_at: snapshot.received_at ?? null, ageMs: age, stale: age === null || age > 180000, data,
-    interpretation: 'Last reported snapshot, not a live sensor probe. Null or unavailable means unknown. False means inactive only at capture time. No audio content is provided; do not infer speech or intent.'
+    interpretation: SELF_AWAKE_INTERPRETATIONS.activity
   })
 }
 
 function object(value: unknown): Record<string, JsonValue> { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, JsonValue> : {} }
+
+/** Project only model tool output; persisted audit snapshots remain complete. */
+export function modelSelfAwakeContext(value: JsonValue): JsonValue {
+  const context = object(value)
+  if (!context.run) return value
+  const run = object(context.run), request = object(run.request)
+  return { ...context, run: { ...run,
+    authorSnapshot: run.authorSnapshot == null ? null : modelParticipant(run.authorSnapshot),
+    request: { ...request, author: request.author == null ? null : modelParticipant(request.author) },
+  } }
+}

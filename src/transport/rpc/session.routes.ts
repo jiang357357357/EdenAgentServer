@@ -26,6 +26,11 @@ export function sessionRoutes(service: SessionService): Record<string, (params: 
       return toJson(repository.list(params.limit, params.includeClosed, params.includeBackground))
     },
     'session.read': value => toJson(repository.read(sessionIdSchema.parse(value).sessionId)),
+    'session.context': value => {
+      const { sessionId } = sessionIdSchema.parse(value)
+      repository.read(sessionId)
+      return { requests: repository.events.latestContextRequests(sessionId).map(wireEvent) }
+    },
     'session.rename': value => { const params = sessionTitleSchema.parse(value); return toJson(repository.rename(params.sessionId, params.title)) },
     'session.set_participants': async value => {
       const params = sessionParticipantsSchema.parse(value)

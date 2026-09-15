@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { MonClient } from '@eden/integrations'
+import { MonClient, MonHttpError } from '@eden/integrations'
 import { coreSettingsSchema } from '../src/modules/mon/model-schema.ts'
 import { loadMonCatalog } from '../src/modules/mon/model-catalog.ts'
 
@@ -23,4 +23,14 @@ test('invalid Core settings report an upstream configuration error without leaki
     assert.doesNotMatch(error.message, /private-fixture|Invalid request parameters/)
     return true
   })
+})
+
+test('a removed session assistant is reported as an actionable identity error', async () => {
+  const client = new MonClient('http://127.0.0.1:1', 'fixture-only')
+  client.get = async endpoint => {
+    if (endpoint === '/api/assistants/21/') throw new MonHttpError(404)
+    return {}
+  }
+  client.getCollection = async () => []
+  await assert.rejects(loadMonCatalog(client, 21), /会话助手（ID：21）已不在 Mon Core 中，请为本会话重新选择助手。/)
 })

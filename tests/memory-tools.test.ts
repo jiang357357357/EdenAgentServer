@@ -72,7 +72,7 @@ test('memory tools use the actual actor scope, enforce subagent read-only access
     { callId: 'memory-call', signal: new AbortController().signal })
   assert.deepEqual(await execute(make(1), 'search_memories', {}), [])
   assert.equal((await execute(make(2, '/root/child'), 'search_memories', {}) as unknown[]).length, 1)
-  await assert.rejects(execute(make(2, '/root/child'), 'forget_memory', { id: initial.id }), /Subagents/)
+  await assert.rejects(execute(make(2, '/root/child'), 'forget_memory', { id: initial.id }), /子智能体/)
   await assert.rejects(execute(make(1), 'forget_memory', { id: initial.id }), /scope/)
   f.services.repository.events.subscribe(event => {
     if (event.kind !== 'permission.requested') return

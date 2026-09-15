@@ -57,11 +57,14 @@ export function attachWebsocket(server: HttpServer, config: ServerConfig, sessio
     let pendingCount = 0
     client.on('message', (data, binary) => {
       if (binary || ++pendingCount > 64) { client.close(1008, 'Request queue limit exceeded'); return }
-      pending = pending.then(async () => {
+      let raw: unknown
+      try { raw = JSON.parse(data.toString()) }
+      catch { pendingCount--; send({ jsonrpc: '2.0', id: null, result: null, error: { code: -32700, message: 'Invalid JSON' } }); return }
+      // Speech jobs and their cancellation must not block each other on this socket.
+      const independentSpeech = initialized && typeof raw === 'object' && raw !== null &&
+        'method' in raw && (raw.method === 'voice.tts.cancel' || raw.method === 'voice.tts.synthesize')
+      const task = (independentSpeech ? Promise.resolve() : pending).then(async () => {
         if (client.readyState !== WebSocket.OPEN) return
-        let raw: unknown
-        try { raw = JSON.parse(data.toString()) }
-        catch { send({ jsonrpc: '2.0', id: null, result: null, error: { code: -32700, message: 'Invalid JSON' } }); return }
         const response = await router.dispatch(raw)
         if (response) {
           send(response)
@@ -69,6 +72,7 @@ export function attachWebsocket(server: HttpServer, config: ServerConfig, sessio
             typeof response.result === 'object' && !Array.isArray(response.result) && response.result.serverName) initialized = true
         }
       }).catch(() => { client.close(1011, 'RPC processing failed') }).finally(() => { pendingCount-- })
+      if (!independentSpeech) pending = task
     })
     client.on('close', unsubscribe)
     client.on('error', unsubscribe)

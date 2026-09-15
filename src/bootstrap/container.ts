@@ -1,3 +1,5 @@
+import { UiPreferenceRepository } from '../modules/ui-preferences/index.ts'
+import { uiPreferenceRoutes } from '../transport/rpc/ui-preferences.routes.ts'
 import { operationRoutes } from '../transport/rpc/operation.routes.ts'
 import { commandRoutes } from '../transport/rpc/command.routes.ts'
 import { mcpRoutes } from '../transport/rpc/mcp.routes.ts'
@@ -64,6 +66,7 @@ export async function startServer(config: ServerConfig) {
     'plugin.hook.resubmit': contractHandler(rpcMethods['plugin.hook.resubmit'], input => services.pluginHooks.resubmit(input.id, input.expectedUpdatedAt, input.note)),
     'runtime.status': contractHandler(rpcMethods['runtime.status'], () => ({ mode: 'runtime', runtimeOrigin: config.origin, automaticExecution: true })),
     ...operationRoutes(services.repository), ...commandRoutes(services.commands), ...mcpRoutes(services.mcp, database, services.mcpResults), ...connectorRoutes(services.connectorCatalog, services.connectors, services.connectorEvents, services.connectorPermissions, services.connectorCredentials), ...mediaRoutes(services.media), ...voiceRoutes(services.voiceConfig, services.voice, services.speech), ...subagentRoutes(services.subagents), ...memoryExtractionRoutes(memoryExtractions), ...memoRoutes(services.memos, services.memoNotifications),
+    ...uiPreferenceRoutes(new UiPreferenceRepository(database)),
     ...notificationRoutes(services.desktopReminders),
     ...selfAwakeRoutes(services.selfAwake.repository, services.selfAwakeActions, services.selfAwake),
     ...directorRoutes(directors), ...jobRoutes(services.jobs),

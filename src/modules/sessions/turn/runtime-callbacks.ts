@@ -90,11 +90,11 @@ export function runtimeCallbacks(repository: SessionRepository, input: SessionIn
       })
       repository.events.publish(event)
     },
-    async afterTool(callId, result, failed) {
+    async afterTool(callId, result, failed, outcome = failed ? 'failed' : 'completed') {
       const event = repository.database.transaction(() => {
         repository.database.connection.prepare('UPDATE tool_operations SET state=?, result_json=?, error_json=?, updated_at=? WHERE id=?')
-          .run(failed ? 'failed' : 'completed', JSON.stringify(result), failed ? JSON.stringify(result) : null, Date.now(), `${input.turnId}:${callId}`)
-        return repository.events.insert(input.sessionId, input.turnId, 'operation.completed', scoped({ callId, result, failed }))
+          .run(outcome, JSON.stringify(result), failed ? JSON.stringify(result) : null, Date.now(), `${input.turnId}:${callId}`)
+        return repository.events.insert(input.sessionId, input.turnId, 'operation.completed', scoped({ callId, result, failed, outcome }))
       })
       repository.events.publish(event)
     },

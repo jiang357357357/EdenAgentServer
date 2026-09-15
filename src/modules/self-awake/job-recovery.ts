@@ -6,6 +6,7 @@ import type { JobInfo, JsonValue } from '@eden/api'
 import type { EdenDatabase } from '@eden/store'
 import type { JobRepository } from '../jobs/index.ts'
 import type { SessionService } from '../sessions/index.ts'
+import { SELF_AWAKE_RECOVERY_INSTRUCTION } from '../../model-prompts/self-awake.ts'
 
 const payloadSchema = z.object({
   prompt: z.string().optional(), trigger: jsonValue.optional(),
@@ -66,7 +67,7 @@ export class SelfAwakeJobRecovery {
     if (row && (!isDeepStrictEqual(JSON.parse(String(row.author_json)), author) || !isDeepStrictEqual(JSON.parse(String(row.environment_json)), environment))) {
       throw new Error('Self-awake author or environment changed after resubmission confirmation')
     }
-    return row ? { source_job_id: String(row.source_job_id), instruction: 'This is an explicitly requested new decision after failure. Previous tool effects, diaries and notifications remain real. Inspect prior records before repeating an action; this recovery is not authorization for tools.' } : null
+    return row ? { source_job_id: String(row.source_job_id), instruction: SELF_AWAKE_RECOVERY_INSTRUCTION } : null
   }
 }
 

@@ -47,7 +47,7 @@ test('terminal works without a workspace and a later selection invalidates its p
     const sessions = new SessionRepository(database, 'local'), session = sessions.create('No workspace')
     const permissions = new PermissionService(database, sessions.events)
     const workspace = new WorkspaceService(database, [directory])
-    const command = workspaceTools(workspace, permissions, session.id, session.id, new CommandService(database, [])).find(tool => tool.name === 'eden_exec')!
+    const command = workspaceTools(workspace, permissions, session.id, session.id, new CommandService(database, [])).find(tool => tool.name === 'exec_command')!
     const context = { callId: 'first', signal: new AbortController().signal }
     const pending = command.execute({ command: process.platform === 'win32' ? '(Get-Location).Path' : 'pwd' }, context)
     permissions.resolve(permissions.list().find(item => item.state === 'pending')!.id, true)

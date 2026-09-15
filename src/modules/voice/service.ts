@@ -2,6 +2,7 @@ import { gsvPreviewSchema, gsvSttTestSchema } from '@eden/api'
 import type { BlobService } from '../blobs/index.ts'
 import { synthesizeGsv } from './gsv-synthesis.ts'
 import { discoverGsv } from './gsv-discovery.ts'
+import { discoverGsvStt } from './stt-discovery.ts'
 import { gsvResponse } from './gsv-client.ts'
 export class VoiceService {
   private readonly abort = new AbortController()
@@ -22,6 +23,7 @@ export class VoiceService {
     return task
   }
   discover(raw: unknown) { return this.request(() => discoverGsv(raw, this.abort.signal)) }
+  discoverStt(raw: unknown) { return this.request(() => discoverGsvStt(raw, this.abort.signal)) }
   testStt(raw: unknown) {
     const { config } = gsvSttTestSchema.parse(raw)
     return this.request(async () => {

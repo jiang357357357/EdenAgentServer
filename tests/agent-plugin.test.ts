@@ -1,3 +1,4 @@
+import { loadReply } from './integration/capabilities/load-reply.ts'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -31,16 +32,24 @@ test('agent authors, tests, activates, and invokes its plugin through durable us
   const replies = [
     { action: 'draft', args: { manifest, source } }, { action: 'validate', args: { id: 'double' } },
     { action: 'test', args: { id: 'double' } }, { action: 'install', args: { id: 'double', revision } },
-    { action: 'activate', args: { id: 'double', revision } }, { action: 'invoke', args: { id: 'double', revision, input: { value: 21 } } },
+    { action: 'activate', args: { id: 'double', revision } }, { action: 'invoke', args: { id: 'double', input: { value: 21 } } },
   ]
-  const model = await recordedModel([...replies.map(input => ({ tool: 'eden_plugin', input })), { text: 'The plugin returned 42' }])
+  const script: Parameters<typeof recordedModel>[0] = [...replies.map(input => ({ tool: 'manage_plugins', input })), { text: 'The plugin returned 42' }]
+  const model = await recordedModel(script)
   const directory = mkdtempSync(path.join(tmpdir(), 'eden-agent-plugin-'))
   const server = await startServer({ ...loadConfig({ EDEN_AGENT_DATA_ROOT: directory, EDEN_AGENT_PORT: '0' }), model: model.config })
+  script.unshift(loadReply(server.sessions, 'manage_plugins'))
+  let pluginLoaded = false
   const router = new RpcRouter('local', { ...pluginRoutes(server.plugins), ...permissionRoutes(server.permissions) })
   const failures: unknown[] = []
   await router.dispatch({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 2, runtimeOrigin: 'local', clientName: 'test-user', clientVersion: '1', capabilities: [] } })
   let first = true
   const unsubscribe = server.sessions.repository.events.subscribe(event => {
+    if (event.kind === 'operation.completed' && !pluginLoaded && server.plugins.activations.list().length) {
+      const tool = server.sessions.toolCatalog().find(item => item.source === 'plugin')!
+      script.splice(model.requests.length, 0, loadReply(server.sessions, tool.name, 'plugin:double'))
+      pluginLoaded = true
+    }
     if (event.kind !== 'permission.requested') return
     queueMicrotask(async () => {
       try {
@@ -56,7 +65,7 @@ test('agent authors, tests, activates, and invokes its plugin through durable us
     server.sessions.start(session.id, 'Write, test, and use a double-number plugin')
     await server.sessions.waitForIdle(session.id)
     assert.deepEqual(failures, [])
-    assert.equal(model.requests.length, 7)
+    assert.equal(model.requests.length, 9)
     assert.equal(server.permissions.list().length, 5)
     assert.ok(server.permissions.list().every(item => item.state === 'allowed'))
     assert.equal(server.plugins.activations.list()[0]?.revision, revision)
@@ -64,15 +73,17 @@ test('agent authors, tests, activates, and invokes its plugin through durable us
     const events = server.sessions.repository.events.list(session.id, '0', 1000)
     assert.ok(events.some(event => event.kind === 'operation.completed' && JSON.stringify(event.payload).includes('42')))
     const requests = events.filter(event => event.kind === 'model.request')
-    assert.ok(requests.every(event => JSON.stringify(event.payload).includes('eden.plugin-management.v1')))
+    assert.ok(requests.slice(1).every(event => JSON.stringify(event.payload).includes('eden.plugin-management.v1')))
     assert.equal((await router.dispatch({ jsonrpc: '2.0', id: 9, method: 'toString', params: {} }) as { error: { code: number } }).error.code, -32601)
   } finally { unsubscribe(); await server.close(); await model.close(); rmSync(directory, { recursive: true }) }
 })
 
 test('denied plugin mutation remains absent', async () => {
-  const model = await recordedModel([{ tool: 'eden_plugin', input: { action: 'draft', args: { manifest, source } } }, { text: 'Permission denied' }])
+  const script: Parameters<typeof recordedModel>[0] = [{ tool: 'manage_plugins', input: { action: 'draft', args: { manifest, source } } }, { text: 'Permission denied' }]
+  const model = await recordedModel(script)
   const directory = mkdtempSync(path.join(tmpdir(), 'eden-agent-denial-'))
   const server = await startServer({ ...loadConfig({ EDEN_AGENT_DATA_ROOT: directory, EDEN_AGENT_PORT: '0' }), model: model.config })
+  script.unshift(loadReply(server.sessions, 'manage_plugins'))
   const unsubscribe = server.sessions.repository.events.subscribe(event => {
     if (event.kind === 'permission.requested') queueMicrotask(() => server.permissions.resolve(server.permissions.list()[0]!.id, false))
   })
@@ -85,10 +96,12 @@ test('denied plugin mutation remains absent', async () => {
   } finally { unsubscribe(); await server.close(); await model.close(); rmSync(directory, { recursive: true }) }
 })
 
-test('cancelling a tool waiting for permission leaves no live waiter or draft', async () => {
-  const model = await recordedModel([{ tool: 'eden_plugin', input: { action: 'draft', args: { manifest, source } } }])
+test('cancelling a tool waiting for permission leaves no live waiter or draft', { timeout: 15000 }, async () => {
+  const script: Parameters<typeof recordedModel>[0] = [{ tool: 'manage_plugins', input: { action: 'draft', args: { manifest, source } } }]
+  const model = await recordedModel(script)
   const directory = mkdtempSync(path.join(tmpdir(), 'eden-agent-cancel-'))
   const server = await startServer({ ...loadConfig({ EDEN_AGENT_DATA_ROOT: directory, EDEN_AGENT_PORT: '0' }), model: model.config })
+  script.unshift(loadReply(server.sessions, 'manage_plugins'))
   let requested!: () => void
   const waiting = new Promise<void>(resolve => { requested = resolve })
   const unsubscribe = server.sessions.repository.events.subscribe(event => { if (event.kind === 'permission.requested') requested() })

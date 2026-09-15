@@ -7,10 +7,11 @@ import type { PermissionService } from '../permissions/index.ts'
 import { assistantParticipant } from '../mon/index.ts'
 import type { MonBindingService } from '../mon/index.ts'
 import type { HandoffRepository } from './handoff-repository.ts'
+import { toolDescription } from '../../model-prompts/tool-descriptions.ts'
 
 export function handoffTools(mon: MonBindingService, handoffs: HandoffRepository, permissions: PermissionService, sessionId: string, turnId: string): RuntimeTool[] {
   return [{
-    name: 'list_assistants', revision: 'eden.assistants.v1', description: 'List available assistants by stable ID and short name. Requires permission to read the Mon assistant directory.',
+    name: 'list_assistants', revision: 'eden.assistants.v1', description: toolDescription('list_assistants'),
     parameters: { type: 'object', properties: {}, additionalProperties: false },
     async execute(_input, context) {
       await permissions.request({ sessionId, turnId, ...context }, 'mon.assistants.read', 'assistants', {})
@@ -19,7 +20,7 @@ export function handoffTools(mon: MonBindingService, handoffs: HandoffRepository
     },
   }, {
     name: 'switch_assistant', revision: 'eden.assistant-handoff.v1', executionMode: 'sequential',
-    description: 'Schedule an assistant switch for the next root turn, preserving public history. Resolve an exact ID or unambiguous name, then ask permission for that target. The current turn retains its identity.',
+    description: toolDescription('switch_assistant'),
     parameters: toJson(z.toJSONSchema(assistantTargetSchema, { io: 'input' })) as Record<string, JsonValue>,
     async execute(input, context) {
       const target = assistantTargetSchema.parse(input)

@@ -11,6 +11,40 @@ import { WorkspaceMutationQueue } from './mutation-queue.ts'
 export class WorkspaceService {
   private readonly repository: WorkspaceRepository
   private readonly mutations = new WorkspaceMutationQueue()
+  private readonly modelReads = new Map<string, Map<string, string>>()
+
+  async readForModel(scope: string, requested: string) {
+    const result = await this.read(requested)
+    if (result.sha256) {
+      const reads = this.modelReads.get(scope) ?? new Map<string, string>()
+      reads.set(result.path, result.sha256)
+      this.modelReads.set(scope, reads)
+      if (this.modelReads.size > 512) this.modelReads.delete(this.modelReads.keys().next().value!)
+    }
+    const { sha256: _, ...visible } = result
+    return visible
+  }
+
+  rememberWrite(scope: string, requested: string, content: string) {
+    const reads = this.modelReads.get(scope) ?? new Map<string, string>()
+    reads.set(workspaceFile(this.root(), requested), createHash('sha256').update(content).digest('hex'))
+    this.modelReads.set(scope, reads)
+    if (this.modelReads.size > 512) this.modelReads.delete(this.modelReads.keys().next().value!)
+  }
+
+  async writeSnapshot(scope: string, requested: string): Promise<string | null> {
+    try {
+      const filename = workspaceFile(this.root(), requested)
+      const known = this.modelReads.get(scope)?.get(filename)
+      if (known) return known
+      const current = await this.read(requested)
+      if (!current.sha256) throw new Error('File is too large to safely replace')
+      return current.sha256
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return this.modelReads.get(scope)?.get(path.resolve(this.root(), requested)) ?? null
+      throw error
+    }
+  }
   constructor(database: EdenDatabase, private readonly protectedRoots: readonly string[]) {
     this.repository = new WorkspaceRepository(database)
   }

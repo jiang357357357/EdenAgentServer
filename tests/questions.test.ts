@@ -12,7 +12,7 @@ import { questionAskSchema } from '@eden/api'
 const ask = { questions: [{ header: 'Format', question: 'Choose output format', options: [{ label: 'JSON', description: 'Structured' }, { label: 'Text', description: 'Plain' }], custom: false }] }
 
 test('the model asks a durable question and continues only after a validated answer commits', async () => {
-  const model = await recordedModel([{ tool: 'eden_question', input: ask }, { text: 'Selected JSON' }])
+  const model = await recordedModel([{ tool: 'request_user_input', input: ask }, { text: 'Selected JSON' }])
   const db = new EdenDatabase(':memory:', 'local')
   const repository = new SessionRepository(db, 'local')
   const questions = new QuestionService(repository)

@@ -5,3 +5,5 @@ export { rolePolicy, narrowPolicy, subagentPolicy, assertSubagentTool, filterSub
 export { subagentRoles, subagentRole } from './role-catalog.ts'
 export { assertSubagentWorkspace, restoreSubagentWorkspace } from './workspace-owner.ts'
 export type { SubagentPolicy } from './tool-policy.ts'
+
+export { roleSkillBindings } from './role-skill-bindings.ts'

@@ -1,5 +1,5 @@
 import { ZodError } from 'zod'
-import { MonClient } from '@eden/integrations'
+import { MonClient, MonHttpError } from '@eden/integrations'
 import { parseCoreAssistant, coreSettingsSchema, coreEntities, resolveCoreModel, coreIdSchema } from './model-schema.ts'
 import { publicVendors, modelOption, selectEntity } from './model-options.ts'
 
@@ -13,8 +13,17 @@ export async function loadMonCatalog(client: MonClient, assistantId?: string | n
 
 async function readMonCatalog(client: MonClient, assistantId?: string | number, signal?: AbortSignal) {
   const assistantPath = assistantId === undefined ? '/api/assistants/current/' : `/api/assistants/${encodeURIComponent(String(coreIdSchema.parse(assistantId)))}/`
-  const [assistantRaw, settingsRaw, vendorsRaw, entitiesRaw] = await Promise.all([
-    client.get(assistantPath, signal), client.get('/api/agent/settings/my/', signal), client.get('/api/core/vendors/ai/', signal), client.getCollection('/api/ai/entities/', signal),
+  let assistantRaw
+  try { assistantRaw = await client.get(assistantPath, signal) }
+  catch (error) {
+    if (error instanceof MonHttpError && error.status === 404) {
+      if (assistantId !== undefined) throw new Error(`会话助手（ID：${String(assistantId)}）已不在 Mon Core 中，请为本会话重新选择助手。`)
+      throw new Error('Mon Core 当前没有可用的默认助手，请先在助手管理中设置。')
+    }
+    throw error
+  }
+  const [settingsRaw, vendorsRaw, entitiesRaw] = await Promise.all([
+    client.get('/api/agent/settings/my/', signal), client.get('/api/core/vendors/ai/', signal), client.getCollection('/api/ai/entities/', signal),
   ])
   const assistant = parseCoreAssistant(assistantRaw, assistantId)
   const settings = coreSettingsSchema.parse(settingsRaw)

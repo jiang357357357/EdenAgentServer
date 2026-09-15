@@ -1,11 +1,11 @@
 import { createRuntime } from '@eden/runtime-pi'
 import type { RuntimeModel, RuntimeTool, EdenRuntime, RuntimeImage } from '@eden/runtime-pi'
-import { actorIdSchema } from '@eden/api'
+import { actorIdSchema, toJson } from '@eden/api'
 import type { DirectorPlan, JsonValue } from '@eden/api'
 import { runtimeCallbacks } from '../sessions/index.ts'
 import type { SessionInput, SessionRepository } from '../sessions/index.ts'
 import { ActorCheckpointRepository } from './checkpoint-repository.ts'
-import { actorPrompt, actorSystemPrompt } from './actor-prompt.ts'
+import { actorPrompt, actorSystemContent } from './actor-prompt.ts'
 import { actorMessage } from './message-context.ts'
 import type { MemoryRecall } from '../memories/index.ts'
 
@@ -43,8 +43,11 @@ export class ActorExecutionService {
     const callbacks = runtimeCallbacks(this.sessions, input, { actor, privateNonAssistantMessages: true,
       checkpoint: async snapshot => this.checkpoints.save(input.sessionId, assistantId, input.turnId, snapshot) })
     const checkpoint = this.checkpoints.read(input.sessionId, assistantId)
+    const context = actorSystemContent(request.participant, input.metadata)
+    const memory = this.memoryRecall?.prompt(input.sessionId, input.turnId, input.text, assistantId) ?? ''
     const runtime = createRuntime({ sessionId: input.sessionId, model: request.model, tools: request.tools, ...(request.refreshTools ? { refreshTools: request.refreshTools } : {}),
-      systemPrompt: actorSystemPrompt(request.participant, input.metadata) + (this.memoryRecall?.prompt(input.sessionId, input.turnId, input.text, assistantId) ?? ''),
+      systemPrompt: context.prompt + memory,
+      contextSources: toJson([...context.sources, { kind: 'memory', title: '召回记忆', content: memory }]) as JsonValue[],
       toolCallPrefix: `${plan.planID}:${beatIndex}:`, ...(checkpoint ? { checkpoint } : {}),
       callbacks: { ...callbacks, event: async (kind, payload) => callbacks.event(kind, actorMessage(payload, request.participant, plan, beatIndex)) },
     })

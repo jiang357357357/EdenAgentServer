@@ -1,14 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EdenDatabase } from '@eden/store'
-import { selfAwakeDecisionSchema } from '@eden/api'
 import { wakeDeadline, wakeIntervalMs } from '../src/modules/self-awake/deadline.ts'
 import { SelfAwakeRepository } from '../src/modules/self-awake/repository.ts'
 import { SessionRepository } from '../src/modules/sessions/session-repository.ts'
 import { JobRepository } from '../src/modules/jobs/repository.ts'
 
-const decision = { mood: '', current_desire: '', observations: [], should_interrupt_user: false, action: 'write_diary', action_payload: {}, next_wake: null, diary: { title: 'null plan', content: 'Use the watchdog' } }
-test('null suggestion completes and persists the diary without weakening other fields', () => {
+test('plain diary completes without a model scheduling decision', () => {
   const db = new EdenDatabase(':memory:', 'mon')
   try {
     const sessions = new SessionRepository(db, 'mon'), jobs = new JobRepository(db), awake = new SelfAwakeRepository(db)
@@ -16,11 +14,10 @@ test('null suggestion completes and persists the diary without weakening other f
     const job = jobs.schedule({ kind: 'self_awake', sessionId: session.id, dueAt: 1, payload: {}, key: 'test', causationId: '', depth: 0 })
     const id = awake.begin(job, {}, {})
     db.connection.prepare("UPDATE self_awake_runs SET state='running' WHERE id=?").run(id)
-    awake.finish(id, selfAwakeDecisionSchema.parse(decision))
+    awake.finish(id, '我记录了本轮观察。')
     assert.equal(awake.read(id).status, 'completed')
     assert.equal(db.connection.prepare('SELECT count(*) AS n FROM self_awake_diaries WHERE run_id=?').get(id)?.n, 1)
-    assert.equal(JSON.parse(String(db.connection.prepare('SELECT decision_json FROM self_awake_runs WHERE id=?').get(id)?.decision_json)).next_wake, null)
-    assert.equal(selfAwakeDecisionSchema.safeParse({ ...decision, next_wake: { after_minutes: -1, reason: 'bad' } }).success, false)
+    assert.equal(db.connection.prepare('SELECT decision_json FROM self_awake_runs WHERE id=?').get(id)?.decision_json, null)
   } finally { db.close() }
 })
 test('initial deadline survives another repository and repeated timer calls without moving', () => {

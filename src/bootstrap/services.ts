@@ -1,13 +1,14 @@
+import { SessionCapabilities, ToolRegistry, defaultTool, capabilityOwner } from '../modules/capabilities/index.ts'
 import { CommandService } from '../modules/commands/command-service.ts'
 import { McpResults, McpLifecycle, mcpTools } from '../modules/mcp/index.ts'
 import { ConnectorCredentials, ConnectorCatalog, ConnectorRepository, ConnectorEventRepository, connectorEventTools, ConnectorPermissions, ConnectorLifecycle, connectorCapabilityTools, connectorDiscoveryTools } from '../modules/connectors/index.ts'
-import { contactTools } from '../modules/mon/index.ts'
+import { contactTools, deviceTools } from '../modules/mon/index.ts'
 import { MediaService, mediaTools } from '../modules/media/index.ts'
 import { VoiceConfigRepository, VoiceService, SpeechRepository, SpeechService, RealtimeVoiceService } from '../modules/voice/index.ts'
 import { SubagentRepository, SubagentService, SubagentMailbox, SubagentLifecycle, subagentTools, subagentPolicy, filterSubagentTools } from '../modules/subagents/index.ts'
 import { PluginHookRepository, PluginHookService } from '../modules/plugin-hooks/index.ts'
 import { connectorPluginTools, PackageRecoveryRepository, PackageAssets, MarketRepository, MarketService, PackagePreviewRepository, InstalledPackageRepository } from '../modules/plugin-market/index.ts'
-import { SkillRepository, SkillService, SystemSkillCatalog, skillTools } from '../modules/skills/index.ts'
+import { SkillRepository, SkillService, SystemSkillCatalog, skillTools, builtinSkillSnapshots } from '../modules/skills/index.ts'
 import { DesktopReminderRepository, desktopReminderTools } from '../modules/notifications/index.ts'
 import { SelfAwakeRepository, SelfAwakeContext, SelfAwakeBridgeRepository, SelfAwakeBridge, SelfAwakeService, SelfAwakeActions, selfAwakeTools } from '../modules/self-awake/index.ts'
 import { JobRepository, JobScheduler } from '../modules/jobs/index.ts'
@@ -74,27 +75,41 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
   const projectSkills = new SystemSkillCatalog(() => workspace.info().path
     ? ['.agents/skills', '.edenagent/skills'].map(relative => path.join(workspace.root(), relative)) : [], true)
   const skills: SkillService = new SkillService(new SkillRepository(database, () => workspace.info().path ? workspace.root() : '', () => pluginMarket.installed.skillContributions(),
-    () => ({ tools: sessions.toolCatalog().map(tool => tool.name), codeToolsAvailable: skills.codeToolsAvailable }), () => systemSkills.list(), () => projectSkills.list()), systemSkills, projectSkills, config.externalCommandSandbox)
+    () => ({ tools: sessions.toolCatalog().map(tool => tool.name), codeToolsAvailable: skills.codeToolsAvailable }), () => systemSkills.list(), () => projectSkills.list(), builtinSkillSnapshots), systemSkills, projectSkills, config.externalCommandSandbox)
   const permissions = new PermissionService(database, repository.events)
   const questions = new QuestionService(repository)
-  const tools = (sessionId: string, turnId: string, actorId?: string | number): RuntimeTool[] => filterSubagentTools(database, sessionId, [
+  const toolDefinitions = (sessionId: string, turnId: string, actorId?: string | number): RuntimeTool[] => filterSubagentTools(database, sessionId, [
     ...mcpTools(mcp, database, permissions, sessionId, turnId),
     ...connectorDiscoveryTools(connectors, connectorCatalog, sessionId),
     ...connectorCapabilityTools(database, connectors, connectorCatalog, connectorLifecycle, permissions, sessionId, turnId),
     ...connectorEventTools(connectorEvents, permissions, sessionId, turnId),
     ...mediaTools(media, permissions, sessionId, turnId),
     ...subagentTools(subagents, permissions, sessionId, turnId, actorId),
-    ...skillTools(skills, permissions, sessionId, turnId, skillProfile(sessionId === '00000000-0000-4000-8000-000000000000' ? null : repository.read(sessionId).environment), () => tools(sessionId, turnId, actorId).map(tool => tool.name)),
+    ...skillTools(skills, permissions, sessionId, turnId, skillProfile(sessionId === '00000000-0000-4000-8000-000000000000' ? null : repository.read(sessionId).environment), () => capabilitySession(sessionId, turnId, actorId).registry().tools.map(tool => tool.name), {
+      load: (name, expected) => capabilitySession(sessionId, turnId, actorId).loadSkill(name, expected),
+      unload: name => capabilitySession(sessionId, turnId, actorId).unloadSkill(name),
+    }),
     ...connectorPluginTools(pluginMarket, permissions, sessionId, turnId),
-    ...pluginTools(plugins, permissions, sessionId, turnId), ...workspaceTools(workspace, permissions, sessionId, turnId, commands, subagentPolicy(database, sessionId)?.sandboxMode === 'workspace-write'),
+    ...pluginTools(plugins, permissions, sessionId, turnId, actorId), ...workspaceTools(workspace, permissions, sessionId, turnId, commands, subagentPolicy(database, sessionId)?.sandboxMode === 'workspace-write', actorId),
     ...desktopReminderTools(desktopReminders, permissions, sessionId, turnId),
     ...selfAwakeTools(selfAwakeRepository, jobs, permissions, selfAwakeContext, sessionId, turnId),
     questionTool(questions, sessionId, turnId), ...memoTools(memos, permissions, sessionId, turnId),
     attachmentTool(attachmentRepository, attachments, sessionId, turnId),
     ...memoryTools(memories, memoryScopes, permissions, { sessionId, turnId, ...(actorId === undefined ? {} : { actorId }) }),
     ...(config.origin === 'mon' ? contactTools(mon, permissions, sessionId, turnId) : []),
+    ...(config.origin === 'mon' ? deviceTools(mon, permissions, sessionId, turnId) : []),
     ...(config.origin === 'mon' ? handoffTools(mon, handoffs.repository, permissions, sessionId, turnId) : []),
   ])
+  const capabilitySession = (sessionId: string, turnId: string, actorId?: string | number): SessionCapabilities => new SessionCapabilities(
+    database, repository.events, skills.repository, () => ({ sessionId, owner: capabilityOwner(sessionId === '00000000-0000-4000-8000-000000000000' ? [] : repository.read(sessionId).participants, actorId),
+      profile: skillProfile(sessionId === '00000000-0000-4000-8000-000000000000' ? null : repository.read(sessionId).environment),
+      workspaceRoot: workspace.info().path }), () => toolDefinitions(sessionId, turnId, actorId))
+  const tools = (sessionId: string, turnId: string, actorId?: string | number): RuntimeTool[] => {
+    const scope = capabilitySession(sessionId, turnId, actorId)
+    if (sessionId !== '00000000-0000-4000-8000-000000000000') return scope.tools()
+    return new ToolRegistry(scope.registry().tools).tools.map(tool => ({ ...tool,
+      exposure: defaultTool(tool, 'user_chat', Boolean(workspace.info().path)) ? 'direct' : 'deferred' }))
+  }
   const companion = new CompanionTurnCoordinator(repository, directors, attachments, memoryRecall)
   const handoffs = new HandoffDispatcher(repository, models, (sessionId, assistantId, signal) => mon.prepareHandoff(sessionId, assistantId, signal), modelBindings)
   const sessions = new SessionService(repository, sessionId => models.resolve(sessionId), tools,
@@ -103,10 +118,11 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
   const selfAwakeBridge = config.monIdentity && config.origin === 'mon' ? new SelfAwakeBridge(config.monIdentity, new SelfAwakeBridgeRepository(database, jobs), sessions, mon) : undefined
   const memoryExtractions = new MemoryExtractionService(repository, models, permissions)
   const selfAwakeActions = new SelfAwakeActions(repository, permissions, memos, desktopReminders, questions, (channel, sessionId, input, signal) => channel === 'qq' ? mon.contactOwnerByQq(sessionId, input, signal) : mon.contactOwnerByEmail(sessionId, input, signal))
-  const selfAwake = new SelfAwakeService(selfAwakeRepository, jobs, sessions, () => selfAwakeActions.wake())
+  const selfAwake = new SelfAwakeService(selfAwakeRepository, jobs, sessions)
   const subagents = new SubagentService(new SubagentRepository(database, jobs, () => workspace.info().path), sessions, models, jobs, new SubagentMailbox(database), skills.repository)
   const subagentLifecycle = new SubagentLifecycle(subagents)
   sessions.setDescendantStop(sessionId => subagents.stopChildren(sessionId))
+  sessions.toolCatalog()
   const pluginHooks = new PluginHookService(new PluginHookRepository(database, jobs), pluginMarket.installed, sessions, jobs)
   const memoJobRecovery = new MemoJobRecovery(database, memos, memoNotifications, jobs, sessions)
   const scheduler = new JobScheduler(jobs, { 'subagent.turn': job => subagents.dispatch(job), 'plugin.hook': job => pluginHooks.dispatch(job), self_awake: job => selfAwake.dispatch(job), 'memo.reminder': memoDispatcher(database, memos, memoNotifications, jobs, sessions), 'memo.reminder.redelivery': job => memoJobRecovery.dispatch(job) })

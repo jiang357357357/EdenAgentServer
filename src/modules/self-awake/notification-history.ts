@@ -1,5 +1,6 @@
 import type { EdenDatabase } from '@eden/store'
 import { toJson } from '@eden/api'
+import { SELF_AWAKE_INTERPRETATIONS } from '../../model-prompts/self-awake.ts'
 
 export function readNotificationHistory(database: EdenDatabase, runId: string) {
   const row = database.connection.prepare('SELECT * FROM self_awake_notification_history WHERE run_id=?').get(runId)
@@ -10,5 +11,5 @@ export function readNotificationHistory(database: EdenDatabase, runId: string) {
     result: row.result_json === null ? null : JSON.parse(String(row.result_json)), attempts: Number(row.attempts),
     lastError: row.last_error === null ? null : String(row.last_error), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at),
     review: review ? { decision: String(review.decision), note: String(review.note), reviewedAt: Number(review.created_at), source: 'manual' } : null,
-    automaticReplay: false, interpretation: 'Historical transport record. Manual review is identified separately; delivered does not imply a user response. Suppressed stops further delivery and does not prove no earlier side effects.' })
+    automaticReplay: false, interpretation: SELF_AWAKE_INTERPRETATIONS.notificationHistory })
 }
