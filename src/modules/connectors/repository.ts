@@ -1,3 +1,4 @@
+import { accountFilter } from '../accounts/index.ts'
 import { randomUUID } from 'node:crypto'
 import { connectorCreateSchema, connectorUpdateSchema, connectorHistorySchema, toJson } from '@eden/api'
 import type { EdenDatabase } from '@eden/store'
@@ -40,7 +41,7 @@ export class ConnectorRepository {
     const input = connectorHistorySchema.parse(raw)
     this.read(input.id)
     const rows = this.database.connection.prepare(`SELECT rowid AS cursor,id,session_id,generation,method,state,error,created_at,updated_at
-      FROM connector_operations WHERE connector_id=? AND rowid<? ORDER BY rowid DESC LIMIT ?`)
+      FROM connector_operations WHERE ${accountFilter(this.database, 'session_id')} AND connector_id=? AND rowid<? ORDER BY rowid DESC LIMIT ?`)
       .all(input.id, input.before ?? Number.MAX_SAFE_INTEGER, input.limit + 1)
     return toJson({ items: rows.slice(0, input.limit).map(row => ({ id: String(row.id), sessionId: String(row.session_id), generation: String(row.generation),
       method: String(row.method), state: String(row.state), error: row.error === null ? null : String(row.error),

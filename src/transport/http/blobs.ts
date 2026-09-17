@@ -1,3 +1,4 @@
+import { AccountAuthentication, withAccount } from '../../modules/accounts/index.ts'
 import { timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { blobInfoSchema, blobMimeSchema } from '@eden/api'
@@ -29,10 +30,10 @@ function access(request: IncomingMessage, response: ServerResponse, config: Serv
   if (request.method === 'OPTIONS') {
     const method = request.headers['access-control-request-method']
     const headers = String(request.headers['access-control-request-headers'] ?? '').toLowerCase().split(',').map(value => value.trim()).filter(Boolean)
-    if (!origin || !['GET', 'POST'].includes(String(method)) || headers.some(header => !['authorization', 'content-type'].includes(header))) {
+    if (!origin || !['GET', 'POST'].includes(String(method)) || headers.some(header => !['authorization', 'content-type', 'x-eden-core-token'].includes(header))) {
       errorResponse(response, 403, 'Preflight denied'); return false
     }
-    response.writeHead(204, { 'access-control-allow-methods': 'GET, POST', 'access-control-allow-headers': 'authorization, content-type' }).end()
+    response.writeHead(204, { 'access-control-allow-methods': 'GET, POST', 'access-control-allow-headers': 'authorization, content-type, x-eden-core-token' }).end()
     return false
   }
   if (!authorized(request, config.token)) { errorResponse(response, 401, 'Unauthorized'); return false }
@@ -54,7 +55,7 @@ export class BlobHttp {
     if (this.closing) { errorResponse(response, 503, 'Server closing'); return true }
     if (!access(request, response, this.config)) return true
     if (this.tasks.size >= 8) { errorResponse(response, 503, 'Blob request limit exceeded'); return true }
-    const task = this.dispatch(request, response).catch(error => {
+    const task = this.authenticatedDispatch(request, response).catch(error => {
       if (error instanceof BodyError) errorResponse(response, error.status, error.message)
       else if (error instanceof BlobNotFoundError) errorResponse(response, 404, 'Blob not found')
       else errorResponse(response, 500, 'Blob operation failed')
@@ -62,6 +63,14 @@ export class BlobHttp {
     this.tasks.set(task, request)
     void task.then(() => this.tasks.delete(task))
     return true
+  }
+
+  private async authenticatedDispatch(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if (this.config.origin !== 'mon') return this.dispatch(request, response)
+    const auth = new AccountAuthentication(this.config.coreBaseUrl ?? this.config.monIdentity?.coreBaseUrl ?? 'http://127.0.0.1:40011')
+    const account = await auth.verify(String(request.headers['x-eden-core-token'] ?? '')).catch(() => { throw new BodyError(401, 'Core account authentication required') })
+    if (this.config.account && this.config.account.key !== account.key) throw new BodyError(401, 'Account runtime mismatch')
+    return withAccount(account, () => this.dispatch(request, response))
   }
 
   private async dispatch(request: IncomingMessage, response: ServerResponse): Promise<void> {

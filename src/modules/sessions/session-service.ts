@@ -1,3 +1,4 @@
+import { withAccount } from '../accounts/index.ts'
 import { randomUUID } from 'node:crypto'
 import { toJson } from '@eden/api'
 import type { JsonValue, AttachmentRef, AttachmentSnapshot } from '@eden/api'
@@ -14,6 +15,7 @@ import { inputAttachments, type AttachmentService } from '../attachments/index.t
 import { InputAdmissions } from './input/admissions.ts'
 import { InputResubmissionRepository } from './input/resubmission-repository.ts'
 import type { MemoryRecall } from '../memories/index.ts'
+import { SessionTitleService } from './session-title-service.ts'
 
 export class SessionService {
   private readonly inputs: InputRepository
@@ -29,6 +31,7 @@ export class SessionService {
   private closed = false
   private readonly faults = new Map<string, string>()
   private readonly admissions = new InputAdmissions()
+  private readonly titles: SessionTitleService
 
   constructor(readonly repository: SessionRepository, private readonly model: RuntimeModel | ((sessionId: string) => RuntimeModel | undefined) | undefined,
     private readonly tools: (sessionId: string, turnId: string) => RuntimeTool[] = () => [],
@@ -37,6 +40,7 @@ export class SessionService {
     private readonly attachments?: AttachmentService, private readonly memoryRecall?: MemoryRecall) {
     this.inputs = new InputRepository(repository.database, repository.events)
     this.signals = new SignalRepository(repository.database, repository.events)
+    this.titles = new SessionTitleService(repository, sessionId => this.resolveModel(sessionId))
     this.signals.interrupt()
     for (const sessionId of this.inputs.interruptedSessions()) this.stopping.add(sessionId)
     this.inputs.recoverInterrupted()
@@ -45,7 +49,7 @@ export class SessionService {
   resumePending(): void {
     if (this.closed) return
     for (const sessionId of new Set([...this.inputs.pendingSessions(), ...this.boundary?.pendingSessions() ?? []])) {
-      if (this.stopping.has(sessionId)) continue
+      if (this.stopping.has(sessionId) || !this.repository.ownership.visible(sessionId)) continue
       const participants = this.repository.read(sessionId).participants
       const available = participants.length > 1 ? this.extension?.snapshot(sessionId, participants) : this.resolveModel(sessionId)
       if (available) { this.boundaryWaiting.delete(sessionId); this.wake(sessionId) }
@@ -117,6 +121,7 @@ export class SessionService {
     const metadata = { ...this.inputMetadata(sessionId, environment), ...(attachments.length ? { attachments: toJson(attachments) } : {}) }
     const result = this.inputs.enqueue(sessionId, text, idempotencyKey, metadata, kind,
       environment === undefined ? undefined : { participants: metadata.participants, environment }, onCommit)
+    if (kind === 'prompt') this.titles.schedule(sessionId, result.turnId, text)
     this.stopping.delete(sessionId)
     this.boundaryWaiting.delete(sessionId)
     this.wake(sessionId)
@@ -136,7 +141,11 @@ export class SessionService {
 
   private wake(sessionId: string): void {
     if (this.tasks.has(sessionId)) return
-    const task = Promise.resolve().then(() => this.drain(sessionId)).catch(error => {
+    const task = Promise.resolve().then(() => {
+      const account = this.repository.ownership.account(sessionId)
+      if (this.repository.origin === 'mon' && !account) throw new Error('会话账号归属尚未确认，已暂停执行')
+      return withAccount(account, () => this.drain(sessionId))
+    }).catch(error => {
       const reason = error instanceof Error ? error.message : String(error)
       this.faults.set(sessionId, reason)
       process.stderr.write(`Session ${sessionId} halted: ${reason}\n`)
@@ -223,6 +232,7 @@ export class SessionService {
 
   async cancel(sessionId: string): Promise<boolean> {
     this.repository.read(sessionId)
+    this.titles.cancel(sessionId)
     await this.descendantStop?.(sessionId)
     const admissionCancelled = this.admissions.cancel(sessionId)
     if (!this.tasks.has(sessionId)) return admissionCancelled
@@ -296,10 +306,12 @@ export class SessionService {
   }
   async close(): Promise<void> {
     this.closed = true
+    const titles = this.titles.close()
     const admissions = this.admissions.close()
     for (const controller of this.controllers.values()) controller.abort()
     const aborts = await Promise.allSettled([...this.runtimes.values()].map(runtime => runtime.abort()))
     await Promise.all(this.tasks.values())
+    await titles
     await admissions
     const failures = aborts.filter(result => result.status === 'rejected')
     if (failures.length) throw new AggregateError(failures.map(result => result.reason), 'Runtime abort reported persistence failures')

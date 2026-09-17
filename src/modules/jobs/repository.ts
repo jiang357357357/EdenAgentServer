@@ -1,3 +1,4 @@
+import { accountFilter, SessionOwnership } from '../accounts/index.ts'
 import { replacePendingWake, recoverWakes, wakeBusy } from './self-awake-queue.ts'
 import { randomUUID } from 'node:crypto'
 import { resolveJobOutcome } from './outcome-review.ts'
@@ -15,7 +16,18 @@ export class JobRepository {
     const row = this.database.connection.prepare('SELECT id FROM jobs WHERE operation_key=?').get(key)
     return row ? this.read(String(row.id)) : undefined
   }
+  latestWakePlan(sessionId: string, parentJobId: string) {
+    const row = this.database.connection.prepare(`SELECT * FROM jobs WHERE kind='self_awake' AND session_id=? AND causation_id=?
+      ORDER BY created_at DESC,id DESC LIMIT 1`).get(sessionId, parentJobId)
+    if (!row) return null
+    const job = fromRow(row)
+    const payload = job.payload && typeof job.payload === 'object' && !Array.isArray(job.payload) ? job.payload : {}
+    return { id: job.id, dueAt: job.dueAt, createdAt: job.createdAt, state: job.state,
+      reason: typeof payload.prompt === 'string' ? payload.prompt : '' }
+  }
+
   resolveOutcome(id: string, expectedUpdatedAt: number, decision: 'completed' | 'cancelled', note: string): JobInfo {
+    this.read(id)
     resolveJobOutcome(this.database, id, expectedUpdatedAt, decision, note)
     return this.read(id)
   }
@@ -42,18 +54,19 @@ export class JobRepository {
     jobIdSchema.parse({ id })
     const row = this.database.connection.prepare('SELECT * FROM jobs WHERE id=?').get(id)
     if (!row) throw new Error('Job not found in this world')
+    if (row.session_id) new SessionOwnership(this.database).assert(String(row.session_id))
     return fromRow(row)
   }
 
   list(value: unknown = {}): JobInfo[] {
     const input = jobListSchema.parse(value)
-    return this.database.connection.prepare(`SELECT * FROM jobs WHERE (? IS NULL OR session_id=?) AND (? IS NULL OR state=?) ORDER BY created_at DESC,id DESC LIMIT ?`)
+    return this.database.connection.prepare(`SELECT * FROM jobs WHERE ${accountFilter(this.database, 'session_id')} AND (? IS NULL OR session_id=?) AND (? IS NULL OR state=?) ORDER BY created_at DESC,id DESC LIMIT ?`)
       .all(input.sessionId ?? null, input.sessionId ?? null, input.state ?? null, input.state ?? null, input.limit).map(fromRow)
   }
   page(value: unknown = {}) {
     const input = jobPageSchema.parse(value), states = input.states ? JSON.stringify(input.states) : null
     const beforeTime = input.before?.createdAt ?? null, beforeId = input.before?.id ?? null
-    const rows = this.database.connection.prepare(`SELECT * FROM jobs WHERE (? IS NULL OR session_id=?)
+    const rows = this.database.connection.prepare(`SELECT * FROM jobs WHERE ${accountFilter(this.database, 'session_id')} AND (? IS NULL OR session_id=?)
       AND (? IS NULL OR kind=?) AND (? IS NULL OR state IN (SELECT value FROM json_each(?)))
       AND (? IS NULL OR created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT ?`)
       .all(input.sessionId ?? null, input.sessionId ?? null, input.kind ?? null, input.kind ?? null, states, states,

@@ -1,3 +1,4 @@
+import { accountFilter } from '../accounts/index.ts'
 import { operationListSchema, operationResolveSchema, toJson } from '@eden/api'
 import type { SessionRepository } from '../sessions/index.ts'
 export class OperationRepository {
@@ -19,7 +20,7 @@ export class OperationRepository {
     const input = operationListSchema.parse(raw)
     if (input.sessionId) this.sessions.read(input.sessionId)
     return this.sessions.database.connection.prepare(`SELECT o.id FROM tool_operations o JOIN sessions s ON s.id=o.session_id
-      WHERE s.status!='deleted' AND (? IS NULL OR o.session_id=?) AND (? IS NULL OR o.state=?) ORDER BY o.created_at DESC,o.id DESC LIMIT ?`)
+      WHERE ${accountFilter(this.sessions.database, 's.id')} AND s.status!='deleted' AND (? IS NULL OR o.session_id=?) AND (? IS NULL OR o.state=?) ORDER BY o.created_at DESC,o.id DESC LIMIT ?`)
       .all(input.sessionId ?? null, input.sessionId ?? null, input.state ?? null, input.state ?? null, input.limit).map(row => this.read(String(row.id)))
   }
   resolve(raw: unknown) {

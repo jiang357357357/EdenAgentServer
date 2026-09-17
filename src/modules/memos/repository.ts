@@ -1,3 +1,5 @@
+import { recordFilter, ownRecord } from '../accounts/index.ts'
+import { SessionOwnership } from '../accounts/index.ts'
 import { JobRepository } from '../jobs/index.ts'
 import { scheduleMemo } from './scheduling.ts'
 import { nextMemoOccurrence } from './repeat.ts'
@@ -13,10 +15,11 @@ export class MemoRepository {
 
   create(value: MemoInput, operationKey?: string): MemoInfo {
     const input = memoCreateSchema.parse(value)
+    if (input.relatedSessionId) new SessionOwnership(this.database).assert(input.relatedSessionId)
     return this.database.transaction(() => {
       if (operationKey) {
         const existing = this.database.connection.prepare('SELECT * FROM memos WHERE operation_key=?').get(operationKey)
-        if (existing) return fromRow(existing)
+        if (existing) return this.read(Number(existing.id))
       }
       if (input.relatedSessionId && !this.database.connection.prepare("SELECT 1 FROM sessions WHERE id=? AND status='active'").get(input.relatedSessionId)) throw new Error('Memo session is not active')
       const now = Date.now()
@@ -24,6 +27,7 @@ export class MemoRepository {
         (title,content,kind,status,priority,remind_at,due_at,repeat_rule,related_session_id,metadata_json,completed_at,created_at,updated_at,operation_key,snoozed_until)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.title, input.content, input.kind, input.status, input.priority,
           input.remindAt, input.dueAt, input.repeatRule, input.relatedSessionId, JSON.stringify(input.metadata), input.status === 'done' ? now : null, now, now, operationKey ?? null, input.snoozedUntil)
+      ownRecord(this.database, 'memo', Number(result.lastInsertRowid), input.relatedSessionId)
       const memo = this.read(Number(result.lastInsertRowid))
       scheduleMemo(this.jobs, memo)
       return memo
@@ -42,7 +46,7 @@ export class MemoRepository {
 
   read(id: number): MemoInfo {
     const value = memoIdSchema.parse({ id })
-    const row = this.database.connection.prepare('SELECT * FROM memos WHERE id=?').get(value.id)
+    const row = this.database.connection.prepare(`SELECT * FROM memos WHERE ${recordFilter(this.database, 'memo', 'id')} AND id=?`).get(value.id)
     if (!row) throw new Error('Memo not found in this world')
     return fromRow(row)
   }
@@ -50,7 +54,7 @@ export class MemoRepository {
   list(limit = 80, query?: string | null): MemoInfo[] {
     const input = memoListSchema.parse({ limit, query })
     const search = input.query?.trim() ?? ''
-    return this.database.connection.prepare(`SELECT * FROM memos WHERE ?='' OR instr(lower(title),lower(?))>0 OR instr(lower(content),lower(?))>0
+    return this.database.connection.prepare(`SELECT * FROM memos WHERE ${recordFilter(this.database, 'memo', 'id')} AND (?='' OR instr(lower(title),lower(?))>0 OR instr(lower(content),lower(?))>0)
       ORDER BY updated_at DESC,id DESC LIMIT ?`).all(search, search, search, input.limit).map(fromRow)
   }
 
@@ -73,13 +77,13 @@ export class MemoRepository {
   due(before = Date.now(), limit = 80): MemoInfo[] {
     memoIntegerSchema.parse(before)
     const count = memoListSchema.parse({ limit }).limit
-    return this.database.connection.prepare(`SELECT * FROM memos WHERE ${pending} AND COALESCE(snoozed_until,remind_at,due_at)<=?
+    return this.database.connection.prepare(`SELECT * FROM memos WHERE ${recordFilter(this.database, 'memo', 'id')} AND ${pending} AND COALESCE(snoozed_until,remind_at,due_at)<=?
       ORDER BY COALESCE(snoozed_until,remind_at,due_at),id LIMIT ?`).all(before, count).map(fromRow)
   }
 
   next(after = Date.now()): MemoInfo | null {
     memoIntegerSchema.parse(after)
-    const row = this.database.connection.prepare(`SELECT * FROM memos WHERE ${pending} AND COALESCE(snoozed_until,remind_at,due_at)>=?
+    const row = this.database.connection.prepare(`SELECT * FROM memos WHERE ${recordFilter(this.database, 'memo', 'id')} AND ${pending} AND COALESCE(snoozed_until,remind_at,due_at)>=?
       ORDER BY COALESCE(snoozed_until,remind_at,due_at),id LIMIT 1`).get(after)
     return row ? fromRow(row) : null
   }

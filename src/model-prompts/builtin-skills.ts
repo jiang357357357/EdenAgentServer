@@ -1,6 +1,15 @@
 /** Instruction content only: execution schemas and permissions belong to their tools. */
 export const BUILTIN_SKILL_GUIDES = [
   {
+    name: 'web-research', description: '搜索实时网页信息、读取公开网页正文，并在已读取页面中定位相关内容。',
+    tools: ['web_search', 'web_fetch', 'web_find'], profiles: ['user_chat', 'self_awake', 'subagent'],
+    content: `# 网页搜索与研究
+需要近期事实、外部资料或用户指定网页时，先用 web_search 搜索。查询应简短明确；不同语言或不同检索意图拆成多条 queries。
+搜索结果只是线索。根据返回的 refId 使用 web_fetch 读取支持结论的页面正文，需要在长页面中定位内容时使用 web_find。
+普通事实查找通常只需一次搜索和一至两次正文读取；只有首轮没有相关结果时才补充一次搜索。某个来源无法读取时，若已有来源足以支持回答，应说明证据范围并作答，不要为寻找完美来源反复改写查询。
+优先选择原始、官方和与问题直接相关的来源。说明结论来自哪些 URL，不伪造网页内容，也不把搜索摘要当作已核实的正文。`,
+  },
+  {
     name: 'eden-memory', description: '检索已有记忆，保存值得长期保留的信息，避免重复记录和把猜测写成事实。',
     tools: ['search_memories', 'remember_memory'], profiles: ['user_chat', 'self_awake', 'subagent'],
     content: `# 记忆管理

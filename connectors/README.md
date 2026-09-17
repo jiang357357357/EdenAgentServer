@@ -1,14 +1,13 @@
-# 连接器插件
+# 自定义连接器
 
-`official/<id>/src` 保存 TS 业务实现，`package` 保存统一插件清单、连接器能力声明和游戏资产。宿主协调代码位于 `Server/src/modules/connectors`，只处理实例、版本、权限和声明式资源绑定。
+本项目不再预置游戏连接器。连接器由用户或智能体按需求编写，通用宿主与前端不按应用名称分支。
+
+通过 `manage_connector_plugins` 的 `describe` 获取开发协议，使用 `@eden/plugin-sdk/connector` 实现独立 Node worker。
+
+构建任意源码目录：
 
 ```sh
-npm run build:connectors
-node Script/Project/package_connector.mjs --source /absolute/plugin-source /absolute/built-package
+npm run build:connector -- --source /absolute/source /absolute/package
 ```
 
-所有构建均产生 Node 单文件 worker 和完整内容校验清单。官方包写入 `dist/connectors/<id>`；安装后运行数据库保存的不可变包快照，源码变化不能替换已经批准的版本。安装、权限、组件启停和回滚由统一插件仓库所有，官方包没有免安装/免审批的执行路径。
-
-新插件使用 `@eden/plugin-sdk/connector`：定义 `ConnectorDefinition`，返回会话的 `health/query/execute/close`，通过 `context.publish` 发布声明过的事件。文件通过 `settings.<字段>` 声明后挂载，HTTP/TCP 通过固定目标桥接，凭据仅注入当前实例。增加第五个连接器不修改宿主或官方名称数组。
-
-旧 Rust 源码已归档到 `Archive/2026-09-10-rust-connectors`。当前隔离执行仍要求 Linux bubblewrap/prlimit。Victoria 3 控制探针已有 TS/PowerShell 实现，但 Windows 宿主连接器隔离尚不支持，不能把源码和模拟测试视为跨平台输入验收。游戏模组和 OpenTTD Squirrel 桥接资产继续保留。
+安装与版本授权仍由插件管理负责，运行前配置实例资源权限与会话绑定；安装包使用不可变快照。Server 构建与发布不自动携带连接器。

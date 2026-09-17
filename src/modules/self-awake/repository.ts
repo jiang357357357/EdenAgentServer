@@ -1,3 +1,4 @@
+import { accountFilter, currentAccount, SessionOwnership } from '../accounts/index.ts'
 import { wakeDeadline } from './deadline.ts'
 import { SelfAwakeTimerPublication } from './timer-publication.ts'
 import { readExternalSchedule } from './external-schedule.ts'
@@ -80,19 +81,22 @@ export class SelfAwakeRepository {
     selfAwakeExecutionSchema.parse({ runId: id })
     const row = this.database.connection.prepare('SELECT * FROM self_awake_runs WHERE id=?').get(id)
     if (!row) throw new Error('Self-awake run not found in this world')
+    new SessionOwnership(this.database).assert(String(row.session_id))
     return this.fromRow(row)
   }
 
   list(params: unknown) {
     const input = selfAwakeListSchema.parse(params), query = input.query?.trim() ?? ''
     const where = "(?='' OR instr(lower(request_json),lower(?))>0 OR instr(lower(COALESCE(decision_json,'')),lower(?))>0)"
-    const count = Number(this.database.connection.prepare(`SELECT COUNT(*) AS count FROM self_awake_runs WHERE ${where}`).get(query, query, query)?.count ?? 0)
-    const rows = this.database.connection.prepare(`SELECT * FROM self_awake_runs WHERE ${where} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`)
+    const scopedWhere = `${accountFilter(this.database, 'session_id')} AND ${where}`
+    const count = Number(this.database.connection.prepare(`SELECT COUNT(*) AS count FROM self_awake_runs WHERE ${scopedWhere}`).get(query, query, query)?.count ?? 0)
+    const rows = this.database.connection.prepare(`SELECT * FROM self_awake_runs WHERE ${scopedWhere} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`)
       .all(query, query, query, input.pageSize, (input.page - 1) * input.pageSize)
-    const next = this.database.connection.prepare("SELECT due_at,payload_json FROM jobs WHERE kind='self_awake' AND state='queued' ORDER BY due_at LIMIT 1").get()
+    const next = this.database.connection.prepare(`SELECT due_at,payload_json FROM jobs WHERE ${accountFilter(this.database, "session_id")} AND kind='self_awake' AND state='queued' ORDER BY due_at LIMIT 1`).get()
     const external = readExternalSchedule(this.scheduleStateFile)
     const local = next ? { status: 'scheduled', nextWakeAt: new Date(Number(next.due_at)).toISOString(), reason: String(object(JSON.parse(String(next.payload_json))).prompt ?? '') } : null
-    const schedule = this.externalScheduler ? external : local
+    const ownsSchedule = !currentAccount() || Boolean(this.database.connection.prepare(`SELECT 1 FROM self_awake_submissions s JOIN jobs j ON j.id=s.job_id WHERE ${accountFilter(this.database, 'j.session_id')} LIMIT 1`).get())
+    const schedule = this.externalScheduler ? (ownsSchedule ? external : null) : local
     return { schedule, count, page: input.page, pageSize: input.pageSize, totalPages: Math.ceil(count / input.pageSize), results: rows.map(row => this.fromRow(row)) }
   }
 
@@ -166,6 +170,7 @@ export class SelfAwakeRepository {
       ? this.inputFailure(String(row.session_id), String(row.input_id), 'interrupted')
       : row.last_error === null ? null : String(row.last_error)
     return { id: String(row.id), jobId: String(row.job_id), sessionId: String(row.session_id), schemaVersion: 'self-awake.v1', eventId: String(row.event_id),
+      scheduledWake: new JobRepository(this.database).latestWakePlan(String(row.session_id), String(row.job_id)),
       outcomeReview: review ? { decision: String(review.decision), note: String(review.note), reviewedAt: Number(review.created_at) } : null,
       status: String(row.state), request: toJson(JSON.parse(String(row.request_json))), decision: row.decision_json === null ? null : toJson(JSON.parse(String(row.decision_json))),
       authorSnapshot: toJson(JSON.parse(String(row.author_json))), attempts: Number(row.attempts), lastError,

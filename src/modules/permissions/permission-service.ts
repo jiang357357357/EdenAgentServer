@@ -11,7 +11,8 @@ export class PermissionService {
   private readonly pending = new Map<string, Waiter>()
   private readonly modeStore: PermissionModeStore
   private readonly repository: PermissionRepository
-  constructor(database: EdenDatabase, events: PermissionEventSink) {
+  constructor(database: EdenDatabase, events: PermissionEventSink,
+    private readonly interactiveApprovalAvailable: (sessionId: string) => boolean = () => true) {
     this.modeStore = new PermissionModeStore(database)
     this.modeStore.read()
     this.repository = new PermissionRepository(database, events)
@@ -32,6 +33,12 @@ export class PermissionService {
     if (this.modeStore.allows(capability) || this.repository.granted(request)) request.state = 'allowed'
     const event = this.repository.insert(request)
     if (request.state === 'allowed') { this.repository.events.publish(event); context.assertCurrent?.(); return request.id }
+    if (!this.interactiveApprovalAvailable(context.sessionId)) {
+      this.repository.events.publish(event)
+      const message = '后台运行无法等待交互审批；已有持久授权或允许该能力后可在下次运行中执行'
+      this.resolve(request.id, false, 'denied', false, message)
+      throw Object.assign(new Error(`Permission unavailable in background run: ${capability}`), { toolOutcome: 'failed' })
+    }
     await new Promise<void>((resolve, reject) => {
       const abort = () => {
         try { this.resolve(request.id, false, 'cancelled') }

@@ -1,3 +1,4 @@
+import { accountFilter } from '../accounts/index.ts'
 import { randomUUID } from 'node:crypto'
 import { toJson } from '@eden/api'
 import type { JsonValue } from '@eden/api'
@@ -7,11 +8,12 @@ export class MediaRepository {
   read(id: string) {
     const row = this.sessions.database.connection.prepare('SELECT * FROM media_requests WHERE id=?').get(id)
     if (!row) throw new Error('Media request not found')
+    this.sessions.ownership.assert(String(row.session_id))
     return { id: String(row.id), sessionId: String(row.session_id), turnId: String(row.turn_id), kind: String(row.kind),
       state: String(row.state), request: JSON.parse(String(row.request_json)) as JsonValue, createdAt: Number(row.created_at) }
   }
   list(kind?: string | null) {
-    return this.sessions.database.connection.prepare("SELECT m.id FROM media_requests m JOIN sessions s ON s.id=m.session_id WHERE m.state='pending' AND s.status='active' AND (? IS NULL OR m.kind=?) ORDER BY m.created_at,m.id")
+    return this.sessions.database.connection.prepare(`SELECT m.id FROM media_requests m JOIN sessions s ON s.id=m.session_id WHERE ${accountFilter(this.sessions.database, 's.id')} AND m.state='pending' AND s.status='active' AND (? IS NULL OR m.kind=?) ORDER BY m.created_at,m.id`)
       .all(kind ?? null, kind ?? null).map(row => this.read(String(row.id)))
   }
   create(sessionId: string, turnId: string, kind: string, request: JsonValue) {

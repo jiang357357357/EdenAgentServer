@@ -5,6 +5,7 @@ export function selfAwakeInstruction(request: JsonValue): string {
 可使用 get_self_awake_context 补充上下文，使用 set_self_awake_timer 安排下一次醒来。
 最终回复直接写一篇给用户阅读的自然语言日记，以当前角色第一人称记录观察、感受和实际做过的事。宿主会将最终回复原样保存为日记正文，无需 JSON 或固定字段。
 通知、联系用户、创建提醒或安排下次自醒，通过对应工具执行；日记中的行动描述和时间愿望不会触发操作。执行是否成功以工具结果为准。
+后台自醒不会等待用户现场审批：已有授权的操作可以执行，尚未授权的操作会立即失败。单个工具失败后继续依据已有信息完成本轮，并在日记中如实记录未执行的操作。
 请求数据：\n${JSON.stringify(request)}`
 }
 

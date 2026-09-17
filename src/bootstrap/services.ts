@@ -30,6 +30,7 @@ import { QuestionService, questionTool } from '../modules/questions/index.ts'
 import { BlobRepository, BlobService } from '../modules/blobs/index.ts'
 import { AttachmentService, AttachmentRepository, attachmentTool } from '../modules/attachments/index.ts'
 import { MemoryRepository, MemoryScopes, MemoryRecall, memoryTools, MemoryExtractionService } from '../modules/memories/index.ts'
+import { WebService, webTools } from '../modules/web/index.ts'
 
 export function createServices(database: EdenDatabase, config: ServerConfig) {
   database.connection.prepare("UPDATE connector_operations SET state='unknown',error='Host restarted before connector result confirmation' WHERE state='running'").run()
@@ -68,15 +69,21 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
   directors.recoverInterrupted()
   const modelBindings = config.origin === 'mon' ? new ModelBindingRepository(database) : undefined
   const models = new ModelService(config.origin, config.model, modelBindings, new ModelPricingRepository(database), config.origin === 'local' ? new LocalChildModels(database) : undefined)
-  const plugins = new PluginService(database, [config.dataRoot, path.resolve('Data')])
-  const commands = new CommandService(database, [config.dataRoot, path.resolve('Data')], config.externalCommandSandbox)
-  const workspace = new WorkspaceService(database, [config.dataRoot, path.resolve('Data')])
+  const plugins = new PluginService(database, config.privateDataRoots ?? [config.dataRoot, path.resolve('Data')])
+  const commands = new CommandService(database, config.privateDataRoots ?? [config.dataRoot, path.resolve('Data')], config.externalCommandSandbox)
+  const workspace = new WorkspaceService(database, config.privateDataRoots ?? [config.dataRoot, path.resolve('Data')])
+  if (config.defaultWorkspaceRoot && !workspace.info().path) workspace.switch(config.defaultWorkspaceRoot)
   const systemSkills = new SystemSkillCatalog(config.systemSkillRoots ?? [])
   const projectSkills = new SystemSkillCatalog(() => workspace.info().path
     ? ['.agents/skills', '.edenagent/skills'].map(relative => path.join(workspace.root(), relative)) : [], true)
   const skills: SkillService = new SkillService(new SkillRepository(database, () => workspace.info().path ? workspace.root() : '', () => pluginMarket.installed.skillContributions(),
     () => ({ tools: sessions.toolCatalog().map(tool => tool.name), codeToolsAvailable: skills.codeToolsAvailable }), () => systemSkills.list(), () => projectSkills.list(), builtinSkillSnapshots), systemSkills, projectSkills, config.externalCommandSandbox)
-  const permissions = new PermissionService(database, repository.events)
+  const permissions = new PermissionService(database, repository.events, sessionId => {
+    const environment = repository.read(sessionId).environment
+    return !(environment && typeof environment === 'object' && !Array.isArray(environment)
+      && environment.sessionPurpose === 'self_awake')
+  })
+  const web = new WebService(config.web)
   const questions = new QuestionService(repository)
   const toolDefinitions = (sessionId: string, turnId: string, actorId?: string | number): RuntimeTool[] => filterSubagentTools(database, sessionId, [
     ...mcpTools(mcp, database, permissions, sessionId, turnId),
@@ -96,6 +103,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
     questionTool(questions, sessionId, turnId), ...memoTools(memos, permissions, sessionId, turnId),
     attachmentTool(attachmentRepository, attachments, sessionId, turnId),
     ...memoryTools(memories, memoryScopes, permissions, { sessionId, turnId, ...(actorId === undefined ? {} : { actorId }) }),
+    ...webTools(web, permissions, sessionId, turnId),
     ...(config.origin === 'mon' ? contactTools(mon, permissions, sessionId, turnId) : []),
     ...(config.origin === 'mon' ? deviceTools(mon, permissions, sessionId, turnId) : []),
     ...(config.origin === 'mon' ? handoffTools(mon, handoffs.repository, permissions, sessionId, turnId) : []),

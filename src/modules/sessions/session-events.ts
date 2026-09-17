@@ -1,3 +1,4 @@
+import { withoutAccount, SessionOwnership } from '../accounts/index.ts'
 import { historicalContextSources } from './context-sources.ts'
 import { RequestPersistence } from './request-persistence.ts'
 import { StreamPersistence, restoreStreamPayload } from './stream-persistence.ts'
@@ -30,7 +31,7 @@ export class SessionEvents {
   publish(event: DurableEvent): void {
     this.streams.committed(event)
     for (const listener of this.listeners) {
-      try { listener(event) }
+      try { withoutAccount(() => listener(event)) }
       catch (error) { process.stderr.write(`Event subscriber failed: ${error instanceof Error ? error.message : 'unknown'}\n`) }
     }
   }
@@ -41,6 +42,7 @@ export class SessionEvents {
   }
 
   list(sessionId: string, afterSeq = '0', limit = 100): DurableEvent[] {
+    new SessionOwnership(this.database).assert(sessionId)
     const statement = this.database.connection.prepare('SELECT * FROM events WHERE session_id=? AND seq>? ORDER BY seq LIMIT ?')
     statement.setReadBigInts(true)
     const restored = new Map<string, DurableEvent>()
@@ -48,6 +50,7 @@ export class SessionEvents {
   }
 
   latestContextRequests(sessionId: string): DurableEvent[] {
+    new SessionOwnership(this.database).assert(sessionId)
     const statement = this.database.connection.prepare(`SELECT * FROM events WHERE session_id=? AND seq IN
       (SELECT MAX(seq) FROM events WHERE session_id=? AND kind='model.request'
        GROUP BY COALESCE(CAST(json_extract(payload_json,'$.actor.assistantID') AS TEXT),''))
@@ -77,6 +80,7 @@ export class SessionEvents {
   }
 
   messages(sessionId: string, before: string | undefined, limit: number): { items: DurableEvent[]; hasMore: boolean; nextCursor: string | null } {
+    new SessionOwnership(this.database).assert(sessionId)
     let beforeSeq = 9223372036854775807n
     if (before) {
       const cursor = this.database.connection.prepare("SELECT seq FROM events WHERE session_id=? AND id=? AND kind='agent.message_end'")

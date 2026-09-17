@@ -1,3 +1,4 @@
+import { accountFilter } from '../accounts/index.ts'
 import { randomUUID } from 'node:crypto'
 import { questionAskSchema, toJson } from '@eden/api'
 import type { QuestionItem, QuestionRequest } from '@eden/api'
@@ -22,13 +23,14 @@ export class QuestionRepository {
   read(id: string): QuestionRequest {
     const row = this.sessions.database.connection.prepare('SELECT * FROM question_requests WHERE id=?').get(id)
     if (!row) throw new Error('Question request not found')
+    this.sessions.ownership.assert(String(row.session_id))
     return { id: String(row.id), sessionId: String(row.session_id), turnId: String(row.turn_id), state: String(row.state),
       questions: questionAskSchema.parse({ questions: JSON.parse(String(row.questions_json)) }).questions, createdAt: Number(row.created_at) }
   }
 
   pending(sessionId?: string): QuestionRequest[] {
     if (sessionId) this.sessions.read(sessionId)
-    return this.sessions.database.connection.prepare("SELECT id FROM question_requests WHERE state='pending' AND (? IS NULL OR session_id=?) ORDER BY created_at, id")
+    return this.sessions.database.connection.prepare(`SELECT id FROM question_requests WHERE ${accountFilter(this.sessions.database, 'session_id')} AND state='pending' AND (? IS NULL OR session_id=?) ORDER BY created_at, id`)
       .all(sessionId ?? null, sessionId ?? null).map(row => this.read(String(row.id)))
   }
 

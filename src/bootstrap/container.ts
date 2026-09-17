@@ -1,121 +1,79 @@
-import { UiPreferenceRepository } from '../modules/ui-preferences/index.ts'
-import { uiPreferenceRoutes } from '../transport/rpc/ui-preferences.routes.ts'
-import { operationRoutes } from '../transport/rpc/operation.routes.ts'
-import { commandRoutes } from '../transport/rpc/command.routes.ts'
-import { mcpRoutes } from '../transport/rpc/mcp.routes.ts'
-import { connectorRoutes } from '../transport/rpc/connector.routes.ts'
-import { mediaRoutes } from '../transport/rpc/media.routes.ts'
-import { voiceRoutes } from '../transport/rpc/voice.routes.ts'
-import { subagentRoutes } from '../transport/rpc/subagent.routes.ts'
-import { pluginAssetRoutes } from '../transport/rpc/plugin-assets.routes.ts'
-import { pluginMarketRoutes } from '../transport/rpc/plugin-market.routes.ts'
-import { skillRoutes } from '../transport/rpc/skill.routes.ts'
-import { SelfAwakeHttp } from '../transport/http/self-awake.ts'
-import { notificationRoutes } from '../transport/rpc/notification.routes.ts'
-import { selfAwakeRoutes } from '../transport/rpc/self-awake.routes.ts'
-import { jobRoutes } from '../transport/rpc/job.routes.ts'
-import { memoRoutes } from '../transport/rpc/memo.routes.ts'
-import { createServer } from 'node:http'
-import type { AddressInfo } from 'node:net'
-import { EdenDatabase, } from '@eden/store'
-import { rpcMethods } from '@eden/api'
-import { contractHandler } from '../transport/rpc/contract-handler.ts'
-import { attachWebsocket } from '../transport/websocket/upgrade.ts'
-import type { ServerConfig } from './config.ts'
-import { persistToken } from './config.ts'
-import { acquireProcessLock } from './process-lock.ts'
-import { pluginRoutes } from '../transport/rpc/plugin.routes.ts'
-import { permissionRoutes } from '../transport/rpc/permission.routes.ts'
-import { workspaceRoutes } from '../transport/rpc/workspace.routes.ts'
-import { modelRoutes } from '../transport/rpc/model.routes.ts'
-import { directorRoutes } from '../transport/rpc/director.routes.ts'
-import { questionRoutes } from '../transport/rpc/question.routes.ts'
-import { createServices } from './services.ts'
-import { BlobHttp } from '../transport/http/blobs.ts'
-import { healthHandler } from '../transport/http/health.ts'
-import { memoryExtractionRoutes } from '../transport/rpc/memory-extraction.routes.ts'
+import { createServer } from "node:http"
+import type { AddressInfo } from "node:net"
+import { attachWebsocket } from "../transport/websocket/upgrade.ts"
+import { AccountHttp } from "../transport/http/account-dispatch.ts"
+import { healthHandler } from "../transport/http/health.ts"
+import { acquireProcessLock } from "./process-lock.ts"
+import { persistToken, type ServerConfig } from "./config.ts"
+import { AccountRuntimes } from "./account-runtimes.ts"
 
 export async function startServer(config: ServerConfig) {
-  const started = performance.now()
-  const progress = (stage: string) => process.stdout.write(JSON.stringify({ event: 'server.startup', origin: config.origin,
-    stage, elapsedMs: Math.round(performance.now() - started) }) + '\n')
-  progress('database')
-  const releaseProcessLock = acquireProcessLock(config.dataRoot)
-  const releaseLock = releaseProcessLock
-  let database: EdenDatabase
-  try { database = new EdenDatabase(config.databasePath, config.origin) }
-  catch (error) { releaseLock(); throw error }
-  progress('services')
-  let services: ReturnType<typeof createServices>
-  try { services = createServices(database, config) }
-  catch (error) { database.close(); releaseLock(); throw error }
-  const { plugins, permissions, sessions, workspace, models, mon, directors, companion, questions, memoryExtractions } = services
-  const selfAwakeHttp = new SelfAwakeHttp(config.origin, services.selfAwakeBridge)
-  const blobHttp = new BlobHttp(services.blobs, config)
-  const drainServices = () => { services.realtimeVoice.close(); services.scheduler.close(); services.pluginHooks.close(); services.selfAwake.close(); return Promise.allSettled([services.mcpResults.close(), services.mcp.close(), services.connectorLifecycle.close(), services.speech.close(), services.voice.close(), services.subagentLifecycle.close(), services.packageAssets.close(), services.pluginMarket.close(), services.skills.close(), selfAwakeHttp.close(), services.selfAwakeActions.close(), memoryExtractions.close(), blobHttp.close(), plugins.close(), sessions.close(),
-    mon.close(), companion.close(), Promise.resolve().then(() => services.media.close()), Promise.resolve().then(() => questions.close())]) }
-  const health = healthHandler(config.origin, () => ({ model: Boolean(config.model), sessionFaults: sessions.faultCount(),
-    memoryExtraction: memoryExtractions.fault === undefined, jobs: services.scheduler.fault === undefined, pluginHooks: services.pluginHooks.fault === undefined, subagents: services.subagentLifecycle.fault === undefined, selfAwake: services.selfAwake.fault === undefined && services.selfAwakeActions.fault === undefined }))
-  const http = createServer((request, response) => {
-    if (selfAwakeHttp.handle(request, response)) return
-    if (blobHttp.handle(request, response)) return
-    health(request, response)
-  })
-  const websocket = attachWebsocket(http, config, sessions, {
-    'memo.job.resubmit': contractHandler(rpcMethods['memo.job.resubmit'], input => services.memoJobRecovery.resubmit(input.id, input.expectedUpdatedAt, input.note)),
-    'plugin.hook.resubmit': contractHandler(rpcMethods['plugin.hook.resubmit'], input => services.pluginHooks.resubmit(input.id, input.expectedUpdatedAt, input.note)),
-    'runtime.status': contractHandler(rpcMethods['runtime.status'], () => ({ mode: 'runtime', runtimeOrigin: config.origin, automaticExecution: true })),
-    ...operationRoutes(services.repository), ...commandRoutes(services.commands), ...mcpRoutes(services.mcp, database, services.mcpResults), ...connectorRoutes(services.connectorCatalog, services.connectors, services.connectorEvents, services.connectorPermissions, services.connectorCredentials), ...mediaRoutes(services.media), ...voiceRoutes(services.voiceConfig, services.voice, services.speech), ...subagentRoutes(services.subagents), ...memoryExtractionRoutes(memoryExtractions), ...memoRoutes(services.memos, services.memoNotifications),
-    ...uiPreferenceRoutes(new UiPreferenceRepository(database)),
-    ...notificationRoutes(services.desktopReminders),
-    ...selfAwakeRoutes(services.selfAwake.repository, services.selfAwakeActions, services.selfAwake),
-    ...directorRoutes(directors), ...jobRoutes(services.jobs),
-    ...questionRoutes(questions),
-    ...pluginAssetRoutes(services.packageAssets), ...pluginMarketRoutes(services.pluginMarket), ...skillRoutes(services.skills), ...pluginRoutes(plugins, services.pluginMarket.installed), ...permissionRoutes(permissions), ...workspaceRoutes(workspace, sessions), ...modelRoutes(models, sessions, config.origin === 'mon' ? mon : undefined),
-  }, sessionId => services.realtimeVoice.prepare(sessionId))
+  // Local's sole runtime owns its lock; Mon owns a parent lock plus one per-account storage lock.
+  const release = config.origin === "mon" ? acquireProcessLock(config.dataRoot) : () => {}
+  const runtimes = new AccountRuntimes(config)
   try {
-    progress('skills')
-    await services.skills.start()
-    progress('memory-recovery')
-    await memoryExtractions.start()
-    progress('http-listen')
+    await runtimes.start()
+  } catch (error) {
+    await runtimes.close()
+    release()
+    throw error
+  }
+  const dispatch = new AccountHttp(config, runtimes)
+  const health = healthHandler(config.origin, () => ({
+    model: Boolean(config.model),
+    sessionFaults: 0,
+    memoryExtraction: true,
+    accounts: runtimes.ready(),
+  }))
+  const http = createServer((request, response) => {
+    if (dispatch.handle(request, response)) return
+    if (config.origin === "local") runtimes.defaultRuntime().health(request, response)
+    else health(request, response)
+  })
+  const websocket = attachWebsocket(http, config, (token) => runtimes.resolve(token))
+  try {
     await new Promise<void>((resolve, reject) => {
-      http.once('error', reject)
-      http.listen(config.port, config.host, () => { http.removeListener('error', reject); resolve() })
+      http.once("error", reject)
+      http.listen(config.port, config.host, () => {
+        http.removeListener("error", reject)
+        resolve()
+      })
     })
     persistToken(config)
-    progress('background-services')
-    await services.subagentLifecycle.start()
-    sessions.resumePending()
-    services.memos.recoverSchedules()
-    services.selfAwakeActions.start()
-    services.selfAwake.start()
-    services.pluginHooks.start()
-    services.scheduler.start()
-    services.mon.startSync()
-    services.mcp.start()
-    services.connectorLifecycle.start()
   } catch (error) {
-    for (const client of websocket.clients) client.terminate()
-    await drainServices()
-    http.closeAllConnections(); http.close(); websocket.close(); database.close(); releaseLock(); throw error
+    websocket.close()
+    await dispatch.close()
+    await runtimes.close()
+    release()
+    throw error
   }
-  progress('ready')
-  const address = http.address() as AddressInfo
   let closing: Promise<void> | undefined
   return {
-    port: address.port, sessions, plugins, permissions, memoryExtractions,
+    port: (http.address() as AddressInfo).port,
+    get sessions() {
+      return runtimes.defaultRuntime().services.sessions
+    },
+    get plugins() {
+      return runtimes.defaultRuntime().services.plugins
+    },
+    get permissions() {
+      return runtimes.defaultRuntime().services.permissions
+    },
+    get memoryExtractions() {
+      return runtimes.defaultRuntime().services.memoryExtractions
+    },
     close(): Promise<void> {
       closing ??= (async () => {
         for (const client of websocket.clients) client.terminate()
-        const drained = await drainServices()
+        await dispatch.close()
         websocket.close()
         http.closeAllConnections()
-        await new Promise<void>((resolve, reject) => http.close(error => error ? reject(error) : resolve()))
-        database.close()
-        releaseLock()
-        const failures = drained.filter(result => result.status === 'rejected')
-        if (failures.length) throw new AggregateError(failures.map(result => result.reason), 'Runtime shutdown completed with errors')
+        await new Promise<void>((resolve, reject) => http.close((error) => (error ? reject(error) : resolve())))
+        try {
+          await runtimes.close()
+        } finally {
+          release()
+        }
       })()
       return closing
     },

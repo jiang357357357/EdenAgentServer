@@ -1,3 +1,4 @@
+import { accountKey, withAccount } from '../accounts/index.ts'
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { MonClient, acquireMonServiceToken } from '@eden/integrations'
@@ -36,7 +37,7 @@ export class SelfAwakeBridge {
         const client = new MonClient(this.identity.coreBaseUrl, token)
         const author = assistantParticipant(await client.get('/api/assistants/current/', this.abort.signal))
         // Each external wake captures its own duty identity; it never mutates an active character's session.
-        const session = this.sessions.repository.create('后台自醒', [author], { sessionPurpose: 'self_awake', selfAwakeUserId: input.user_id, timezone: 'Asia/Shanghai', locale: 'zh-CN' })
+        const session = withAccount({ key: accountKey(this.identity.coreBaseUrl, input.user_id), userId: input.user_id, coreBaseUrl: this.identity.coreBaseUrl }, () => this.sessions.repository.create('后台自醒', [author], { sessionPurpose: 'self_awake', selfAwakeUserId: input.user_id, timezone: 'Asia/Shanghai', locale: 'zh-CN' }))
         try {
           await this.mon.catalog({ sessionId: session.id, coreBaseUrl: this.identity.coreBaseUrl, coreToken: token })
           this.abort.signal.throwIfAborted()

@@ -64,3 +64,23 @@ test('committed approval wins over subscriber cancellation, while failed persist
     assert.throws(() => permissions.resolve(request.id, false), /already resolved/)
   } finally { controller.abort(); database.close() }
 })
+
+test('background runs fail an ungranted capability immediately without waiting for interactive approval', async () => {
+  const database = new EdenDatabase(':memory:', 'local')
+  const sessions = new SessionRepository(database, 'local')
+  const session = sessions.create('Background', [], { sessionPurpose: 'self_awake' })
+  const permissions = new PermissionService(database, sessions.events, () => false)
+  const context = { sessionId: session.id, turnId: randomUUID(), callId: 'background', signal: new AbortController().signal }
+  try {
+    await assert.rejects(
+      permissions.request(context, 'command.execute', '/workspace', { command: 'date' }),
+      /Permission unavailable in background run/,
+    )
+    assert.equal(permissions.list(session.id).some(item => item.state === 'pending'), false)
+    assert.equal(permissions.list(session.id)[0]?.state, 'denied')
+    assert.deepEqual(
+      sessions.events.list(session.id).filter(event => event.kind.startsWith('permission.')).map(event => event.kind),
+      ['permission.requested', 'permission.resolved'],
+    )
+  } finally { database.close() }
+})

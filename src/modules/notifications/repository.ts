@@ -1,3 +1,4 @@
+import { accountFilter } from '../accounts/index.ts'
 import { randomUUID } from 'node:crypto'
 import { desktopReminderCreateSchema, desktopReminderSchema, desktopReminderIdSchema, desktopReminderListSchema, toJson } from '@eden/api'
 import type { SessionRepository } from '../sessions/index.ts'
@@ -30,13 +31,14 @@ export class DesktopReminderRepository {
     desktopReminderIdSchema.parse({ id })
     const row = this.sessions.database.connection.prepare('SELECT * FROM desktop_reminders WHERE id=?').get(id)
     if (!row) throw new Error('Desktop reminder not found')
+    this.sessions.ownership.assert(String(row.session_id))
     return desktopReminderSchema.parse({ id: row.id, sessionId: row.session_id, turnId: row.turn_id, title: row.title, message: row.message,
       state: row.state, author: JSON.parse(String(row.author_json)), createdAt: row.created_at, displayedAt: row.displayed_at, closedAt: row.closed_at })
   }
 
   list(raw: unknown) {
     const input = desktopReminderListSchema.parse(raw)
-    return this.sessions.database.connection.prepare("SELECT id FROM desktop_reminders WHERE (? OR state='pending') ORDER BY created_at,id LIMIT ?")
+    return this.sessions.database.connection.prepare(`SELECT id FROM desktop_reminders WHERE ${accountFilter(this.sessions.database, 'session_id')} AND (? OR state='pending') ORDER BY created_at,id LIMIT ?`)
       .all(Number(input.includeClosed), input.limit).map(row => this.read(String(row.id)))
   }
 

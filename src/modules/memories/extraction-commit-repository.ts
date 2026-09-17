@@ -1,3 +1,5 @@
+import { ownRecord } from '../accounts/index.ts'
+import { SessionOwnership } from '../accounts/index.ts'
 import { isDeepStrictEqual } from 'node:util'
 import type { EdenDatabase } from '@eden/store'
 import { extractionApproval } from './extraction-approval.ts'
@@ -36,8 +38,9 @@ export class MemoryExtractionCommitRepository {
 
   private save(job: MemoryExtractionJob, candidate: MemoryCandidate, approvalId: string): number {
     // SQLite lower preserves the legacy ASCII-insensitive exact-content deduplication policy.
-    const existing = this.database.connection.prepare(`SELECT id FROM memories WHERE scope_type='agent_character'
-      AND scope_key=? AND lower(content)=lower(?) ORDER BY id LIMIT 1`).get(job.scopeKey, candidate.content)
+    const owner = new SessionOwnership(this.database).owner(job.sessionId) ?? null
+    const existing = this.database.connection.prepare(`SELECT id FROM memories WHERE (? IS NULL OR id IN (SELECT record_id FROM account_records WHERE kind='memory' AND account_key=?)) AND scope_type='agent_character'
+      AND scope_key=? AND lower(content)=lower(?) ORDER BY id LIMIT 1`).get(owner, owner, job.scopeKey, candidate.content)
     if (existing) return Number(existing.id)
     const metadata = { source: 'automatic_extraction', sourceInputId: job.inputId, sourceAssistantId: job.actorId,
       confidence: candidate.confidence, extractionJobId: job.id, approvalId }
@@ -45,6 +48,7 @@ export class MemoryExtractionCommitRepository {
     const result = this.database.connection.prepare(`INSERT INTO memories
       (content,kind,scope_type,scope_key,source_session_id,metadata_json,created_at,updated_at) VALUES (?,?,'agent_character',?,?,?,?,?)`)
       .run(candidate.content, candidate.kind, job.scopeKey, job.sessionId, JSON.stringify(metadata), now, now)
+    ownRecord(this.database, 'memory', Number(result.lastInsertRowid), job.sessionId)
     return Number(result.lastInsertRowid)
   }
 }

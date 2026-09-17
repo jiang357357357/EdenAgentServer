@@ -1,3 +1,4 @@
+import { accountFilter } from '../accounts/index.ts'
 import { jsonValue } from '@eden/api'
 import type { EdenDatabase } from '@eden/store'
 import { permissionScope } from '@eden/permissions'
@@ -15,8 +16,8 @@ export class PermissionRepository {
   }
 
   list(sessionId?: string): PermissionRequest[] {
-    const rows = sessionId ? this.database.connection.prepare('SELECT * FROM permission_requests WHERE session_id=? ORDER BY created_at').all(sessionId) :
-      this.database.connection.prepare('SELECT * FROM permission_requests ORDER BY created_at').all()
+    const rows = sessionId ? this.database.connection.prepare(`SELECT * FROM permission_requests WHERE ${accountFilter(this.database, 'session_id')} AND session_id=? ORDER BY created_at`).all(sessionId) :
+      this.database.connection.prepare(`SELECT * FROM permission_requests WHERE ${accountFilter(this.database, 'session_id')} ORDER BY created_at`).all()
     return rows.map(row => ({ id: String(row.id), sessionId: String(row.session_id), turnId: String(row.turn_id),
       operationId: String(row.operation_id), capability: String(row.capability), resource: String(row.resource), state: String(row.state),
       details: jsonValue.parse(JSON.parse(String(row.request_json))), createdAt: Number(row.created_at) }))

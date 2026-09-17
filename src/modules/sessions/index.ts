@@ -1,4 +1,5 @@
 export { SessionRepository } from './session-repository.ts'
+export { SessionTitleService, fallbackSessionTitle, generatedSessionTitle } from './session-title-service.ts'
 export { InputRecoveryRepository } from './input/recovery-repository.ts'
 export { SessionService } from './session-service.ts'
 export type { SessionSummary, AcceptedInput } from './contracts.ts'

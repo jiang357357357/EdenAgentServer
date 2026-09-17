@@ -51,7 +51,7 @@ test('blob HTTP rejects missing and foreign tokens, hostile origins and query to
   assert.equal((await fetch(`${f.url}/${info.id}`)).status, 401)
   const other = await fixture(context, 1024, 'mon')
   assert.equal((await fetch(`${other.url}/${info.id}`, { headers: f.headers })).status, 401)
-  assert.equal((await fetch(`${other.url}/${info.id}`, { headers: other.headers })).status, 404)
+  assert.equal((await fetch(`${other.url}/${info.id}`, { headers: other.headers })).status, 401)
 })
 
 test('blob CORS allows the configured frontend and preflight never authorizes the upload', async context => {

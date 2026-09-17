@@ -1,3 +1,4 @@
+import { recordFilter } from '../accounts/index.ts'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { memoInfoSchema, memoListSchema, toJson } from '@eden/api'
@@ -17,14 +18,14 @@ export class MemoNotifications {
   }
   list(limit = 80) {
     const count = memoListSchema.parse({ limit }).limit
-    return this.database.connection.prepare('SELECT * FROM memo_notifications ORDER BY created_at DESC,id DESC LIMIT ?').all(count).map(row => ({
+    return this.database.connection.prepare(`SELECT * FROM memo_notifications WHERE ${recordFilter(this.database, 'memo', 'memo_id')} ORDER BY created_at DESC,id DESC LIMIT ?`).all(count).map(row => ({
       id: String(row.id), jobId: String(row.job_id), memo: memoInfoSchema.parse(JSON.parse(String(row.memo_json))),
       createdAt: Number(row.created_at), readAt: row.read_at === null ? null : Number(row.read_at),
     }))
   }
   acknowledge(id: string) {
     z.uuid().parse(id)
-    const result = this.database.connection.prepare('UPDATE memo_notifications SET read_at=COALESCE(read_at,?) WHERE id=?').run(Date.now(), id)
+    const result = this.database.connection.prepare(`UPDATE memo_notifications SET read_at=COALESCE(read_at,?) WHERE ${recordFilter(this.database, 'memo', 'memo_id')} AND id=?`).run(Date.now(), id)
     if (result.changes !== 1) throw new Error('Memo notification not found')
     return toJson({ id, acknowledged: true })
   }

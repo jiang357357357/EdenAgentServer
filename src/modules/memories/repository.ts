@@ -1,3 +1,4 @@
+import { recordFilter, ownRecord } from '../accounts/index.ts'
 import { memoryRecordSchema, memoryScopeSchema, memoryKindSchema } from '@eden/api'
 import type { MemoryScope, MemoryRecord, MemoryKind, JsonValue } from '@eden/api'
 import type { EdenDatabase } from '@eden/store'
@@ -20,6 +21,7 @@ export class MemoryRepository {
     return this.database.transaction(() => {
       const inserted = this.database.connection.prepare(`INSERT INTO memories(content, kind, scope_type, scope_key, source_session_id, metadata_json, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(candidate.content, candidate.kind, candidate.scopeType, candidate.scopeKey, candidate.sourceSessionId, JSON.stringify(metadata), now, now)
+      ownRecord(this.database, 'memory', Number(inserted.lastInsertRowid), sourceSessionId)
       return this.read(scope, Number(inserted.lastInsertRowid))
     })
   }
@@ -27,7 +29,7 @@ export class MemoryRepository {
   read(scope: MemoryScope, id: number): MemoryRecord {
     const parsed = memoryScopeSchema.parse(scope)
     memoryRecordSchema.shape.id.parse(id)
-    const row = this.database.connection.prepare('SELECT * FROM memories WHERE id=? AND scope_type=? AND scope_key=?').get(id, parsed.scopeType, parsed.scopeKey)
+    const row = this.database.connection.prepare(`SELECT * FROM memories WHERE ${recordFilter(this.database, 'memory', 'id')} AND id=? AND scope_type=? AND scope_key=?`).get(id, parsed.scopeType, parsed.scopeKey)
     if (!row) throw new Error('Memory not found in the current character scope')
     return record(row)
   }
@@ -35,7 +37,7 @@ export class MemoryRepository {
   search(scope: MemoryScope, query = '', limit = 20): MemoryRecord[] {
     const parsed = memoryScopeSchema.parse(scope)
     if (!Number.isInteger(limit) || limit < 1 || limit > 100 || query.length > 1000) throw new Error('Invalid memory search bounds')
-    return this.database.connection.prepare(`SELECT * FROM memories WHERE scope_type=? AND scope_key=? AND instr(lower(content), lower(?)) > 0
+    return this.database.connection.prepare(`SELECT * FROM memories WHERE ${recordFilter(this.database, 'memory', 'id')} AND scope_type=? AND scope_key=? AND instr(lower(content), lower(?)) > 0
       ORDER BY updated_at DESC, id DESC LIMIT ?`).all(parsed.scopeType, parsed.scopeKey, query.trim(), limit).map(record)
   }
 

@@ -7,7 +7,8 @@ import { RpcFailure } from './errors.ts'
 export class RpcRouter {
   private initialized = false
   constructor(private readonly origin: RuntimeOrigin,
-    private readonly routes: Record<string, (params: JsonValue) => JsonValue | Promise<JsonValue>>) {}
+    private readonly routes: Record<string, (params: JsonValue) => JsonValue | Promise<JsonValue>>,
+    private readonly authenticate?: (token: string) => Promise<void>) {}
 
   async dispatch(raw: unknown): Promise<JsonValue | undefined> {
     let id: string | number | null = null
@@ -17,8 +18,10 @@ export class RpcRouter {
       id = request.id
       let result: JsonValue
       if (request.method === 'initialize') {
+        if (this.initialized) throw new RpcFailure(-32002, 'Connection already initialized')
         const params = initializeSchema.parse(request.params)
         if (params.runtimeOrigin !== this.origin) throw new RpcFailure(-32001, 'Runtime origin mismatch')
+        await this.authenticate?.(params.coreToken ?? '')
         result = toJson(initializeResultSchema.parse({ protocolVersion, serverName: 'eden-agent-server', serverVersion,
           agentCoreVersion: 'pi-0.82.0', runtimeOrigin: this.origin, capabilities: Object.keys(this.routes) }))
         this.initialized = true

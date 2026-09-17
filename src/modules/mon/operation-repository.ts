@@ -1,3 +1,4 @@
+import { accountFilter } from '../accounts/index.ts'
 import { randomUUID } from 'node:crypto'
 import type { JsonValue, MonOperationQuery } from '@eden/api'
 import type { SessionRepository } from '../sessions/index.ts'
@@ -11,7 +12,7 @@ export class MonOperationRepository {
   list(query: MonOperationQuery): JsonValue[] {
     const rows = this.sessions.database.connection.prepare(`
       SELECT * FROM mon_operations
-      WHERE (? IS NULL OR session_id=?) AND (? IS NULL OR state=?)
+      WHERE ${accountFilter(this.sessions.database, 'session_id')} AND (? IS NULL OR session_id=?) AND (? IS NULL OR state=?)
       ORDER BY created_at DESC, id DESC LIMIT ?
     `).all(query.sessionId ?? null, query.sessionId ?? null, query.state ?? null, query.state ?? null, query.limit)
     return rows.map(row => ({
