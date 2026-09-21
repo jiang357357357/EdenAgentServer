@@ -1,3 +1,4 @@
+import { recentSharedTopics } from '../sessions/index.ts'
 import { toJson } from '@eden/api'
 import type { JobInfo } from '@eden/api'
 import { DeferredJob } from '../jobs/index.ts'
@@ -36,13 +37,14 @@ export class SelfAwakeService {
     if (session.participants.length > 1) throw new Error('Self-awake requires a single acting character')
     const author = session.participants[0] ?? {}
     const recovery = this.recovery.assertDispatch(job, author, session.environment)
-    const request = toJson({ ...selfAwakeRequest(job, author, session.environment), ...(recovery ? { recovery } : {}) })
+    const topics = recentSharedTopics(this.repository.database, job.sessionId, author)
+    const request = toJson({ current_time: new Date().toISOString(), recent_conversation: topics, wakeSchedule: this.repository.wakeSchedule(), ...selfAwakeRequest(job, author, session.environment), ...(recovery ? { recovery } : {}) })
     const id = this.repository.begin(job, request, author)
     try {
       this.sessions.submitJob(job.sessionId, selfAwakePrompt(request), job.id, job.kind, input => {
         this.repository.dispatchedInTransaction(id, input.inputId, input.turnId)
         this.jobs.completeInTransaction(job.id, input.inputId)
-      })
+      }, topics.map(topic => topic.userText).join("\n"))
     } catch (error) {
       if (error instanceof Error && /No model configured/.test(error.message)) throw new DeferredJob('Self-awake is waiting for its session model binding')
       this.repository.fail(id, error instanceof Error ? error.message : String(error))
@@ -62,7 +64,7 @@ export class SelfAwakeService {
           if (result.state !== 'completed') { this.repository.fail(result.id, this.repository.inputFailure(this.repository.read(result.id).sessionId, result.inputId, result.state)); continue }
           const run = this.repository.read(result.id)
           const text = this.repository.finalText(run.sessionId, result.turnId)
-          if (!text.trim()) { this.repository.fail(result.id, '自醒完成但没有日记正文'); continue }
+          if (!text.trim() && !run.diaries.length) { this.repository.fail(result.id, '自醒完成但没有日记正文'); continue }
           this.repository.finish(result.id, text)
         }
         if (results.length === 100) this.wake()

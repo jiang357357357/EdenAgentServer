@@ -1,3 +1,4 @@
+import { characterIdentity } from '../../../model-prompts/character-identity.ts'
 import { modelParticipant } from '@eden/api'
 import { createHash } from 'node:crypto'
 import type { JsonValue } from '@eden/api'
@@ -43,6 +44,11 @@ function promptCategories(prefix: Record<string, unknown>[], request: Record<str
     if (assistantID !== undefined && String(object(participant).assistantId) !== String(assistantID)) continue
     const text = [JSON.stringify(modelParticipant(participant)), JSON.stringify(participant)].find(candidate => systemText.includes(candidate))
     if (!text) continue
+    const identity = characterIdentity(modelParticipant(participant))
+    if (identity && systemText.startsWith(identity + '\n\n')) {
+      character += estimateRequestTokens(identity)
+      systemText = systemText.slice(identity.length + 2)
+    }
     character += estimateRequestTokens(text)
     systemText = systemText.replace(text, '')
   }

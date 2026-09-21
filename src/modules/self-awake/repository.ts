@@ -5,12 +5,11 @@ import { readExternalSchedule } from './external-schedule.ts'
 import { readNotificationHistory } from './notification-history.ts'
 import { previewNotificationReview, resolveNotificationReview } from './notification-review.ts'
 import { previewRunReview, resolveRunReview } from './run-review.ts'
-import { recentSelfAwakeContacts } from './recent-contacts.ts'
 import { JobRepository } from '../jobs/index.ts'
 import { randomUUID } from 'node:crypto'
 import type { SQLOutputValue } from 'node:sqlite'
 import type { EdenDatabase } from '@eden/store'
-import { selfAwakeListSchema, selfAwakeExecutionSchema, toJson } from '@eden/api'
+import { selfAwakeListSchema, selfAwakeExecutionSchema, selfAwakeDiaryWriteSchema, toJson } from '@eden/api'
 import type { JobInfo, JsonValue } from '@eden/api'
 
 export class SelfAwakeRepository {
@@ -53,23 +52,37 @@ export class SelfAwakeRepository {
 
   fail(id: string, error: string): void {
     this.database.transaction(() => {
-      const run = this.read(id), now = Date.now(), author = object(run.authorSnapshot)
+      this.read(id)
+      const now = Date.now()
       this.database.connection.prepare("UPDATE self_awake_runs SET state='failed',last_error=?,completed_at=?,updated_at=? WHERE id=?")
         .run(error.slice(0, 4000), now, now, id)
+    })
+  }
+
+  writeDiary(sessionId: string, turnId: string, raw: unknown) {
+    const input = selfAwakeDiaryWriteSchema.parse(raw)
+    return this.database.transaction(() => {
+      const row = this.database.connection.prepare('SELECT id FROM self_awake_runs WHERE session_id=? AND turn_id=?').get(sessionId, turnId)
+      if (!row) throw new Error('写日记需要当前自醒回合')
+      const run = this.read(String(row.id))
+      if (run.status !== 'running') throw new Error('当前自醒已经结束')
+      const author = object(run.authorSnapshot), id = run.diaries[0]?.id ?? randomUUID(), now = Date.now()
       this.database.connection.prepare(`INSERT INTO self_awake_diaries(id,run_id,session_id,assistant_id,character_id,title,content,mood,metadata_json,created_at)
-        VALUES(?,?,?,?,?,?,?,'','{}',?) ON CONFLICT(run_id) DO NOTHING`).run(randomUUID(), id, run.sessionId,
-          String(author.assistantId ?? ''), String(author.characterId ?? ''), '自醒未完成', error.slice(0, 4000), now)
+        VALUES(?,?,?,?,?,?,?,'','{}',?) ON CONFLICT(run_id) DO UPDATE SET title=excluded.title,content=excluded.content`)
+        .run(id, run.id, sessionId, String(author.assistantId ?? ''), String(author.characterId ?? ''), input.title, input.content, now)
+      this.database.connection.prepare('UPDATE self_awake_runs SET diary_cleared=0,updated_at=? WHERE id=?').run(now, run.id)
+      return { status: 'saved', diaryId: id, title: input.title, savedAt: now }
     })
   }
 
   finish(id: string, text: string): void {
-    if (!text.trim()) throw new Error('自醒日记正文不能为空')
     this.database.transaction(() => {
       const run = this.read(id)
       if (run.status !== 'running') return
+      if (!run.diaries.length && !text.trim()) throw new Error('自醒日记正文不能为空')
       const now = Date.now()
       const author = object(run.authorSnapshot)
-      this.database.connection.prepare(`INSERT INTO self_awake_diaries(id,run_id,session_id,assistant_id,character_id,title,content,mood,metadata_json,created_at)
+      if (!run.diaries.length) this.database.connection.prepare(`INSERT INTO self_awake_diaries(id,run_id,session_id,assistant_id,character_id,title,content,mood,metadata_json,created_at)
         VALUES(?,?,?,?,?,?,?,?,?,?)`).run(randomUUID(), id, run.sessionId, String(author.assistantId ?? ''), String(author.characterId ?? ''),
           '自醒日记', text, '', '{}', now)
       this.database.connection.prepare("UPDATE self_awake_runs SET state='completed',decision_json=NULL,completed_at=?,updated_at=? WHERE id=?")
@@ -85,19 +98,48 @@ export class SelfAwakeRepository {
     return this.fromRow(row)
   }
 
+  clearHistory() {
+    return this.database.transaction(() => {
+      const scope = accountFilter(this.database, 'session_id')
+      const active = this.database.connection.prepare(`SELECT 1 FROM self_awake_runs WHERE ${scope}
+        AND state NOT IN ('completed','failed','action_failed') LIMIT 1`).get()
+      if (active) throw new Error('仍有自醒正在处理，请结束后再清空历史。')
+      const ids = `SELECT id FROM self_awake_runs WHERE ${scope}`
+      for (const table of ['self_awake_notification_reviews', 'self_awake_run_reviews', 'self_awake_notification_history', 'self_awake_diaries']) {
+        this.database.connection.prepare(`DELETE FROM ${table} WHERE run_id IN (${ids})`).run()
+      }
+      const result = this.database.connection.prepare(`DELETE FROM self_awake_runs WHERE ${scope}`).run()
+      return { deleted: Number(result.changes), clearedAt: Date.now() }
+    })
+  }
+
+  clearDiaries() {
+    return this.database.transaction(() => {
+      this.database.connection.prepare(`UPDATE self_awake_runs SET diary_cleared=1 WHERE ${accountFilter(this.database, 'session_id')} AND EXISTS(SELECT 1 FROM self_awake_diaries d WHERE d.run_id=self_awake_runs.id)`).run()
+      const result = this.database.connection.prepare(`DELETE FROM self_awake_diaries WHERE ${accountFilter(this.database, 'session_id')}`).run()
+      return { deleted: Number(result.changes), clearedAt: Date.now() }
+    })
+  }
+
   list(params: unknown) {
     const input = selfAwakeListSchema.parse(params), query = input.query?.trim() ?? ''
-    const where = "(?='' OR instr(lower(request_json),lower(?))>0 OR instr(lower(COALESCE(decision_json,'')),lower(?))>0)"
+    const diaryMatch = "EXISTS(SELECT 1 FROM self_awake_diaries d WHERE d.run_id=self_awake_runs.id AND (?='' OR instr(lower(d.title),lower(?))>0 OR instr(lower(d.content),lower(?))>0))"
+    const where = input.diariesOnly ? diaryMatch : `(?='' OR instr(lower(request_json),lower(?))>0 OR instr(lower(COALESCE(decision_json,'')),lower(?))>0 OR ${diaryMatch})`
+    const values = input.diariesOnly ? [query, query, query] : [query, query, query, query, query, query]
     const scopedWhere = `${accountFilter(this.database, 'session_id')} AND ${where}`
-    const count = Number(this.database.connection.prepare(`SELECT COUNT(*) AS count FROM self_awake_runs WHERE ${scopedWhere}`).get(query, query, query)?.count ?? 0)
+    const count = Number(this.database.connection.prepare(`SELECT COUNT(*) AS count FROM self_awake_runs WHERE ${scopedWhere}`).get(...values)?.count ?? 0)
     const rows = this.database.connection.prepare(`SELECT * FROM self_awake_runs WHERE ${scopedWhere} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`)
-      .all(query, query, query, input.pageSize, (input.page - 1) * input.pageSize)
+      .all(...values, input.pageSize, (input.page - 1) * input.pageSize)
+    const schedule = this.wakeSchedule()
+    return { schedule, count, page: input.page, pageSize: input.pageSize, totalPages: Math.ceil(count / input.pageSize), results: rows.map(row => this.fromRow(row)) }
+  }
+
+  wakeSchedule() {
     const next = this.database.connection.prepare(`SELECT due_at,payload_json FROM jobs WHERE ${accountFilter(this.database, "session_id")} AND kind='self_awake' AND state='queued' ORDER BY due_at LIMIT 1`).get()
     const external = readExternalSchedule(this.scheduleStateFile)
-    const local = next ? { status: 'scheduled', nextWakeAt: new Date(Number(next.due_at)).toISOString(), reason: String(object(JSON.parse(String(next.payload_json))).prompt ?? '') } : null
+    const local = next ? { status: 'scheduled', source: 'tool', nextWakeAt: new Date(Number(next.due_at)).toISOString(), reason: String(object(JSON.parse(String(next.payload_json))).prompt ?? '') } : null
     const ownsSchedule = !currentAccount() || Boolean(this.database.connection.prepare(`SELECT 1 FROM self_awake_submissions s JOIN jobs j ON j.id=s.job_id WHERE ${accountFilter(this.database, 'j.session_id')} LIMIT 1`).get())
-    const schedule = this.externalScheduler ? (ownsSchedule ? external : null) : local
-    return { schedule, count, page: input.page, pageSize: input.pageSize, totalPages: Math.ceil(count / input.pageSize), results: rows.map(row => this.fromRow(row)) }
+    return this.externalScheduler ? (ownsSchedule ? external : null) : local
   }
 
   inputFailure(sessionId: string, inputId: string, state: string): string {
@@ -123,9 +165,8 @@ export class SelfAwakeRepository {
 
   context(sessionId: string, turnId: string) {
     const row = this.database.connection.prepare('SELECT id FROM self_awake_runs WHERE session_id=? AND turn_id=?').get(sessionId, turnId)
-    const diaries = this.database.connection.prepare('SELECT title,content,mood,created_at FROM self_awake_diaries WHERE session_id=? ORDER BY created_at DESC LIMIT 10').all(sessionId)
-    return { current_time: new Date().toISOString(), run: row ? this.read(String(row.id)) : null,
-      recent_diaries: diaries.map(diary => ({ title: diary.title, content: diary.content, mood: diary.mood, createdAt: diary.created_at })) }
+    new SessionOwnership(this.database).assert(sessionId)
+    return { current_time: new Date().toISOString(), wakeSchedule: this.wakeSchedule(), run: row ? this.read(String(row.id)) : null }
   }
 
   ownsBackgroundSession(sessionId: string, userId: string): boolean {
@@ -139,10 +180,6 @@ export class SelfAwakeRepository {
       ORDER BY d.created_at DESC,d.id DESC LIMIT ?`).all(userId, sessionId, userId, userId, limit)
     return rows.map(row => ({ id: row.id, sessionId: row.session_id, assistantId: row.assistant_id, characterId: row.character_id,
       title: row.title, content: row.content, mood: row.mood, createdAt: row.created_at }))
-  }
-
-  recentContacts(sessionId: string, userId: string, limit: number) {
-    return recentSelfAwakeContacts(this.database, sessionId, userId, limit)
   }
 
   finalText(sessionId: string, turnId: string): string {
@@ -172,7 +209,7 @@ export class SelfAwakeRepository {
     return { id: String(row.id), jobId: String(row.job_id), sessionId: String(row.session_id), schemaVersion: 'self-awake.v1', eventId: String(row.event_id),
       scheduledWake: new JobRepository(this.database).latestWakePlan(String(row.session_id), String(row.job_id)),
       outcomeReview: review ? { decision: String(review.decision), note: String(review.note), reviewedAt: Number(review.created_at) } : null,
-      status: String(row.state), request: toJson(JSON.parse(String(row.request_json))), decision: row.decision_json === null ? null : toJson(JSON.parse(String(row.decision_json))),
+      status: String(row.state), diaryCleared: Boolean(row.diary_cleared), request: toJson(JSON.parse(String(row.request_json))), decision: row.decision_json === null ? null : toJson(JSON.parse(String(row.decision_json))),
       authorSnapshot: toJson(JSON.parse(String(row.author_json))), attempts: Number(row.attempts), lastError,
       startedAt: row.started_at === null ? null : Number(row.started_at), completedAt: row.completed_at === null ? null : Number(row.completed_at),
       createdAt: Number(row.created_at), updatedAt: Number(row.updated_at), diaries: diaries.map(diary => ({ id: String(diary.id), runId: String(diary.run_id),

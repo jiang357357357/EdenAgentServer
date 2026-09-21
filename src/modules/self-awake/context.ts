@@ -1,15 +1,18 @@
 import { z } from 'zod'
-import { toJson, modelParticipant } from '@eden/api'
+import { toJson } from '@eden/api'
 import type { JsonValue } from '@eden/api'
 import { MonClient, acquireMonServiceToken } from '@eden/integrations'
 import type { MonServiceIdentity } from '@eden/integrations'
 import type { SessionRepository } from '../sessions/index.ts'
 import type { SelfAwakeRepository } from './repository.ts'
+import { selfAwakePromptContext } from './prompt.ts'
 import { SELF_AWAKE_INTERPRETATIONS } from '../../model-prompts/self-awake.ts'
 
 export const selfAwakeContextSchema = z.object({
-  section: z.enum(['request', 'desktop_window', 'desktop_session', 'audio_state', 'recent_events', 'recent_diaries', 'recent_contacts']).default('request'),
+  section: z.enum(['request', 'desktop_window', 'desktop_session', 'audio_state', 'recent_events', 'recent_diaries', 'wake_notes']).default('request'),
   limit: z.number().int().min(1).max(5).default(3),
+  includeContent: z.boolean().default(false),
+  query: z.string().trim().min(1).max(200).optional(),
 }).strict()
 
 export class SelfAwakeContext {
@@ -20,27 +23,31 @@ export class SelfAwakeContext {
     const session = this.sessions.read(sessionId)
     if (session.status !== 'active') throw new Error('Self-awake context requires an active session')
     if (input.section === 'request') return modelSelfAwakeContext(toJson(this.repository.context(sessionId, turnId)))
+    if (input.section === 'wake_notes') {
+      const context = this.repository.context(sessionId, turnId)
+      return toJson({ source: 'wake_schedule', wakeSchedule: selfAwakePromptContext({ wakeSchedule: context.wakeSchedule }).wakeSchedule })
+    }
     const environment = object(session.environment)
     const owner = this.sessions.origin === 'mon' && this.identity && environment.sessionPurpose === 'self_awake' && environment.selfAwakeUserId === this.identity.userId
       && this.repository.ownsBackgroundSession(sessionId, this.identity.userId) ? this.identity : undefined
     const user = owner?.userId ?? ''
-    if (input.section === 'recent_diaries') return toJson({
-      section: input.section, source: 'agent.diaries',
-      diaries: this.repository.recentDiaries(sessionId, user, input.limit), interpretation: SELF_AWAKE_INTERPRETATIONS.diaries
-    })
-    if (input.section === 'recent_contacts') return toJson({
-      section: input.section, source: 'agent.contact_receipts',
-      contacts: this.repository.recentContacts(sessionId, user, input.limit).map(contact => ({ ...contact, author: contact.author === null ? null : modelParticipant(contact.author) })),
-      interpretation: SELF_AWAKE_INTERPRETATIONS.contacts
-    })
+    if (input.section === 'recent_diaries') return this.history(sessionId, user, input)
     if (!owner) throw new Error('Personal activity context requires the owning Mon background session')
     return await activityContext(owner, signal, input)
   }
+  private history(sessionId: string, user: string, input: z.infer<typeof selfAwakeContextSchema>): JsonValue {
+    if (input.section === 'recent_diaries') return toJson({
+      section: input.section, source: 'agent.diaries',
+      diaries: this.repository.recentDiaries(sessionId, user, input.limit).map(({ content, ...entry }) => ({ ...entry, ...(input.includeContent && input.query && typeof content === 'string' && content.includes(input.query) ? { content } : { contentAvailable: Boolean(content) }) })), interpretation: SELF_AWAKE_INTERPRETATIONS.diaries
+    })
+    throw new Error('Unknown history section')
+  }
+
 }
-async function activityContext(owner: MonServiceIdentity, signal: AbortSignal, input: { section: "request" | "desktop_window" | "desktop_session" | "audio_state" | "recent_events" | "recent_diaries" | "recent_contacts"; limit: number }) {
+async function activityContext(owner: MonServiceIdentity, signal: AbortSignal, input: z.infer<typeof selfAwakeContextSchema>) {
   const token = await acquireMonServiceToken(owner, signal)
-  const snapshot = object(await new MonClient(owner.coreBaseUrl, token).get('/api/users/me/activity-presence/', signal))
-  const payload = object(snapshot.payload)
+  const snapshot = object(await new MonClient(owner.coreBaseUrl, token).get('/api/users/me/activity-presence/?fresh=1', signal))
+  const payload = snapshot.fresh === true && snapshot.available === true ? object(snapshot.payload) : {}
   const fields: Record<string, string[]> = { desktop_window: ['foreground_window'], desktop_session: ['system_input', 'session'], audio_state: ['media'], recent_events: ['recent_events'] }
   const data = Object.fromEntries(fields[input.section]!.map(key => [key, payload[key] ?? null]))
   if (input.section === 'audio_state') {
@@ -50,8 +57,8 @@ async function activityContext(owner: MonServiceIdentity, signal: AbortSignal, i
   const captured = typeof snapshot.captured_at === 'string' ? Date.parse(snapshot.captured_at) : NaN
   const age = Number.isFinite(captured) ? Math.max(0, Date.now() - captured) : null
   return toJson({
-    section: input.section, source: 'core.activity-presence', available: snapshot.available === true,
-    captured_at: snapshot.captured_at ?? null, received_at: snapshot.received_at ?? null, ageMs: age, stale: age === null || age > 180000, data,
+    section: input.section, source: 'core.activity-presence', available: snapshot.available === true && snapshot.fresh === true, fresh: snapshot.fresh === true, error: snapshot.error ?? null,
+    captured_at: snapshot.captured_at ?? null, received_at: snapshot.received_at ?? null, ageMs: age, stale: snapshot.fresh !== true || age === null || age > 180000, data,
     interpretation: SELF_AWAKE_INTERPRETATIONS.activity
   })
 }
@@ -63,8 +70,7 @@ export function modelSelfAwakeContext(value: JsonValue): JsonValue {
   const context = object(value)
   if (!context.run) return value
   const run = object(context.run), request = object(run.request)
-  return { ...context, run: { ...run,
-    authorSnapshot: run.authorSnapshot == null ? null : modelParticipant(run.authorSnapshot),
-    request: { ...request, author: request.author == null ? null : modelParticipant(request.author) },
-  } }
+  return { ...selfAwakePromptContext({ ...request, current_time: context.current_time ?? request.current_time ?? null,
+    wakeSchedule: context.wakeSchedule ?? request.wakeSchedule ?? null }),
+    run: { id: run.id ?? null, status: run.status ?? null } }
 }

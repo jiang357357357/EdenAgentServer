@@ -6,9 +6,11 @@ import type { SQLOutputValue } from 'node:sqlite'
 import { memoryContent } from './content.ts'
 
 function record(row: Record<string, SQLOutputValue>): MemoryRecord {
+  const metadata = JSON.parse(String(row.metadata_json))
+  const provenance = metadata?.source === 'explicit_tool' ? { ...metadata, epistemicStatus: 'character_report' } : metadata
   return memoryRecordSchema.parse({ id: row.id, content: row.content, kind: row.kind,
     scopeType: row.scope_type, scopeKey: row.scope_key, sourceSessionId: row.source_session_id,
-    metadata: JSON.parse(String(row.metadata_json)), createdAt: row.created_at, updatedAt: row.updated_at })
+    metadata: provenance, createdAt: row.created_at, updatedAt: row.updated_at })
 }
 
 export class MemoryRepository {

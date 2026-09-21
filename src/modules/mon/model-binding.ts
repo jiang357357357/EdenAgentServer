@@ -1,3 +1,4 @@
+import { recentSharedTopics } from '../sessions/index.ts'
 import { monLegacyReplaySchema } from '@eden/api'
 import { replayLegacyDelivery } from './legacy-replay.ts'
 import { LegacyReplayRepository } from './legacy-replay-repository.ts'
@@ -164,11 +165,21 @@ export class MonBindingService {
     return readOwnerQqHistory(this.assistantClient(sessionId), raw, signal)
   }
 
+  recentConversation(sessionId: string) {
+    const session = this.sessions.repository.read(sessionId)
+    const author = session.participants[0] ?? {}
+    return toJson({ source: 'latest_conversation', rounds: recentSharedTopics(this.sessions.repository.database, sessionId, author) })
+  }
+
   async contactChannels(sessionId: string, signal: AbortSignal) {
     const client = this.assistantClient(sessionId)
     const results = await Promise.allSettled([ownerQqTarget(client, signal), client.get('/api/agent/external-email/status/', signal)])
     signal.throwIfAborted()
-    return toJson({ qq: { available: results[0].status === 'fulfilled' }, email: { statusAvailable: results[1].status === 'fulfilled' } })
+    const email = results[1].status === 'fulfilled' && results[1].value && typeof results[1].value === 'object'
+      && !Array.isArray(results[1].value) ? results[1].value as Record<string, unknown> : {}
+    return toJson({ qq: { available: results[0].status === 'fulfilled', availabilityMeaning: 'configured_owner_target', replyTool: 'read_qq_messages' },
+      email: { statusAvailable: results[1].status === 'fulfilled', available: email.ready === true && Boolean(email.default_to), replyReadable: false },
+      device: { discoveryTool: 'list_esp32_devices', statusTool: 'get_esp32_command_status', replyReadable: false } })
   }
 
   contactOwnerByQq(sessionId: string, raw: unknown, signal: AbortSignal) {

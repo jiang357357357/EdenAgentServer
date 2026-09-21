@@ -18,7 +18,7 @@ function fixture(context: test.TestContext) {
   const jobs = new JobRepository(db, true), sessions = new SessionRepository(db, 'mon')
   const session = sessions.create('wake'), repository = new SelfAwakeRepository(db, stateFile)
   const permissions = { async request() {} }
-  const tool = selfAwakeTools(repository, jobs, permissions as never, null as never, session.id, 'turn')[0]!
+  const tool = selfAwakeTools(repository, jobs, permissions as never, null as never, session.id, 'turn').find(tool => tool.name === 'set_self_awake_timer')!
   const execute = (callId: string, afterMinutes: number) => tool.execute({ afterMinutes, reason: 'fixture' }, { callId, signal: new AbortController().signal })
   return { root, db, jobs, repository, execute }
 }
@@ -58,7 +58,7 @@ test('denied approval preserves the current plan and never publishes a replaceme
   await f.execute('approved', 10)
   const before = f.jobs.list({ state: 'queued' })[0]!
   const denied = { async request() { throw new Error('denied') } }
-  const tool = selfAwakeTools(f.repository, f.jobs, denied as never, null as never, before.sessionId!, 'next-turn')[0]!
+  const tool = selfAwakeTools(f.repository, f.jobs, denied as never, null as never, before.sessionId!, 'next-turn').find(tool => tool.name === 'set_self_awake_timer')!
   await assert.rejects(tool.execute({ afterMinutes: 20, reason: 'denied' }, { callId: 'denied', signal: new AbortController().signal }), /denied/)
   assert.equal(f.jobs.list({ state: 'queued' })[0]!.id, before.id)
   assert.equal(readdirSync(path.join(f.root, 'schedule_requests')).length, 1)

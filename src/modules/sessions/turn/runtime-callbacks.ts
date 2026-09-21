@@ -74,7 +74,7 @@ export function runtimeCallbacks(repository: SessionRepository, input: SessionIn
         return repository.events.insert(input.sessionId, input.turnId, 'model.response', scoped({
           requestId: value.requestId ?? null,
           contextEstimate: contexts.get(String(value.requestId)) ?? null,
-          usage: message.usage ?? null, stopReason: message.stopReason ?? null, costConfigured: value.costConfigured === true
+          errorMessage: message.errorMessage ?? null, usage: message.usage ?? null, stopReason: message.stopReason ?? null, costConfigured: value.costConfigured === true
         }))
       })
       contexts.delete(String(value.requestId))

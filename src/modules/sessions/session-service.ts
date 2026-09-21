@@ -86,8 +86,8 @@ export class SessionService {
     })
   }
 
-  submitJob(sessionId: string, text: string, jobId: string, jobKind: string, onCommit: (input: AcceptedInput) => void): AcceptedInput {
-    const metadata = { ...this.inputMetadata(sessionId), job: { id: jobId, kind: jobKind } }
+  submitJob(sessionId: string, text: string, jobId: string, jobKind: string, onCommit: (input: AcceptedInput) => void, recallQuery?: string): AcceptedInput {
+    const metadata = { ...this.inputMetadata(sessionId), job: { id: jobId, kind: jobKind }, ...(recallQuery === undefined ? {} : { recallQuery }) }
     const accepted = this.inputs.enqueue(sessionId, text, `job:${jobId}`, metadata, 'prompt', undefined, onCommit)
     this.stopping.delete(sessionId)
     this.boundaryWaiting.delete(sessionId)
@@ -206,7 +206,10 @@ export class SessionService {
     const images = await this.imagesFor(input)
     this.controllers.get(input.sessionId)?.signal.throwIfAborted()
     const context = sessionPromptContent(input.metadata ?? {})
-    const memory = this.memoryRecall?.prompt(input.sessionId, input.turnId, input.text) ?? ''
+    const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata) ? input.metadata : {}
+    const job = metadata.job && typeof metadata.job === 'object' && !Array.isArray(metadata.job) ? metadata.job : {}
+    const recallQuery = job.kind === 'self_awake' ? (typeof metadata.recallQuery === 'string' ? metadata.recallQuery : '') : input.text
+    const memory = this.memoryRecall?.prompt(input.sessionId, input.turnId, recallQuery) ?? ''
     const runtime = createRuntime({
       sessionId: input.sessionId, systemPrompt: context.prompt + memory,
       contextSources: toJson([...context.sources, { kind: 'memory', title: '召回记忆', content: memory }]) as JsonValue[],

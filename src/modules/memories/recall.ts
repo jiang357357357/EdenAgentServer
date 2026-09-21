@@ -16,7 +16,7 @@ export function selectMemories(candidates: readonly MemoryRecord[], query: strin
   const ranked = candidates.map(memory => {
     const lower = memory.content.toLowerCase()
     return { memory, score: terms.filter(term => lower.includes(term)).length }
-  })
+  }).filter(item => item.score > 0)
     .sort((left, right) => right.score - left.score || right.memory.updatedAt - left.memory.updatedAt || right.memory.id - left.memory.id)
   const selected: MemoryRecord[] = []
   let remaining = 4000
@@ -41,6 +41,6 @@ export class MemoryRecall {
     const memories = selectMemories(this.repository.search(scope, '', 100), text)
     if (!memories.length) return ''
     return MEMORY_RECALL_HEADING +
-      JSON.stringify(memories.map(memory => ({ id: memory.id, kind: memory.kind, content: memory.content, createdAt: memory.createdAt, updatedAt: memory.updatedAt })))
+      JSON.stringify(memories.map(memory => ({ id: memory.id, kind: memory.kind, content: memory.content, provenance: { source: typeof memory.metadata === 'object' && memory.metadata !== null && !Array.isArray(memory.metadata) ? memory.metadata.source ?? 'historical_record' : 'historical_record', verification: 'unverified_history' }, createdAt: memory.createdAt, updatedAt: memory.updatedAt })))
   }
 }

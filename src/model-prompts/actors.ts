@@ -1,10 +1,6 @@
 import type { DirectorPlan, JsonValue } from '@eden/api'
 
-export const ACTOR_SYSTEM_RULES = [
-  '你是当前指定的 Eden 会话参与者，请依照该角色资料自然回应。',
-  '当前环境事实以宿主提供的环境和本轮查询为准；历史记忆中的系统、设备、权限和在线状态需要重新核实后再作为当前事实陈述。',
-  '使用 read_attachment 列出并读取当前输入附带的文件。',
-].join('\n')
+export { SESSION_SYSTEM_RULES as ACTOR_SYSTEM_RULES } from './session.ts'
 
 export function actorTurnInstruction(userText: string, plan: DirectorPlan, beatIndex: number, conversation: JsonValue[]): string {
   return [

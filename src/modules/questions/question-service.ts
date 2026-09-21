@@ -35,17 +35,32 @@ export class QuestionService {
 
   list(sessionId?: string) { return this.repository.pending(sessionId) }
 
-  resolve(id: string, rawAnswers: string[][]) {
-    const answers = questionResolveSchema.parse({ requestId: id, answers: rawAnswers }).answers
+  resolve(id: string, rawAnswers: string[][], rawSupplementary?: string[]) {
+    const { answers, supplementary } = questionResolveSchema.parse({ requestId: id, answers: rawAnswers, supplementary: rawSupplementary })
     const request = this.repository.read(id)
     if (answers.length !== request.questions.length) throw new Error('Answer every question in this request')
+    if (supplementary && supplementary.length !== request.questions.length) throw new Error('Supplementary answers must match questions')
     for (const [index, question] of request.questions.entries()) {
       const selected = answers[index]!
-      if (!question.multiple && selected.length !== 1) throw new Error('This question accepts one answer')
+      if (supplementary) {
+        const note = supplementary[index]!
+        if (!selected.length && !note) throw new Error('Answer every question in this request')
+        if (!question.multiple && selected.length > 1) throw new Error('This question accepts one answer option')
+        if (new Set(selected).size !== selected.length) throw new Error('Duplicate question answer')
+        if (selected.some(answer => !question.options.some(option => option.label === answer))) throw new Error('Answer must match a listed option')
+        if (note && !question.custom) throw new Error('This question does not accept supplementary answers')
+        continue
+      }
+      if (!selected.length) throw new Error('Answer every question in this request')
+      const options = selected.filter(answer => question.options.some(option => option.label === answer))
+      const notes = selected.filter(answer => !question.options.some(option => option.label === answer))
+      if (!question.multiple && options.length > 1) throw new Error('This question accepts one answer option')
+      if (notes.length > 1) throw new Error('This question accepts one supplementary answer')
       if (new Set(selected).size !== selected.length) throw new Error('Duplicate question answer')
       if (!question.custom && selected.some(answer => !question.options.some(option => option.label === answer))) throw new Error('Answer must match a listed option')
     }
-    return this.finish(id, 'answered', answers)
+    const combined = supplementary ? answers.map((selected, index) => supplementary[index] ? [...selected, supplementary[index]!] : selected) : answers
+    return this.finish(id, 'answered', combined)
   }
 
   reject(id: string) { return this.finish(id, 'rejected') }

@@ -4,6 +4,8 @@ import type { SelfAwakeRepository, SelfAwakeActions, SelfAwakeService } from '..
 
 export function selfAwakeRoutes(repository: SelfAwakeRepository, actions: SelfAwakeActions, service: SelfAwakeService) {
   return {
+    'self_awake.diaries.clear': contractHandler(rpcMethods['self_awake.diaries.clear'], () => repository.clearDiaries()),
+    'self_awake.history.clear': contractHandler(rpcMethods['self_awake.history.clear'], () => repository.clearHistory()),
     'self_awake.run.review': contractHandler(rpcMethods['self_awake.run.review'], input => repository.runReview(input.runId)),
     'self_awake.run.resolve': contractHandler(rpcMethods['self_awake.run.resolve'], input => repository.resolveRun(input.runId, input.fingerprint, input.decision, input.note)),
     'self_awake.notification.review': contractHandler(rpcMethods['self_awake.notification.review'], input => repository.notificationReview(input.runId)),

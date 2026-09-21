@@ -12,6 +12,20 @@ export function selfAwakeRequest(job: JobInfo, author: JsonValue, environment: J
     author: modelParticipant(author), environment, memories: [], recent_diaries: [], conversation_history: [] }
 }
 
+export function selfAwakePromptContext(request: JsonValue) {
+  const value = object(request) ?? {}
+  const trigger = object(value.trigger) ?? {}
+  const { reason, wake_reason, ...activation } = trigger
+  const schedule = object(value.wakeSchedule)
+  const scheduled = trigger.type === 'scheduled'
+  return { current_time: value.current_time ?? null, trigger: scheduled ? activation : trigger,
+    environment: value.environment ?? null, recent_conversation: value.recent_conversation ?? [], wakeSchedule: schedule ? { status: schedule.status ?? null, nextWakeAt: schedule.nextWakeAt ?? null, source: schedule.source ?? 'unknown' } : null }
+}
+
 export function selfAwakePrompt(request: JsonValue): string {
-  return selfAwakeInstruction(request)
+  return selfAwakeInstruction(selfAwakePromptContext(request))
+}
+
+function object(value: JsonValue | undefined): Record<string, JsonValue> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null
 }

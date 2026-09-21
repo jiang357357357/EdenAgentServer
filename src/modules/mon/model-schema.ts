@@ -1,3 +1,4 @@
+import { coreGenerationParameters } from './model-parameters.ts'
 import { z } from 'zod'
 import { configuredModelSchema } from '@eden/api'
 
@@ -24,7 +25,7 @@ export function resolveCoreModel(raw: unknown) {
   const entity = coreDetailSchema.parse(raw)
   if (entity.status !== 'active') throw new Error('Selected Mon model is inactive')
   const model = configuredModelSchema.parse({ provider: entity.vendor, id: entity.ai_model, apiKey: entity.api_key,
-    baseUrl: entity.api_endpoint, contextWindow: entity.default_params.context_window, maxTokens: entity.default_params.max_tokens })
+    ...coreGenerationParameters(entity.default_params), baseUrl: entity.api_endpoint, contextWindow: entity.default_params.context_window, maxTokens: entity.default_params.max_tokens })
   return { entityId: entity.id, label: entity.ai_name || entity.ai_model, model }
 }
 

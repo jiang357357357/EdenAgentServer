@@ -1,3 +1,5 @@
+import { SELF_AWAKE_DIARY_CLOCK } from './self-awake.ts'
+
 /** Instruction content only: execution schemas and permissions belong to their tools. */
 export const BUILTIN_SKILL_GUIDES = [
   {
@@ -35,12 +37,18 @@ export const BUILTIN_SKILL_GUIDES = [
 按任务需要验证最终结果，报告实际完成内容与尚未验证的部分。`,
   },
   {
-    name: 'eden-self-awake', description: '后台自醒时读取本轮上下文、判断是否需要行动，并安排下一次观察。',
-    tools: ['get_self_awake_context', 'set_self_awake_timer'], profiles: ['self_awake'],
-    content: `# 后台自醒
-先用 get_self_awake_context 读取本轮触发原因和当前上下文，区分已知事实与没有观测到的信息。
-根据本轮宿主任务要求决定是否行动，避免反复执行同一观察或无事打扰用户。需要另一个专项流程时读取对应技能。
-用 set_self_awake_timer 安排下一次观察时结合已有计划，核对返回时间。工具已执行的效果与本轮最终判断分别记录，不能把中断当作全部操作未发生。
-最终输出严格遵循本轮宿主提供的决策格式；本技能不复制该格式，避免与协议更新冲突。`,
+    name: 'eden-contact', description: '主动找用户聊天、分享或邀请，选择 QQ、邮件或在线设备，并核实投递与回复。',
+    tools: ['list_contact_channels', 'read_recent_conversation', 'read_qq_messages', 'send_qq_message', 'send_external_email',
+      'list_esp32_devices', 'control_esp32_device', 'get_esp32_command_status'], profiles: ['user_chat', 'self_awake'],
+    content: `# 主动联系
+想起共同话题、有发现想分享、想问近况或邀请用户一起做点事，都可以成为联系的理由，无需包装成任务汇报。结合当前角色自然开口，也可以暂时安静。
+需要接上聊天时，read_qq_messages 查看 QQ 最近十轮，read_recent_conversation 查看最新会话最近三轮。联系渠道用 list_contact_channels。短聊优先 QQ，长信可用邮件，设备需先发现在线设备与声明能力，再选择消息卡片、短提示或合适的来电。
+一次选一个合适渠道；相同话题近期已发送且无新回复时留出空间，避免跨渠道追问。接受、送达、已读和回复是不同事实，结果未知先查询，明确失败后再判断是否换渠道。
+邮件与设备当前没有回复正文读取接口，保留未知；设备命令可查询执行/接听状态。行动遵循已有授权及用户的渠道与时段偏好，权限不足就记录原因。`,
+  },
+  {
+    name: 'eden-self-awake', description: '写日记与设置唤醒时钟。',
+    tools: ['write_diary', 'get_self_awake_context', 'set_self_awake_timer'], profiles: ['self_awake'],
+    content: SELF_AWAKE_DIARY_CLOCK,
   },
 ] as const

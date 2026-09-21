@@ -11,3 +11,7 @@ export type { RuntimeCallbackScope } from './turn/runtime-callbacks.ts'
 
 export type { SessionBoundary } from './contracts.ts'
 export { conversationWindow } from './history/conversation-window.ts'
+
+export { recentSharedTopics } from './history/shared-topics.ts'
+
+export { verifyUserEvidence, hasNewUserContext, isSelfAwakeInput } from './history/user-evidence.ts'

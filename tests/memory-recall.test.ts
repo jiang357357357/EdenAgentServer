@@ -1,3 +1,4 @@
+import { withAccount, accountKey } from '../src/modules/accounts/index.ts'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -20,7 +21,7 @@ async function fixture(context: test.TestContext) {
   return { db, services }
 }
 
-test('production multi-actor recall and search stay in each acting character scope', async context => {
+test('production multi-actor recall and search stay in each acting character scope', async context => withAccount({ userId: 'recall-test', coreBaseUrl: 'http://localhost:40011', key: accountKey('http://localhost:40011', 'recall-test') }, async () => {
   const f = await fixture(context)
   const director = await recordedModel([{ text: '{"beats":[{"assistantId":1},{"assistantId":2}]}' }])
   const first = await recordedModel([{ tool: 'search_memories', input: {} }, { text: 'First public response' }])
@@ -31,36 +32,36 @@ test('production multi-actor recall and search stay in each acting character sco
     { assistantId: 1, characterId: 11, main: { model: first.config, entityId: 1, label: 'First' } },
     { assistantId: 2, characterId: 22, main: { model: second.config, entityId: 2, label: 'Second' } },
   ], director.config)
-  f.services.memories.create({ scopeType: 'agent_character', scopeKey: '11' }, 'FIRST_PRIVATE_MEMORY')
-  f.services.memories.create({ scopeType: 'agent_character', scopeKey: '22' }, 'SECOND_PRIVATE_MEMORY')
-  f.services.sessions.start(session.id, 'Both reply')
+  f.services.memories.create({ scopeType: 'agent_character', scopeKey: '11' }, 'FIRST_PRIVATE_MEMORY sharedtopic')
+  f.services.memories.create({ scopeType: 'agent_character', scopeKey: '22' }, 'SECOND_PRIVATE_MEMORY sharedtopic')
+  f.services.sessions.start(session.id, 'Both reply about sharedtopic')
   await f.services.sessions.waitForIdle(session.id)
   assert.equal(f.services.sessions.faultCount(), 0)
   assert.equal(first.requests.length, 2)
   assert.equal(second.requests.length, 2)
   assert.match(JSON.stringify(first.requests[0]), /FIRST_PRIVATE_MEMORY/)
   assert.match(JSON.stringify(second.requests[0]), /SECOND_PRIVATE_MEMORY/)
-  assert.ok(!JSON.stringify(first.requests).includes('SECOND_PRIVATE_MEMORY'))
-  assert.ok(!JSON.stringify(second.requests).includes('FIRST_PRIVATE_MEMORY'))
+  assert.ok(!JSON.stringify(first.requests).includes('SECOND_PRIVATE_MEMORY sharedtopic'))
+  assert.ok(!JSON.stringify(second.requests).includes('FIRST_PRIVATE_MEMORY sharedtopic'))
   assert.ok(!JSON.stringify(director.requests).includes('PRIVATE_MEMORY'))
   const messages = f.services.repository.events.messages(session.id, undefined, 100).items
   assert.ok(!JSON.stringify(messages).includes('PRIVATE_MEMORY'))
   assert.match(JSON.stringify(second.requests[1]), /First public response/)
-})
+}))
 
-test('single-actor recall refreshes between turns and a storage failure blocks the next request', async context => {
+test('single-actor recall refreshes between turns and a storage failure blocks the next request', async context => withAccount({ userId: 'recall-test', coreBaseUrl: 'http://localhost:40011', key: accountKey('http://localhost:40011', 'recall-test') }, async () => {
   const f = await fixture(context)
   const model = await recordedModel([{ text: 'First response' }, { text: 'Second response' }])
   context.after(() => model.close())
   const session = f.services.repository.create('Refresh recall', [{ assistantId: 1, characterId: 11 }])
   f.services.models.bind(session.id, { model: model.config, entityId: 1, label: 'Memory model' })
   const scope = { scopeType: 'agent_character' as const, scopeKey: '11' }
-  const initial = f.services.memories.create(scope, 'REMEMBERED_MARKER')
-  f.services.sessions.start(session.id, 'First turn')
+  const initial = f.services.memories.create(scope, 'REMEMBERED_MARKER tea')
+  f.services.sessions.start(session.id, 'Tea please')
   await f.services.sessions.waitForIdle(session.id)
   assert.match(JSON.stringify(model.requests[0]), /REMEMBERED_MARKER/)
   f.services.memories.forget(scope, initial.id, initial.updatedAt)
-  f.services.sessions.start(session.id, 'Second turn')
+  f.services.sessions.start(session.id, 'Tea again')
   await f.services.sessions.waitForIdle(session.id)
   assert.ok(!JSON.stringify(model.requests[1]).includes('REMEMBERED_MARKER'))
   f.db.connection.exec('ALTER TABLE memories RENAME TO broken_memories')
@@ -68,9 +69,9 @@ test('single-actor recall refreshes between turns and a storage failure blocks t
   await f.services.sessions.waitForIdle(session.id)
   assert.equal(model.requests.length, 2)
   assert.equal(f.services.sessions.faultCount(), 1)
-})
+}))
 
-test('recall prioritizes query fragments and bounds count and Unicode content without changing stored records', async context => {
+test('recall prioritizes query fragments and bounds count and Unicode content without changing stored records', async context => withAccount({ userId: 'recall-test', coreBaseUrl: 'http://localhost:40011', key: accountKey('http://localhost:40011', 'recall-test') }, async () => {
   const f = await fixture(context)
   const scope = { scopeType: 'agent_character' as const, scopeKey: '11' }
   f.services.memories.create(scope, '用户偏好简洁回答 ' + '😀'.repeat(1400))
@@ -81,6 +82,9 @@ test('recall prioritizes query fragments and bounds count and Unicode content wi
   assert.match(selected[0]!.content, /简洁回答/)
   assert.ok(selected.length <= 5)
   assert.ok(selected.every(memory => Array.from(memory.content).length <= 1200))
-  assert.equal(selected.reduce((total, memory) => total + Array.from(memory.content).length, 0), 4000)
+  assert.equal(selected.length, 1)
+  assert.equal(selected.reduce((total, memory) => total + Array.from(memory.content).length, 0), 1200)
+  assert.deepEqual(selectMemories(candidates, ''), [])
+  assert.deepEqual(selectMemories(candidates, 'unrelated'), [])
   assert.equal(JSON.stringify(candidates), saved)
-})
+}))

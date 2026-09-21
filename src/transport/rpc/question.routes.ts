@@ -7,7 +7,7 @@ import type { QuestionService } from '../../modules/questions/index.ts'
 export function questionRoutes(questions: QuestionService): Record<string, (params: JsonValue) => JsonValue | Promise<JsonValue>> {
   const handlers: Record<string, (value: JsonValue) => JsonValue | Promise<JsonValue>> = {
     'question.list': params => toJson(questions.list(questionListSchema.parse(params).sessionId ?? undefined)),
-    'question.resolve': params => { const value = questionResolveSchema.parse(params); return toJson(questions.resolve(value.requestId, value.answers)) },
+    'question.resolve': params => { const value = questionResolveSchema.parse(params); return toJson(questions.resolve(value.requestId, value.answers, value.supplementary)) },
     'question.reject': params => toJson(questions.reject(questionIdSchema.parse(params).requestId)),
   }
   return Object.fromEntries(Object.entries(handlers).map(([method, handler]) => {
