@@ -12,12 +12,19 @@ import {
 } from "../modules/accounts/index.ts"
 import type { ServerConfig } from "./config.ts"
 import { openRuntime, type RuntimeScope } from "./runtime-scope.ts"
+import {
+  AccountStartupError,
+  accountStartupFailure,
+  startupStage,
+  type AccountStartupStage,
+} from "./startup-diagnostics.ts"
 
 export class AccountRuntimes {
   private readonly runtimes = new Map<string, Promise<RuntimeScope>>()
   private readonly privateDataRoots: string[] = []
   private readonly failedAccounts = new Set<string>()
   private closed = false
+  private started = false
   private local: RuntimeScope | undefined
   readonly authentication: AccountAuthentication | undefined
   constructor(readonly config: ServerConfig) {
@@ -30,6 +37,7 @@ export class AccountRuntimes {
     if (!this.authentication) {
       this.local = await openRuntime(this.config)
       await this.local.start()
+      this.started = true
       return
     }
     this.stage("legacy.database")
@@ -57,15 +65,14 @@ export class AccountRuntimes {
         this.validate(account)
         if (this.directoryKey(account) !== entry.name) throw new Error("Persisted account directory identity mismatch")
         await this.get(account)
-      } catch {
+      } catch (error) {
         this.failedAccounts.add(entry.name)
-        process.stderr.write(`Account runtime ${entry.name} could not resume; its data was retained for recovery.\n`)
+        if (!(error instanceof AccountStartupError)) this.failure("account.resume", entry.name, error)
       }
     }
     if (this.config.monIdentity)
-      await this.get(this.serviceAccount()!).catch(() => {
-        process.stderr.write("Service account runtime could not resume; other accounts remain available.\n")
-      })
+      await this.get(this.serviceAccount()!).catch(() => undefined)
+    this.started = true
   }
   serviceAccount(): Account | undefined {
     const identity = this.config.monIdentity
@@ -87,8 +94,10 @@ export class AccountRuntimes {
     if (!pending) {
       pending = withoutAccount(() => this.open(account))
       this.runtimes.set(account.key, pending)
-      void pending.catch(() => {
-        this.failedAccounts.add(this.directoryKey(account))
+      void pending.catch((error) => {
+        const directory = this.directoryKey(account)
+        this.failedAccounts.add(directory)
+        this.failure("account.resume", directory, error)
         if (this.runtimes.get(account.key) === pending) this.runtimes.delete(account.key)
       })
     }
@@ -109,51 +118,64 @@ export class AccountRuntimes {
     return createHash("sha256").update(account.key).digest("hex")
   }
   private async open(account: Account): Promise<RuntimeScope> {
-    const root = path.join(this.config.dataRoot, "accounts", this.directoryKey(account)),
+    const directory = this.directoryKey(account),
+      root = path.join(this.config.dataRoot, "accounts", directory),
       dataRoot = path.join(root, "storage")
     if (!this.privateDataRoots.includes(dataRoot)) this.privateDataRoots.push(dataRoot)
-    mkdirSync(root, { recursive: true, mode: 0o700 })
-    if (lstatSync(root).isSymbolicLink()) throw new Error("Account directory cannot be redirected")
-    this.stage("account.import")
-    importAccountPartition(this.config.dataRoot, dataRoot, account)
-    this.stage("account.services")
-    const workspace = path.join(root, "workspace"),
-      skills = path.join(root, "skills")
-    mkdirSync(workspace, { recursive: true, mode: 0o700 })
-    mkdirSync(skills, { recursive: true, mode: 0o700 })
-    const metadata = path.join(root, "account.json")
-    writeFileSync(metadata + ".tmp", JSON.stringify(account), { mode: 0o600 })
-    renameSync(metadata + ".tmp", metadata)
-    const service = this.serviceAccount()?.key === account.key
-    const config: ServerConfig = {
-      ...this.config,
-      account,
-      dataRoot,
-      databasePath: path.join(dataRoot, "eden-agent.db"),
-      monIdentity: service ? this.config.monIdentity : undefined,
-      selfAwakeScheduleFile: service ? this.config.selfAwakeScheduleFile : undefined,
-      coreBaseUrl: this.authentication!.coreBaseUrl,
-      defaultWorkspaceRoot: workspace,
-      privateDataRoots: this.privateDataRoots,
-      systemSkillRoots: [skills],
-    }
-    const runtime = await openRuntime(config)
+    await this.atStage("account.metadata", directory, () => {
+      mkdirSync(root, { recursive: true, mode: 0o700 })
+      if (lstatSync(root).isSymbolicLink()) throw new Error("Account directory cannot be redirected")
+    })
+    await this.atStage("account.import", directory, () => importAccountPartition(this.config.dataRoot, dataRoot, account))
+    const runtime = await this.atStage("account.services", directory, async () => {
+      const workspace = path.join(root, "workspace"),
+        skills = path.join(root, "skills")
+      mkdirSync(workspace, { recursive: true, mode: 0o700 })
+      mkdirSync(skills, { recursive: true, mode: 0o700 })
+      const metadata = path.join(root, "account.json")
+      writeFileSync(metadata + ".tmp", JSON.stringify(account), { mode: 0o600 })
+      renameSync(metadata + ".tmp", metadata)
+      const service = this.serviceAccount()?.key === account.key
+      const config: ServerConfig = {
+        ...this.config,
+        account,
+        dataRoot,
+        databasePath: path.join(dataRoot, "eden-agent.db"),
+        monIdentity: service ? this.config.monIdentity : undefined,
+        selfAwakeScheduleFile: service ? this.config.selfAwakeScheduleFile : undefined,
+        coreBaseUrl: this.authentication!.coreBaseUrl,
+        defaultWorkspaceRoot: workspace,
+        privateDataRoots: this.privateDataRoots,
+        systemSkillRoots: [skills],
+      }
+      return openRuntime(config)
+    })
     try {
-      this.stage("account.background")
-      await runtime.start()
-      this.stage("account.ready")
+      await this.atStage("account.background", directory, () => runtime.start())
+      this.stage("account.ready", directory)
     } catch (error) {
-      this.failedAccounts.add(this.directoryKey(account))
+      this.failedAccounts.add(directory)
       throw error
     }
-    this.failedAccounts.delete(this.directoryKey(account))
+    this.failedAccounts.delete(directory)
     return runtime
   }
-  private stage(stage: string): void {
-    process.stdout.write(JSON.stringify({ event: 'server.startup', origin: this.config.origin, stage }) + '\n')
+  private async atStage<T>(stage: AccountStartupStage, directory: string, action: () => T | Promise<T>): Promise<T> {
+    this.stage(stage, directory)
+    try {
+      return await action()
+    } catch (error) {
+      throw new AccountStartupError(stage, error)
+    }
+  }
+  private stage(stage: string, directory?: string): void {
+    process.stdout.write(startupStage(this.config.origin, stage, directory) + "\n")
+  }
+  private failure(stage: AccountStartupStage | "account.resume", directory: string, error: unknown): void {
+    process.stderr.write(accountStartupFailure(this.config.origin, stage, directory, error) + "\n")
   }
   ready(): boolean {
-    return !this.closed && this.failedAccounts.size === 0
+    return this.started && !this.closed && this.failedAccounts.size === 0
   }
   defaultRuntime(): RuntimeScope {
     if (!this.local) throw new Error("Mon runtime must be selected by verified account identity")

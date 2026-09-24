@@ -11,13 +11,14 @@ export async function startServer(config: ServerConfig) {
   // Local's sole runtime owns its lock; Mon owns a parent lock plus one per-account storage lock.
   const release = config.origin === "mon" ? acquireProcessLock(config.dataRoot) : () => {}
   const runtimes = new AccountRuntimes(config)
-  try {
-    await runtimes.start()
-  } catch (error) {
-    await runtimes.close()
-    release()
-    throw error
-  }
+  if (config.origin === "local")
+    try {
+      await runtimes.start()
+    } catch (error) {
+      await runtimes.close()
+      release()
+      throw error
+    }
   const dispatch = new AccountHttp(config, runtimes)
   const health = healthHandler(config.origin, () => ({
     model: Boolean(config.model),
@@ -40,6 +41,9 @@ export async function startServer(config: ServerConfig) {
       })
     })
     persistToken(config)
+    // Mon's legacy account import can be large and synchronous. Keep its TCP health endpoint bound while it runs so
+    // the process supervisor does not kill a valid, one-time migration after the normal startup grace period.
+    if (config.origin === "mon") await runtimes.start()
   } catch (error) {
     websocket.close()
     await dispatch.close()

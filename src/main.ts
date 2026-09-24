@@ -4,7 +4,7 @@ import { startServer } from './bootstrap/container.ts'
 const config = loadConfig()
 const server = await startServer(config)
 process.stdout.write(JSON.stringify({ event: 'server.listening', origin: config.origin, host: config.host, port: server.port,
-  mode: 'runtime' }) + '\n')
+  mode: 'runtime', pid: process.pid, time: new Date().toISOString() }) + '\n')
 let stopping = false
 const shutdown = () => {
   if (stopping) return
