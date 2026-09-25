@@ -50,7 +50,7 @@ export async function requestPublic(input: URL, options: PublicRequest): Promise
 
 async function requestOnce(url: URL, options: PublicRequest & { method: 'GET' | 'POST' }): Promise<PublicResponse & { headers: http.IncomingHttpHeaders }> {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Only public HTTP and HTTPS URLs are allowed')
-  const host = url.hostname.replace(/\.$/, '').toLowerCase()
+  const host = url.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase()
   if (!host || host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) throw new Error('Only public HTTP and HTTPS URLs are allowed')
   const addresses = isIP(host) ? [{ address: host, family: isIP(host) }] : await lookup(host, { all: true, verbatim: true })
   if (!addresses.length || addresses.some(item => !isPublicAddress(item.address))) throw new Error('URL resolves to a private or reserved network address')
@@ -123,8 +123,8 @@ export function isPublicAddress(address: string): boolean {
   }
   if (isIP(address) !== 6) return false
   const value = address.toLowerCase()
-  const mapped = value.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)
-  if (mapped) return isPublicAddress(mapped[1]!)
+  // IPv4-mapped IPv6 may encode private IPv4 addresses in hexadecimal form.
+  if (value.includes(':ffff:')) return false
   return !(value === '::' || value === '::1' || value.startsWith('fc') || value.startsWith('fd')
     || /^fe[89ab]/.test(value) || value.startsWith('ff') || value.startsWith('2001:db8:')
     || value.startsWith('2001:0:') || value.startsWith('2001:2:') || value.startsWith('2002:'))

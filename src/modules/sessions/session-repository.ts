@@ -1,8 +1,8 @@
 import { accountFilter, currentAccount, SessionOwnership } from '../accounts/index.ts'
 import { randomUUID } from 'node:crypto'
 import type { EdenDatabase } from '@eden/store'
-import { modelContextUsage, runtimeCheckpointSchema, runtimeOriginSchema, toJson } from '@eden/api'
-import type { JsonValue, RuntimeCheckpoint, RuntimeOrigin } from '@eden/api'
+import { modelContextUsage, runtimeCheckpointSchema, runtimeOriginSchema, sessionPurposeSchema, sessionSourceChannelSchema, toJson } from '@eden/api'
+import type { JsonValue, RuntimeCheckpoint, RuntimeOrigin, SessionPurpose, SessionSourceChannel } from '@eden/api'
 import type { SessionSummary } from './contracts.ts'
 import { SessionEvents } from './session-events.ts'
 
@@ -14,16 +14,23 @@ export class SessionRepository {
     this.ownership = new SessionOwnership(database)
   }
 
-  create(title: string, participants: JsonValue[] = [], environment: JsonValue = null): SessionSummary {
+  create(title: string, participants: JsonValue[] = [], environment: JsonValue = null,
+    classification: { purpose: SessionPurpose; sourceChannel: SessionSourceChannel } = { purpose: 'user_chat', sourceChannel: 'app' }): SessionSummary {
+    if (classification.sourceChannel === 'qq' && this.origin !== 'mon') throw new Error('QQ sessions belong to Mon')
+    if (classification.sourceChannel === 'qq' && (classification.purpose !== 'user_chat' || participants.length !== 1))
+      throw new Error('QQ sessions require one acting participant')
     const now = Date.now()
     const id = randomUUID()
     const event = this.database.transaction(() => {
       this.database.connection.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)').run(id, title, this.origin, 'active', now, now)
+      this.database.connection.prepare('UPDATE session_classification SET purpose=?,source_channel=? WHERE session_id=?')
+        .run(classification.purpose, classification.sourceChannel, id)
       const account = currentAccount()
       const key = account?.key ?? this.database.connection.prepare("SELECT value FROM realm_meta WHERE key='account_key'").get()?.value
       if (typeof key === 'string') this.ownership.assign(id, key)
       return this.events.insert(id, null, 'session.created', {
         participants, environment, title, titleSource: title.trim() ? 'user' : null,
+        purpose: classification.purpose, sourceChannel: classification.sourceChannel,
       })
     })
     this.events.publish(event)
@@ -32,26 +39,34 @@ export class SessionRepository {
 
   read(id: string): SessionSummary {
     this.ownership.assert(id)
-    const row = this.database.connection.prepare("SELECT * FROM sessions WHERE id=? AND origin=? AND status!='deleted'").get(id, this.origin)
+    const row = this.database.connection.prepare(`SELECT s.*,c.purpose,c.source_channel FROM sessions s
+      JOIN session_classification c ON c.session_id=s.id WHERE s.id=? AND s.origin=? AND s.status!='deleted'`).get(id, this.origin)
     if (!row) throw new Error('Session not found')
     const created = this.database.connection.prepare("SELECT payload_json FROM events WHERE session_id=? AND kind IN ('session.created','session.metadata.updated') ORDER BY seq DESC LIMIT 1").get(id)
     const metadata: Record<string, unknown> = JSON.parse(String(created?.payload_json ?? '{}'))
     const latestUsage = this.database.connection.prepare("SELECT payload_json FROM events WHERE session_id=? AND kind='model.response' AND json_type(payload_json,'$.usage.input') IN ('integer','real') AND json_extract(payload_json,'$.usage.input')>=0 AND json_type(payload_json,'$.usage.output') IN ('integer','real') AND json_extract(payload_json,'$.usage.output')>=0 ORDER BY seq DESC LIMIT 1").get(id)
     const usage = latestUsage ? modelContextUsage(JSON.parse(String(latestUsage.payload_json))) : undefined
+    const runningInput = this.database.connection.prepare("SELECT 1 FROM inputs WHERE session_id=? AND state IN ('queued','running') LIMIT 1").get(id)
     return {
       ...usage,
       id: String(row.id), title: String(row.title), titleSource: this.titleSource(id, String(row.title)) ?? 'pending',
-      status: row.status === 'closed' ? 'closed' : 'active', runtimeOrigin: runtimeOriginSchema.parse(row.origin),
+      status: row.status === 'closed' ? 'closed' : 'active', executionStatus: runningInput ? 'busy' : 'idle',
+      runtimeOrigin: runtimeOriginSchema.parse(row.origin),
+      purpose: sessionPurposeSchema.parse(row.purpose), sourceChannel: sessionSourceChannelSchema.parse(row.source_channel),
       participants: Array.isArray(metadata.participants) ? metadata.participants.map(toJson) : [],
       environment: toJson(metadata.environment ?? null), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at),
     }
   }
 
-  list(limit = 100, includeClosed = false, includeBackground = true): SessionSummary[] {
-    return this.database.connection.prepare(`SELECT id FROM sessions WHERE ${accountFilter(this.database, 'sessions.id')} AND origin=? AND status!='deleted' AND (? OR status='active')
-      AND (? OR NOT EXISTS (SELECT 1 FROM self_awake_submissions s JOIN jobs j ON j.id=s.job_id WHERE j.session_id=sessions.id))
-      ORDER BY updated_at DESC LIMIT ?`)
-      .all(this.origin, Number(includeClosed), Number(includeBackground), Math.min(limit, 1000)).map(row => this.read(String(row.id)))
+  list(limit = 100, includeClosed = false, includeBackground = true, purpose?: SessionPurpose, sourceChannel?: SessionSourceChannel): SessionSummary[] {
+    const defaultApp = !includeBackground && !purpose && !sourceChannel
+    return this.database.connection.prepare(`SELECT s.id FROM sessions s JOIN session_classification c ON c.session_id=s.id
+      WHERE ${accountFilter(this.database, 's.id')} AND s.origin=? AND s.status!='deleted' AND (? OR s.status='active')
+      AND (? IS NULL OR c.purpose=?) AND (? IS NULL OR c.source_channel=?)
+      AND (?=0 OR (c.purpose='user_chat' AND c.source_channel='app'))
+      ORDER BY s.updated_at DESC LIMIT ?`)
+      .all(this.origin, Number(includeClosed), purpose ?? null, purpose ?? null, sourceChannel ?? null, sourceChannel ?? null,
+        Number(defaultApp), Math.min(limit, 1000)).map(row => this.read(String(row.id)))
   }
 
   rename(id: string, title: string): SessionSummary {

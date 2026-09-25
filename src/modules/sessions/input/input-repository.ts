@@ -20,6 +20,19 @@ export class InputRepository {
     return Boolean(this.database.connection.prepare("SELECT 1 FROM inputs WHERE session_id=? AND state='queued' LIMIT 1").get(sessionId))
   }
 
+  cancelQueued(sessionId: string): number {
+    const events = this.database.transaction(() => {
+      const rows = this.database.connection.prepare("SELECT id,turn_id FROM inputs WHERE session_id=? AND state='queued'").all(sessionId)
+      if (!rows.length) return []
+      this.database.connection.prepare("UPDATE inputs SET state='cancelled' WHERE session_id=? AND state='queued'").run(sessionId)
+      return rows.map(row => this.events.insert(sessionId, String(row.turn_id), 'input.cancelled', {
+        inputId: String(row.id), reason: 'Session stopped by user',
+      }))
+    })
+    for (const event of events) this.events.publish(event)
+    return events.length
+  }
+
   enqueue(sessionId: string, text: string, idempotencyKey: string, metadata: JsonValue = {}, kind: 'prompt' | 'compact' = 'prompt', environmentUpdate?: JsonValue, onCommit?: (input: AcceptedInput) => void): AcceptedInput {
     const result = this.database.transaction(() => {
       const old = this.database.connection.prepare('SELECT * FROM inputs WHERE session_id=? AND idempotency_key=?').get(sessionId, idempotencyKey)
@@ -80,6 +93,9 @@ export class InputRepository {
       this.database.connection.prepare("UPDATE inputs SET state='held' WHERE session_id=? AND state='queued'").run(row.session_id!)
       this.finish({ id: String(row.id), sessionId: String(row.session_id), turnId: String(row.turn_id), text: String(row.text), state: 'running' }, 'Server restarted during execution')
     }
+    // A restart must not execute user input that had not begun before shutdown.
+    // Job inputs retain their own scheduler and recovery policy.
+    this.database.connection.prepare("UPDATE inputs SET state='held' WHERE state='queued' AND COALESCE(json_type(metadata_json,'$.job'),'')!='object'").run()
     this.database.connection.prepare("UPDATE tool_operations SET state='unknown', updated_at=? WHERE state='running'").run(Date.now())
     return rows.length
   }

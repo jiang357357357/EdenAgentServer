@@ -41,3 +41,21 @@ test('recovery interrupts in-flight work and marks uncertain effects unknown', (
     assert.equal(inputs.recoverInterrupted(), 0)
   } finally { database.close() }
 })
+
+test('restart holds unstarted user input while leaving scheduled job input to its owner', () => {
+  const database = new EdenDatabase(':memory:', 'local')
+  const repository = new SessionRepository(database, 'local')
+  const userSession = repository.create('User input')
+  const jobSession = repository.create('Scheduled input')
+  const inputs = new InputRepository(database, repository.events)
+  try {
+    const user = inputs.enqueue(userSession.id, 'Do this later', 'user')
+    const job = inputs.enqueue(jobSession.id, 'Scheduled work', 'job', { job: { id: 'scheduled', kind: 'self_awake' } })
+    assert.equal(inputs.recoverInterrupted(), 0)
+    assert.equal(database.connection.prepare('SELECT state FROM inputs WHERE id=?').get(user.inputId)?.state, 'held')
+    assert.equal(database.connection.prepare('SELECT state FROM inputs WHERE id=?').get(job.inputId)?.state, 'queued')
+    assert.deepEqual(inputs.pendingSessions(), [jobSession.id])
+    assert.equal(inputs.recoverInterrupted(), 0)
+    assert.equal(database.connection.prepare('SELECT state FROM inputs WHERE id=?').get(user.inputId)?.state, 'held')
+  } finally { database.close() }
+})

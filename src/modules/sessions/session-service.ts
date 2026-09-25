@@ -1,3 +1,4 @@
+import { UiPreferenceRepository } from "../ui-preferences/index.ts"
 import { withAccount } from '../accounts/index.ts'
 import { randomUUID } from 'node:crypto'
 import { toJson } from '@eden/api'
@@ -111,10 +112,18 @@ export class SessionService {
   private inputMetadata(sessionId: string, environment?: JsonValue) {
     if (this.closed) throw new Error('Server is shutting down')
     if (this.editing.has(sessionId)) throw new Error('Session is being closed or deleted')
+    if (this.stopping.has(sessionId) && this.tasks.has(sessionId)) throw new Error('Session is stopping; wait for the current turn to finish')
     if (this.faults.has(sessionId)) throw new Error('Session storage failed; restart after repairing the failure')
     const session = this.repository.read(sessionId)
     if (session.status !== 'active') throw new Error('Session is closed')
-    return { participants: session.participants, environment: environment === undefined ? session.environment : environment, ...this.executionSnapshot(sessionId, session.participants) }
+    const preferences = new UiPreferenceRepository(this.repository.database)
+    const replyLengths = Object.fromEntries(session.participants.map(participant => {
+      const value = participant && typeof participant === 'object' && !Array.isArray(participant) ? participant : {}
+      const id = String(value.characterId ?? value.characterID ?? '')
+      return [id, preferences.replyLength(id).length]
+    }))
+    return { replyLengths, participants: session.participants, environment: environment === undefined ? session.environment : environment,
+      ...(session.sourceChannel === 'qq' ? { sourceChannel: 'qq' } : {}), ...this.executionSnapshot(sessionId, session.participants) }
   }
 
   private accept(sessionId: string, text: string, idempotencyKey: string, environment: JsonValue | undefined, kind: 'prompt' | 'compact', attachments: AttachmentSnapshot[] = [], onCommit?: (input: AcceptedInput) => void): AcceptedInput {
@@ -209,7 +218,7 @@ export class SessionService {
     const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata) ? input.metadata : {}
     const job = metadata.job && typeof metadata.job === 'object' && !Array.isArray(metadata.job) ? metadata.job : {}
     const recallQuery = job.kind === 'self_awake' ? (typeof metadata.recallQuery === 'string' ? metadata.recallQuery : '') : input.text
-    const memory = this.memoryRecall?.prompt(input.sessionId, input.turnId, recallQuery) ?? ''
+    const memory = this.repository.read(input.sessionId).sourceChannel === 'qq' ? '' : this.memoryRecall?.prompt(input.sessionId, input.turnId, recallQuery) ?? ''
     const runtime = createRuntime({
       sessionId: input.sessionId, systemPrompt: context.prompt + memory,
       contextSources: toJson([...context.sources, { kind: 'memory', title: '召回记忆', content: memory }]) as JsonValue[],
@@ -235,20 +244,43 @@ export class SessionService {
 
   async cancel(sessionId: string): Promise<boolean> {
     this.repository.read(sessionId)
-    this.titles.cancel(sessionId)
-    await this.descendantStop?.(sessionId)
-    const admissionCancelled = this.admissions.cancel(sessionId)
-    if (!this.tasks.has(sessionId)) return admissionCancelled
     this.stopping.add(sessionId)
+    this.titles.cancel(sessionId)
+    const admissionCancelled = this.admissions.cancel(sessionId)
+    const running = this.tasks.has(sessionId)
     this.controllers.get(sessionId)?.abort()
-    await this.runtimes.get(sessionId)?.abort()
-    return true
+    const abortRuntime = this.runtimes.get(sessionId)?.abort()
+    const stopDescendants = this.descendantStop?.(sessionId)
+    let queuedCancelled = 0
+    let queueFailure: unknown
+    try { queuedCancelled = this.inputs.cancelQueued(sessionId) }
+    catch (error) { queueFailure = error }
+    const results = await Promise.allSettled([abortRuntime, stopDescendants])
+    const failures = results.flatMap(result => result.status === 'rejected' ? [result.reason] : [])
+    if (queueFailure) failures.push(queueFailure)
+    if (failures.length) throw new AggregateError(failures, 'Session cancellation failed')
+    return running || admissionCancelled || queuedCancelled > 0
   }
 
   async endSession(sessionId: string, state: 'closed' | 'deleted'): Promise<void> {
     if (this.editing.has(sessionId)) throw new Error('Session mutation already running')
     this.editing.add(sessionId)
     try {
+      if (state === 'deleted') {
+        this.repository.read(sessionId)
+        this.stopping.add(sessionId)
+        this.titles.cancel(sessionId)
+        this.admissions.cancel(sessionId)
+        this.controllers.get(sessionId)?.abort(new Error('Session deleted'))
+        const turnId = this.turns.get(sessionId)
+        if (turnId) this.signals.interrupt(turnId)
+        this.repository.setStatus(sessionId, state)
+        // An unresponsive model or child must not hold the delete RPC open.
+        const runtime = this.runtimes.get(sessionId)
+        if (runtime) void runtime.abort().catch(error => process.stderr.write(`Session ${sessionId} abort failed: ${String(error)}\n`))
+        if (this.descendantStop) void this.descendantStop(sessionId).catch(error => process.stderr.write(`Session ${sessionId} child stop failed: ${String(error)}\n`))
+        return
+      }
       await this.cancel(sessionId)
       await this.waitForIdle(sessionId)
       this.repository.setStatus(sessionId, state)

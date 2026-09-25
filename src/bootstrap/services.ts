@@ -30,7 +30,8 @@ import { QuestionService, questionTool } from '../modules/questions/index.ts'
 import { BlobRepository, BlobService } from '../modules/blobs/index.ts'
 import { AttachmentService, AttachmentRepository, attachmentTool } from '../modules/attachments/index.ts'
 import { MemoryRepository, MemoryScopes, MemoryRecall, memoryTools, MemoryExtractionService } from '../modules/memories/index.ts'
-import { WebService, webTools } from '../modules/web/index.ts'
+import { WebResourceRepository, WebService, webTools } from '../modules/web/index.ts'
+import { QqChannelBridge } from '../modules/qq-channel/bridge.ts'
 
 export function createServices(database: EdenDatabase, config: ServerConfig) {
   database.connection.prepare("UPDATE connector_operations SET state='unknown',error='Host restarted before connector result confirmation' WHERE state='running'").run()
@@ -84,7 +85,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
     return !(environment && typeof environment === 'object' && !Array.isArray(environment)
       && environment.sessionPurpose === 'self_awake')
   })
-  const web = new WebService(config.web)
+  const web = new WebService(config.web, new WebResourceRepository(database, repository))
   const questions = new QuestionService(repository)
   const toolDefinitions = (sessionId: string, turnId: string, actorId?: string | number): RuntimeTool[] => filterSubagentTools(database, sessionId, [
     ...mcpTools(mcp, database, permissions, sessionId, turnId),
@@ -102,7 +103,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
     ...desktopReminderTools(desktopReminders, permissions, sessionId, turnId),
     ...selfAwakeTools(selfAwakeRepository, jobs, permissions, selfAwakeContext, sessionId, turnId),
     questionTool(questions, sessionId, turnId), ...memoTools(memos, permissions, sessionId, turnId),
-    attachmentTool(attachmentRepository, attachments, sessionId, turnId),
+    attachmentTool(attachmentRepository, attachments, sessionId, turnId, permissions),
     ...memoryTools(memories, memoryScopes, permissions, { sessionId, turnId, ...(actorId === undefined ? {} : { actorId }) }),
     ...webTools(web, permissions, sessionId, turnId),
     ...(config.origin === 'mon' ? contactTools(mon, permissions, sessionId, turnId) : []),
@@ -112,6 +113,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
   const capabilitySession = (sessionId: string, turnId: string, actorId?: string | number): SessionCapabilities => new SessionCapabilities(
     database, repository.events, skills.repository, () => ({ sessionId, owner: capabilityOwner(sessionId === '00000000-0000-4000-8000-000000000000' ? [] : repository.read(sessionId).participants, actorId),
       profile: skillProfile(sessionId === '00000000-0000-4000-8000-000000000000' ? null : repository.read(sessionId).environment),
+      sourceChannel: sessionId === '00000000-0000-4000-8000-000000000000' ? 'app' : repository.read(sessionId).sourceChannel,
       workspaceRoot: workspace.info().path }), () => toolDefinitions(sessionId, turnId, actorId))
   const tools = (sessionId: string, turnId: string, actorId?: string | number): RuntimeTool[] => {
     const scope = capabilitySession(sessionId, turnId, actorId)
@@ -125,6 +127,8 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
     sessionId => models.invalidateSession(sessionId), new CompanionSessionExtension(companion, models, tools), handoffs, attachments, memoryRecall)
   const mon: MonBindingService = new MonBindingService(models, sessions)
   const selfAwakeBridge = config.monIdentity && config.origin === 'mon' ? new SelfAwakeBridge(config.monIdentity, new SelfAwakeBridgeRepository(database, jobs), sessions, mon) : undefined
+  const qqChannelBridge = config.monIdentity && config.origin === 'mon'
+    ? new QqChannelBridge(config.monIdentity, database, sessions, mon) : undefined
   const memoryExtractions = new MemoryExtractionService(repository, models, permissions)
   const selfAwakeActions = new SelfAwakeActions(repository, permissions, memos, desktopReminders, questions, (channel, sessionId, input, signal) => channel === 'qq' ? mon.contactOwnerByQq(sessionId, input, signal) : mon.contactOwnerByEmail(sessionId, input, signal))
   const selfAwake = new SelfAwakeService(selfAwakeRepository, jobs, sessions)
@@ -135,7 +139,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
   const pluginHooks = new PluginHookService(new PluginHookRepository(database, jobs), pluginMarket.installed, sessions, jobs)
   const memoJobRecovery = new MemoJobRecovery(database, memos, memoNotifications, jobs, sessions)
   const scheduler = new JobScheduler(jobs, { 'subagent.turn': job => subagents.dispatch(job), 'plugin.hook': job => pluginHooks.dispatch(job), self_awake: job => selfAwake.dispatch(job), 'memo.reminder': memoDispatcher(database, memos, memoNotifications, jobs, sessions), 'memo.reminder.redelivery': job => memoJobRecovery.dispatch(job) })
-  return { memoJobRecovery, commands, repository, mcpResults, mcp, connectorCredentials, connectorLifecycle, connectorPermissions, connectorEvents, connectors, connectorCatalog, media, realtimeVoice, speech, voice, voiceConfig, subagentLifecycle, subagents, packageAssets, pluginHooks, pluginMarket, skills, plugins, permissions, sessions, workspace, models, mon, directors, companion, questions, handoffs, blobs, attachments, memories, memos, memoNotifications, jobs, scheduler, selfAwake, selfAwakeActions, selfAwakeBridge, desktopReminders, memoryExtractions }
+  return { memoJobRecovery, commands, repository, mcpResults, mcp, connectorCredentials, connectorLifecycle, connectorPermissions, connectorEvents, connectors, connectorCatalog, media, realtimeVoice, speech, voice, voiceConfig, subagentLifecycle, subagents, packageAssets, pluginHooks, pluginMarket, skills, plugins, permissions, sessions, workspace, models, mon, directors, companion, questions, handoffs, blobs, attachments, memories, memos, memoNotifications, jobs, scheduler, selfAwake, selfAwakeActions, selfAwakeBridge, qqChannelBridge, desktopReminders, memoryExtractions }
 }
 
 function skillProfile(environment: unknown): string {

@@ -1,5 +1,6 @@
 export { webConfig } from './config.ts'
 export type { WebConfig } from './config.ts'
 export { searchTextRelevant, WebService } from './service.ts'
+export { WebResourceRepository } from './resource-repository.ts'
 export { webTools } from './tools.ts'
 export { isPublicAddress } from './public-http.ts'

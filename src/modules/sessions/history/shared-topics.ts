@@ -12,7 +12,9 @@ export function recentSharedTopics(database: EdenDatabase, sessionId: string, au
   const account = ownership.owner(sessionId) ?? null
   const rows = database.connection.prepare(`WITH eligible AS (
     SELECT i.* FROM inputs i JOIN sessions s ON s.id=i.session_id
+    JOIN session_classification c ON c.session_id=s.id
     WHERE i.kind='prompt' AND i.state IN ('completed','running','queued') AND s.status='active'
+    AND c.purpose='user_chat' AND c.source_channel='app'
     AND (i.session_id=? OR (? IS NOT NULL AND i.session_id IN (SELECT session_id FROM session_owners WHERE account_key=?)))
     AND json_extract(i.metadata_json,'$.job') IS NULL
     AND COALESCE(json_extract(i.metadata_json,'$.internalHandoff'),0)=0

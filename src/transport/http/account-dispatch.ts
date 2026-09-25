@@ -13,21 +13,25 @@ export class AccountHttp {
   handle(request: IncomingMessage, response: ServerResponse): boolean {
     const url = request.url ?? "",
       blob = url === "/blobs" || url.startsWith("/blobs/"),
-      internal = url === "/internal/self-awake/run" || url === "/internal/self-awake/status"
+      selfAwake = url === "/internal/self-awake/run" || url === "/internal/self-awake/status",
+      qqChannel = url === "/internal/channels/qq/turns" || url === "/internal/channels/qq/status",
+      internal = selfAwake || qqChannel
     if (!blob && !internal) return false
     if (this.closing || this.tasks.size >= 64) {
       this.reject(response, 503)
       return true
     }
-    const task = this.dispatch(request, response, internal).catch(() => this.reject(response, 401))
+    const task = this.dispatch(request, response, internal, qqChannel).catch(() => this.reject(response, 401))
     this.tasks.add(task)
     void task.finally(() => this.tasks.delete(task))
     return true
   }
-  private async dispatch(request: IncomingMessage, response: ServerResponse, internal: boolean) {
+  private async dispatch(request: IncomingMessage, response: ServerResponse, internal: boolean, qqChannel: boolean) {
     if (internal) {
       if (this.config.origin === "local") {
-        this.runtimes.defaultRuntime().selfAwakeHttp.handle(request, response)
+        const runtime = this.runtimes.defaultRuntime()
+        if (qqChannel) runtime.qqChannelHttp.handle(request, response)
+        else runtime.selfAwakeHttp.handle(request, response)
         return
       }
       const account = this.runtimes.serviceAccount()
@@ -36,7 +40,8 @@ export class AccountHttp {
         return
       }
       const runtime = await this.runtimes.get(account)
-      runtime.selfAwakeHttp.handle(request, response)
+      if (qqChannel) runtime.qqChannelHttp.handle(request, response)
+      else runtime.selfAwakeHttp.handle(request, response)
       return
     }
     if (!this.preflight(request, response)) return

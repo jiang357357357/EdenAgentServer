@@ -1,6 +1,7 @@
 import type { JsonValue } from '@eden/api'
 import type { SearchProvider, WebConfig } from './config.ts'
 import { requestPublic } from './public-http.ts'
+import type { WebResourceRepository } from './resource-repository.ts'
 
 export interface SearchInput { queries: string[]; maxResults: number; domains: string[]; freshness?: 'day' | 'week' | 'month' | 'year' | undefined }
 export interface FetchInput { url?: string | undefined; refId?: string | undefined; maxChars: number }
@@ -19,7 +20,7 @@ export class WebService {
   private readonly turnResearch = new Map<string, TurnResearchState>()
   private anonymousBraveTail: Promise<void> = Promise.resolve()
   private anonymousBraveAvailableAt = 0
-  constructor(private readonly config: WebConfig) {}
+  constructor(private readonly config: WebConfig, private readonly durable?: WebResourceRepository) {}
 
   async search(sessionId: string, input: SearchInput, signal: AbortSignal, turnId?: string): Promise<JsonValue> {
     const research = turnId ? this.consumeSearch(sessionId, turnId, input.queries) : undefined
@@ -110,6 +111,7 @@ export class WebService {
   }
 
   private putResource(sessionId: string, kind: 'search' | 'page', url: string, title: string, body: string): string {
+    if (this.durable) return this.durable.put(sessionId, kind, url, title, body)
     const resources = this.resources.get(sessionId) ?? new Map<string, Resource>()
     const counter = this.counters.get(sessionId) ?? { search: 0, page: 0 }
     counter[kind] += 1
@@ -125,6 +127,7 @@ export class WebService {
   }
 
   private getResource(sessionId: string, refId: string): Resource {
+    if (this.durable) return this.durable.get(sessionId, refId)
     const resource = this.resources.get(sessionId)?.get(refId)
     if (!resource) throw new Error(`当前会话不存在网页引用 ${refId}`)
     return resource

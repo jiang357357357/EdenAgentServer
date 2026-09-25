@@ -3,6 +3,8 @@ import type { UiPreferenceRepository } from "../../modules/ui-preferences/index.
 import { contractHandler } from "./contract-handler.ts"
 export function uiPreferenceRoutes(repository: UiPreferenceRepository) {
   return {
+    "ui.reply_length.get": contractHandler(rpcMethods["ui.reply_length.get"], input => repository.replyLength(input.characterId)),
+    "ui.reply_length.update": contractHandler(rpcMethods["ui.reply_length.update"], input => repository.updateReplyLength(input.characterId, input.length)),
     "ui.appearance.get": contractHandler(rpcMethods["ui.appearance.get"], () => repository.appearance()),
     "ui.appearance.update": contractHandler(rpcMethods["ui.appearance.update"], (input) =>
       repository.updateAppearance(input),

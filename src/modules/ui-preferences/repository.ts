@@ -1,3 +1,4 @@
+import { replyLengthSchema } from "@eden/api"
 import { baseThemeSchema, type BaseTheme, accentThemeSchema, type AccentTheme } from "@eden/api"
 import { currentAccount } from "../accounts/index.ts"
 import type { EdenDatabase } from "@eden/store"
@@ -5,6 +6,21 @@ import type { EdenDatabase } from "@eden/store"
 /** UI preferences belong to this local runtime realm, independently of chat sessions. */
 export class UiPreferenceRepository {
   constructor(private readonly database: EdenDatabase) {}
+  replyLength(characterId: string) {
+    const row = this.database.connection.prepare("SELECT value_json FROM runtime_settings WHERE key=?")
+      .get(this.replyKey(characterId))
+    try { return { length: replyLengthSchema.catch("medium").parse(row ? JSON.parse(String(row.value_json)) : undefined) } }
+    catch { return { length: "medium" as const } }
+  }
+  updateReplyLength(characterId: string, length: unknown) {
+    const value = replyLengthSchema.parse(length)
+    this.database.connection.prepare("INSERT INTO runtime_settings VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at")
+      .run(this.replyKey(characterId), JSON.stringify(value), Date.now())
+    return { length: value }
+  }
+  private replyKey(characterId: string) {
+    return `ui.reply-length:${JSON.stringify([currentAccount()?.key ?? "local", characterId])}`
+  }
   appearance() {
     const key = `ui.appearance:${currentAccount()?.key ?? "local"}`
     const row = this.database.connection.prepare("SELECT value_json FROM runtime_settings WHERE key=?").get(key)

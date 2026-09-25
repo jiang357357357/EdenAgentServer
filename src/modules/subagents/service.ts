@@ -48,7 +48,9 @@ export class SubagentService {
       value && typeof value === 'object' && !Array.isArray(value) && String(value.assistantId) === String(input.actorId))
     if (participants.length > 1 || input.actorId !== undefined && participants.length !== 1) throw new Error('Select one current parent participant before spawning')
     this.repository.capacity(this.repository.parent(parent.id)?.rootSessionId ?? parent.id)
-    const child = this.sessions.repository.create(input.taskName, participants, { sessionPurpose: 'subagent', parentSessionId: parent.id, ...(input.actorId === undefined ? {} : { parentActorId: input.actorId }) })
+    const child = this.sessions.repository.create(input.taskName, participants,
+      { sessionPurpose: 'subagent', parentSessionId: parent.id, ...(input.actorId === undefined ? {} : { parentActorId: input.actorId }) },
+      { purpose: 'subagent', sourceChannel: 'internal' })
     const owner = this.sessions.repository.ownership.owner(parent.id)
     if (owner) this.sessions.repository.ownership.assign(child.id, owner)
     try {

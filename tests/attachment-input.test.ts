@@ -9,6 +9,7 @@ import { SessionRepository, SessionService } from '../src/modules/sessions/index
 import { AttachmentService } from '../src/modules/attachments/index.ts'
 import { BlobService, BlobRepository } from '../src/modules/blobs/index.ts'
 import { wireEvent } from '../src/transport/rpc/session.routes.ts'
+import { InputRecoveryRepository } from '../src/modules/sessions/input/recovery-repository.ts'
 
 const data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII='
 
@@ -54,7 +55,7 @@ test('accepted image references are transactional, idempotent and feed restored 
   assert.ok(JSON.stringify(f.model.requests[1]).includes(data))
 })
 
-test('queued image snapshots survive service restart before the first model request', async context => {
+test('queued image snapshots wait for explicit resubmission after service restart', async context => {
   const f = await fixture(context, false)
   const accepted = await f.service.startWithAttachments(f.session.id, 'Queued image', [f.ref])
   await f.service.waitForIdle(f.session.id)
@@ -64,8 +65,16 @@ test('queued image snapshots survive service restart before the first model requ
   f.allow()
   f.service.resumePending()
   await f.service.waitForIdle(f.session.id)
+  assert.equal(f.model.requests.length, 0)
+  assert.equal(f.database.connection.prepare('SELECT state FROM inputs WHERE id=?').get(accepted.inputId)?.state, 'held')
+  const recovery = new InputRecoveryRepository(f.repository)
+  const source = recovery.list(f.session.id).items.find(item => item.id === accepted.inputId)!
+  recovery.resolve(f.session.id, accepted.inputId, source.fingerprint, 'cancelled', 'Restarted before execution')
+  const preview = f.service.resubmissionPreview(f.session.id, accepted.inputId)
+  const resubmitted = await f.service.resubmit(f.session.id, accepted.inputId, preview.fingerprint, 'User explicitly requested retry')
+  await f.service.waitForIdle(f.session.id)
+  assert.equal(f.database.connection.prepare('SELECT state FROM inputs WHERE id=?').get(resubmitted.inputId)?.state, 'completed')
   assert.ok(JSON.stringify(f.model.requests[0]).includes(`data:image/png;base64,${data}`))
-  assert.equal(f.database.connection.prepare('SELECT state FROM inputs WHERE id=?').get(accepted.inputId)?.state, 'completed')
 })
 
 test('failed attachment queue event rolls back both input and environment without model execution', async context => {

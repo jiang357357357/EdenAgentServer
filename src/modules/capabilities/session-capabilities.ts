@@ -13,7 +13,7 @@ import { discoveryTools } from './discovery-tools.ts'
 import { resolveToolCall } from './call-resolution.ts'
 import { selectSkill, skillSelectionCurrent, availableSkillSummaries } from './skill-selection.ts'
 
-export interface CapabilityScope { sessionId: string; owner: string; profile: string; workspaceRoot: string }
+export interface CapabilityScope { sessionId: string; owner: string; profile: string; workspaceRoot: string; sourceChannel?: 'app' | 'qq' | 'internal' }
 
 export class SessionCapabilities {
   private readonly selections: SelectionRepository
@@ -25,6 +25,7 @@ export class SessionCapabilities {
   private get scope() { return this.scopeProvider() }
 
   registry(): ToolRegistry {
+    if (this.scope.sourceChannel === 'qq') return new ToolRegistry([])
     const tools = [...this.definitions(), ...discoveryTools(this)].filter(tool => tool.name !== 'read_skill')
     return new ToolRegistry(filterSubagentTools(this.database, this.scope.sessionId, tools))
   }

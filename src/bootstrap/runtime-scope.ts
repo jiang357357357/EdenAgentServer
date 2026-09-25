@@ -13,6 +13,7 @@ import { pluginAssetRoutes } from "../transport/rpc/plugin-assets.routes.ts"
 import { pluginMarketRoutes } from "../transport/rpc/plugin-market.routes.ts"
 import { skillRoutes } from "../transport/rpc/skill.routes.ts"
 import { SelfAwakeHttp } from "../transport/http/self-awake.ts"
+import { QqChannelHttp } from "../transport/http/qq-channel.ts"
 import { notificationRoutes } from "../transport/rpc/notification.routes.ts"
 import { selfAwakeRoutes } from "../transport/rpc/self-awake.routes.ts"
 import { jobRoutes } from "../transport/rpc/job.routes.ts"
@@ -80,6 +81,7 @@ export async function openRuntime(config: ServerConfig) {
   const { plugins, permissions, sessions, workspace, models, mon, directors, companion, questions, memoryExtractions } =
     services
   const selfAwakeHttp = new SelfAwakeHttp(config.origin, services.selfAwakeBridge)
+  const qqChannelHttp = new QqChannelHttp(config.origin, services.qqChannelBridge)
   const blobHttp = new BlobHttp(services.blobs, config)
   const drainServices = () => {
     services.realtimeVoice.close()
@@ -97,6 +99,7 @@ export async function openRuntime(config: ServerConfig) {
       services.pluginMarket.close(),
       services.skills.close(),
       selfAwakeHttp.close(),
+      qqChannelHttp.close(),
       services.selfAwakeActions.close(),
       memoryExtractions.close(),
       blobHttp.close(),
@@ -166,6 +169,7 @@ export async function openRuntime(config: ServerConfig) {
     routes,
     blobHttp,
     selfAwakeHttp,
+    qqChannelHttp,
     health,
     async start() {
       try {

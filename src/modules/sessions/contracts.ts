@@ -1,4 +1,4 @@
-import type { JsonValue, RuntimeOrigin } from '@eden/api'
+import type { JsonValue, RuntimeOrigin, SessionPurpose, SessionSourceChannel } from '@eden/api'
 
 export interface SessionSummary {
   id: string
@@ -7,7 +7,10 @@ export interface SessionSummary {
   tokenBreakdown?: JsonValue
   titleSource: string
   status: 'active' | 'closed'
+  executionStatus: 'idle' | 'busy'
   runtimeOrigin: RuntimeOrigin
+  purpose: SessionPurpose
+  sourceChannel: SessionSourceChannel
   participants: JsonValue[]
   environment: JsonValue
   createdAt: number

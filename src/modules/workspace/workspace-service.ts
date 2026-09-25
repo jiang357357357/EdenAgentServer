@@ -7,22 +7,15 @@ import type { EdenDatabase } from '@eden/store'
 import { WorkspaceRepository } from './workspace-repository.ts'
 import { workspaceRoot, workspaceFile } from './workspace-path.ts'
 import { WorkspaceMutationQueue } from './mutation-queue.ts'
+import { readWorkspacePage } from './workspace-read-page.ts'
 
 export class WorkspaceService {
   private readonly repository: WorkspaceRepository
   private readonly mutations = new WorkspaceMutationQueue()
   private readonly modelReads = new Map<string, Map<string, string>>()
 
-  async readForModel(scope: string, requested: string) {
-    const result = await this.read(requested)
-    if (result.sha256) {
-      const reads = this.modelReads.get(scope) ?? new Map<string, string>()
-      reads.set(result.path, result.sha256)
-      this.modelReads.set(scope, reads)
-      if (this.modelReads.size > 512) this.modelReads.delete(this.modelReads.keys().next().value!)
-    }
-    const { sha256: _, ...visible } = result
-    return visible
+  async readForModel(_scope: string, requested: string, offset = 0, limit = 65536) {
+    return readWorkspacePage(this.root(), requested, offset, limit)
   }
 
   rememberWrite(scope: string, requested: string, content: string) {
@@ -105,9 +98,14 @@ export class WorkspaceService {
       const buffer = Buffer.alloc(Math.min(stat.size, 1024 * 1024))
       const { bytesRead } = await file.read(buffer, 0, buffer.length, 0)
       const content = buffer.subarray(0, bytesRead)
-      const binary = content.includes(0)
+      let decoded = ''
+      let binary = content.includes(0)
+      if (!binary) {
+        try { decoded = new TextDecoder('utf-8', { fatal: true }).decode(content) }
+        catch { binary = true }
+      }
       return { name: path.basename(filename), path: filename, size: stat.size, binary,
-        truncated: stat.size > bytesRead, content: binary ? '' : content.toString('utf8'),
+        truncated: stat.size > bytesRead, content: binary ? '' : decoded,
         sha256: stat.size === bytesRead ? createHash('sha256').update(content).digest('hex') : null }
     } finally { await file.close() }
   }

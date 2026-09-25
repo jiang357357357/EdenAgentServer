@@ -2,6 +2,8 @@ import type { EdenDatabase } from '@eden/store'
 import { SessionOwnership } from '../../accounts/index.ts'
 
 const humanInput = `i.kind='prompt' AND i.state IN ('running','completed')
+  AND EXISTS(SELECT 1 FROM session_classification c WHERE c.session_id=i.session_id
+    AND c.purpose='user_chat' AND c.source_channel='app')
   AND json_extract(i.metadata_json,'$.job') IS NULL
   AND COALESCE(json_extract(i.metadata_json,'$.internalHandoff'),0)=0
   AND COALESCE(json_extract(i.metadata_json,'$.environment.sessionPurpose'),'')!='self_awake'

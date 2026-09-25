@@ -100,15 +100,15 @@ export class CommandService {
     return this.info()
   }
 
-  async execute(snapshot: ReturnType<CommandService['snapshot']>, root: string, command: string, signal: AbortSignal) {
+  async execute(snapshot: ReturnType<CommandService['snapshot']>, root: string, command: string, signal: AbortSignal, timeoutMs = 30000) {
     signal.throwIfAborted()
     if (snapshot.generation !== this.generation || JSON.stringify(snapshot.terminal) !== JSON.stringify(this.snapshot(snapshot.sessionId).terminal))
       throw new Error('Terminal environment changed after approval; submit the command again')
     this.active++
     try {
       return snapshot.terminal.kind === 'wsl'
-        ? await runWslCommand(root, command, snapshot.terminal.distribution, signal)
-        : await runHostCommand(root, command, signal)
+        ? await runWslCommand(root, command, snapshot.terminal.distribution, signal, timeoutMs)
+        : await runHostCommand(root, command, signal, timeoutMs)
     } finally { this.active-- }
   }
 }

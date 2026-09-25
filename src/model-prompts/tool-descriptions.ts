@@ -1,5 +1,5 @@
 const descriptions = {
-  read_attachment: '列出或读取当前输入的附件。读取时使用列表返回的 blobId；文本支持 UTF-8 分页，二进制内容支持 base64 分页。',
+  read_attachment: '列出或读取当前输入的附件。使用列表返回的 blobId；文本支持 UTF-8 分页，二进制内容支持 base64 分页。视频可用 frames 提取少量画面，需本机 FFmpeg；画面不包含音轨。',
   list_connectors: '列出当前会话的连接器实例及其查询和操作参数结构。',
   read_connector_events: '列出近期连接器事件，也可按 eventId 读取单个事件。',
   list_assistants: '按稳定 ID 和简称列出可用助手。',
@@ -38,9 +38,12 @@ const descriptions = {
   send_message: '向后代智能体排入持久消息。',
   followup_task: '在空闲的后代智能体上启动另一项任务。',
   interrupt_agent: '中断一个后代智能体任务。',
-  read_file: '读取已选择工作区中的文件。',
+  read_file: '按字节偏移分页读取已选择工作区中的 UTF-8 文件；返回 nextOffset 后可继续读取。',
+  list_directory: '列出已选择工作区中的目录和文件。',
+  search_files: '在已选择工作区中按文件名或文件内容搜索；返回匹配路径、行号和片段。',
   write_file: '在现有工作区目录内原子写入 UTF-8 文本，可使用 createOnly 要求只新建；宿主自动检查读取后或审批期间的文件变化。',
-  exec_command: '运行所选终端环境中的系统 shell。默认目录为已选择的工作区；Windows 可选择本机 PowerShell 或 WSL 发行版，其他系统使用 /bin/sh。',
+  edit_file: '精确替换工作区文件中唯一匹配的 oldText；写入前检查文件是否变化并请求审批。',
+  exec_command: '运行所选终端环境中的系统 shell。可设置最长 600 秒的 timeoutSeconds，输出超过 1 MiB 时截断但命令继续执行。Windows 可选择本机 PowerShell 或 WSL 发行版，其他系统使用 /bin/sh。',
 } as const
 
 export type BuiltinToolDescription = keyof typeof descriptions

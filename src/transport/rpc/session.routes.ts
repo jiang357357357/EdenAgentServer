@@ -1,7 +1,7 @@
 import { eventListSchema, sessionCreateSchema, sessionIdSchema, sessionListSchema, turnStartSchema, toJson } from '@eden/api'
 import { sessionTitleSchema, sessionParticipantsSchema, messageListSchema, sessionCompactSchema, turnQueueSchema } from '@eden/api'
 import type { DurableEvent, JsonValue } from '@eden/api'
-import type { SessionService } from '../../modules/sessions/index.ts'
+import type { SessionService, SessionSummary } from '../../modules/sessions/index.ts'
 import { eventPayload } from './event-payload.ts'
 import { rpcMethods } from '@eden/api'
 import { contractHandler } from './contract-handler.ts'
@@ -14,27 +14,30 @@ export function wireEvent(event: DurableEvent): JsonValue {
 
 export function sessionRoutes(service: SessionService): Record<string, (params: JsonValue) => JsonValue | Promise<JsonValue>> {
   const repository = service.repository
+  const summary = (value: SessionSummary): SessionSummary => ({
+    ...value, executionStatus: service.isRunning(value.id) ? 'busy' : value.executionStatus,
+  })
   const handlers: Record<string, (params: JsonValue) => JsonValue | Promise<JsonValue>> = {
     ping: () => ({ pong: true }),
     'tool.list': () => toJson(service.toolCatalog()),
     'session.create': value => {
       const params = sessionCreateSchema.parse(value)
-      return toJson(repository.create(params.title, params.participants, toJson(params.environment ?? null)))
+      return toJson(summary(repository.create(params.title, params.participants, toJson(params.environment ?? null))))
     },
     'session.list': value => {
       const params = sessionListSchema.parse(value)
-      return toJson(repository.list(params.limit, params.includeClosed, params.includeBackground))
+      return toJson(repository.list(params.limit, params.includeClosed, params.includeBackground, params.purpose, params.sourceChannel).map(summary))
     },
-    'session.read': value => toJson(repository.read(sessionIdSchema.parse(value).sessionId)),
+    'session.read': value => toJson(summary(repository.read(sessionIdSchema.parse(value).sessionId))),
     'session.context': value => {
       const { sessionId } = sessionIdSchema.parse(value)
       repository.read(sessionId)
       return { requests: repository.events.latestContextRequests(sessionId).map(wireEvent) }
     },
-    'session.rename': value => { const params = sessionTitleSchema.parse(value); return toJson(repository.rename(params.sessionId, params.title)) },
+    'session.rename': value => { const params = sessionTitleSchema.parse(value); return toJson(summary(repository.rename(params.sessionId, params.title))) },
     'session.set_participants': async value => {
       const params = sessionParticipantsSchema.parse(value)
-      return toJson(await service.setParticipants(params.sessionId, params.participants))
+      return toJson(summary(await service.setParticipants(params.sessionId, params.participants)))
     },
     'session.close': async value => { const { sessionId } = sessionIdSchema.parse(value); await service.endSession(sessionId, 'closed'); return { sessionId, closed: true } },
     'session.delete': async value => { const { sessionId } = sessionIdSchema.parse(value); await service.endSession(sessionId, 'deleted'); return { sessionId, deleted: true } },
