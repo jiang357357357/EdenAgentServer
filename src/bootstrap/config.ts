@@ -28,6 +28,7 @@ export interface ServerConfig {
   monIdentity?: MonServiceIdentity | undefined
   maxBlobBytes?: number
   externalCommandSandbox?: ReturnType<typeof configuredExternalCommandSandbox>
+  terminalSettingsPath?: string
   systemSkillRoots?: string[]
   web: WebConfig
 }
@@ -44,6 +45,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
     origin, host: '127.0.0.1', port, dataRoot, databasePath: path.join(dataRoot, 'eden-agent.db'), token,
     allowedOrigins, coreBaseUrl: origin === 'mon' ? monConfig.env.MON_CORE_BASE_URL ?? 'http://127.0.0.1:40011' : undefined, monIdentity: monServiceIdentity(origin, monConfig.env), selfAwakeScheduleFile: monConfig.scheduleStateFile, maxBlobBytes: z.coerce.number().int().min(1).max(1024 * 1024 * 1024).parse(env.EDEN_AGENT_MAX_BLOB_BYTES ?? 32 * 1024 * 1024),
     externalCommandSandbox: configuredExternalCommandSandbox(env, origin),
+    terminalSettingsPath: path.resolve(cwd, env.EDEN_AGENT_TERMINAL_SETTINGS_PATH ?? path.join('Data', 'terminal-settings.json')),
     systemSkillRoots: z.array(z.string().min(1).max(4096).refine(value => path.isAbsolute(value), 'System skill roots must be absolute')).max(16)
       .parse(JSON.parse(env[`EDEN_AGENT_${origin.toUpperCase()}_SYSTEM_SKILL_ROOTS`] ?? '[]')),
     model: origin === 'local' ? localModel(env) : undefined,

@@ -40,7 +40,7 @@ const descriptions = {
   interrupt_agent: '中断一个后代智能体任务。',
   read_file: '读取已选择工作区中的文件。',
   write_file: '在现有工作区目录内原子写入 UTF-8 文本，可使用 createOnly 要求只新建；宿主自动检查读取后或审批期间的文件变化。',
-  exec_command: '运行系统 shell。默认目录为已选择的工作区；POSIX 使用 /bin/sh，Windows 使用 PowerShell。',
+  exec_command: '运行所选终端环境中的系统 shell。默认目录为已选择的工作区；Windows 可选择本机 PowerShell 或 WSL 发行版，其他系统使用 /bin/sh。',
 } as const
 
 export type BuiltinToolDescription = keyof typeof descriptions

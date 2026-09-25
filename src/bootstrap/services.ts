@@ -70,7 +70,8 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
   const modelBindings = config.origin === 'mon' ? new ModelBindingRepository(database) : undefined
   const models = new ModelService(config.origin, config.model, modelBindings, new ModelPricingRepository(database), config.origin === 'local' ? new LocalChildModels(database) : undefined)
   const plugins = new PluginService(database, config.privateDataRoots ?? [config.dataRoot, path.resolve('Data')])
-  const commands = new CommandService(database, config.privateDataRoots ?? [config.dataRoot, path.resolve('Data')], config.externalCommandSandbox)
+  const commands = new CommandService(database, config.privateDataRoots ?? [config.dataRoot, path.resolve('Data')], config.externalCommandSandbox,
+    { deviceSettingsPath: config.terminalSettingsPath, assertSession: sessionId => { repository.read(sessionId) } })
   const workspace = new WorkspaceService(database, config.privateDataRoots ?? [config.dataRoot, path.resolve('Data')])
   if (config.defaultWorkspaceRoot && !workspace.info().path) workspace.switch(config.defaultWorkspaceRoot)
   const systemSkills = new SystemSkillCatalog(config.systemSkillRoots ?? [])

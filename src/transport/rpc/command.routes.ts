@@ -6,5 +6,7 @@ export function commandRoutes(commands: CommandService) {
   return {
     'command.execution.get': contractHandler(rpcMethods['command.execution.get'], () => commands.info()),
     'command.execution.set': contractHandler(rpcMethods['command.execution.set'], input => commands.set(input)),
+    'command.terminal.get': contractHandler(rpcMethods['command.terminal.get'], input => commands.terminalInfo(input.sessionId)),
+    'command.terminal.set': contractHandler(rpcMethods['command.terminal.set'], input => commands.terminalSet(input)),
   }
 }

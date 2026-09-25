@@ -118,6 +118,7 @@ export class SessionRepository {
     const event = this.database.transaction(() => {
       this.database.connection.prepare('UPDATE sessions SET status=?, updated_at=? WHERE id=?').run(state, Date.now(), id)
       this.database.connection.prepare("UPDATE inputs SET state='cancelled' WHERE session_id=? AND state IN ('queued','held')").run(id)
+      if (state === 'deleted') this.database.connection.prepare('DELETE FROM runtime_settings WHERE key=?').run(`command.terminal.session.${id}`)
       return this.events.insert(id, null, `session.${state}`, {})
     })
     this.events.publish(event)

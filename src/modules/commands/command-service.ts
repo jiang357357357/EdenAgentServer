@@ -1,17 +1,77 @@
-import { commandExecutionSetSchema, type CommandExecutionConfig } from '@eden/api'
-import { hostCommandInfo, runHostCommand } from '@eden/execution'
+import { commandExecutionSetSchema, terminalSetSchema, terminalTargetSchema, type CommandExecutionConfig, type TerminalTarget } from '@eden/api'
+import { hostCommandInfo, listWslDistributions, runHostCommand, runWslCommand } from '@eden/execution'
 import type { configuredExternalCommandSandbox } from '@eden/execution'
 import type { EdenDatabase } from '@eden/store'
+import { randomBytes } from 'node:crypto'
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
+
+const hostTarget: TerminalTarget = { kind: 'host' }
+const sessionKey = (sessionId: string) => `command.terminal.session.${sessionId}`
 
 export class CommandService {
   private active = 0
   private generation = 0
   constructor(private readonly database: EdenDatabase, _protectedRoots: readonly string[],
-    _external?: ReturnType<typeof configuredExternalCommandSandbox>) { }
+    _external?: ReturnType<typeof configuredExternalCommandSandbox>,
+    private readonly terminalOptions: { deviceSettingsPath?: string | undefined; assertSession?: (sessionId: string) => void } = {}) { }
 
-  snapshot() {
+  private deviceSettingsPath() { return this.terminalOptions.deviceSettingsPath ?? path.resolve('Data', 'terminal-settings.json') }
+
+  private deviceDefault(): TerminalTarget {
+    let source: string
+    try { source = readFileSync(this.deviceSettingsPath(), 'utf8') }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return hostTarget
+      throw error
+    }
+    return terminalTargetSchema.parse(JSON.parse(source))
+  }
+
+  private sessionOverride(sessionId?: string): TerminalTarget | null {
+    if (!sessionId) return null
+    this.terminalOptions.assertSession?.(sessionId)
+    const row = this.database.connection.prepare('SELECT value_json FROM runtime_settings WHERE key=?').get(sessionKey(sessionId))
+    return row ? terminalTargetSchema.parse(JSON.parse(String(row.value_json))) : null
+  }
+
+  async terminalInfo(sessionId?: string) {
+    const host = hostCommandInfo()
+    const deviceDefault = this.deviceDefault()
+    const sessionOverride = this.sessionOverride(sessionId)
+    return { platform: process.platform, hostShell: host.shell, hostAvailable: host.available,
+      wslDistributions: await listWslDistributions(), deviceDefault, sessionOverride,
+      effective: sessionOverride ?? deviceDefault }
+  }
+
+  async terminalSet(raw: unknown) {
+    const input = terminalSetSchema.parse(raw)
+    if (this.active) throw new Error('Wait for running commands before changing terminal environment')
+    if (input.target?.kind === 'wsl' && !(await listWslDistributions()).includes(input.target.distribution))
+      throw new Error(`WSL distribution is unavailable: ${input.target.distribution}`)
+    if (input.target?.kind === 'host' && !hostCommandInfo().available) throw new Error('Host terminal is unavailable')
+    if (input.scope === 'device') {
+      const file = this.deviceSettingsPath()
+      mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+      const temporary = `${file}.${randomBytes(8).toString('hex')}.tmp`
+      try { writeFileSync(temporary, JSON.stringify(input.target), { mode: 0o600, flag: 'wx' }); renameSync(temporary, file) }
+      catch (error) { try { unlinkSync(temporary) } catch { /* no temporary file */ } throw error }
+    } else {
+      this.terminalOptions.assertSession?.(input.sessionId)
+      this.database.transaction(() => {
+        if (input.target) this.database.connection.prepare('INSERT OR REPLACE INTO runtime_settings VALUES (?, ?, ?)')
+          .run(sessionKey(input.sessionId), JSON.stringify(input.target), Date.now())
+        else this.database.connection.prepare('DELETE FROM runtime_settings WHERE key=?').run(sessionKey(input.sessionId))
+      })
+    }
+    this.generation++
+    return this.terminalInfo(input.scope === 'session' ? input.sessionId : undefined)
+  }
+
+  snapshot(sessionId?: string) {
     // Ignore saved sandbox settings while the developer-review suspension is in force.
-    return { config: { mode: 'host' as const, networkAccess: true, writableRoots: [] as string[] }, generation: this.generation }
+    return { config: { mode: 'host' as const, networkAccess: true, writableRoots: [] as string[] },
+      terminal: this.sessionOverride(sessionId) ?? this.deviceDefault(), sessionId, generation: this.generation }
   }
 
   async info() {
@@ -42,10 +102,13 @@ export class CommandService {
 
   async execute(snapshot: ReturnType<CommandService['snapshot']>, root: string, command: string, signal: AbortSignal) {
     signal.throwIfAborted()
-    if (snapshot.generation !== this.generation) throw new Error('Execution boundary changed after approval; submit the command again')
+    if (snapshot.generation !== this.generation || JSON.stringify(snapshot.terminal) !== JSON.stringify(this.snapshot(snapshot.sessionId).terminal))
+      throw new Error('Terminal environment changed after approval; submit the command again')
     this.active++
     try {
-      return await runHostCommand(root, command, signal)
+      return snapshot.terminal.kind === 'wsl'
+        ? await runWslCommand(root, command, snapshot.terminal.distribution, signal)
+        : await runHostCommand(root, command, signal)
     } finally { this.active-- }
   }
 }

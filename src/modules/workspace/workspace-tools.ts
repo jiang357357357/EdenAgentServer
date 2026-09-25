@@ -13,6 +13,7 @@ const commandSchema = z.object({ command: z.string().min(1).max(65536) }).strict
 
 export function workspaceTools(workspace: WorkspaceService, permissions: PermissionService, sessionId: string, turnId: string, commands: CommandService, _workspaceOnly = false, actorId?: string | number): RuntimeTool[] {
   const scope = JSON.stringify([sessionId, turnId, actorId ?? null])
+  const terminal = sessionId === '00000000-0000-4000-8000-000000000000' ? null : commands.snapshot(sessionId).terminal
   return [
     {
       name: 'read_file', revision: 'eden.workspace.read.v1', description: toolDescription('read_file'),
@@ -38,13 +39,13 @@ export function workspaceTools(workspace: WorkspaceService, permissions: Permiss
     },
     {
       name: 'exec_command', revision: 'eden.workspace.exec.v1', executionMode: 'sequential',
-      description: toolDescription('exec_command'),
+      description: `${toolDescription('exec_command')} 当前终端：${terminal?.kind === 'wsl' ? `WSL ${terminal.distribution} /bin/sh` : process.platform === 'win32' ? '本机 PowerShell' : '本机 /bin/sh'}。`,
       outcome: result => result && typeof result === 'object' && !Array.isArray(result) && result.exitCode === 0 ? 'completed' : 'failed',
       parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'], additionalProperties: false },
       async execute(input, context) {
         const params = commandSchema.parse(input)
         const root = workspace.commandRoot()
-        const snapshot = commands.snapshot()
+        const snapshot = commands.snapshot(sessionId)
         await permissions.request({ ...context, sessionId, turnId }, 'command.execute', root, toJson({ ...params, execution: snapshot }))
         return workspace.mutateCommand(root, context.signal, async () => toJson(await commands.execute(snapshot, root, params.command, context.signal)))
       }
