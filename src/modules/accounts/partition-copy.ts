@@ -131,5 +131,26 @@ export function copyAccountRows(db: DatabaseSync, accountKey: string): void {
       changed += copy(db, table, predicates.join(" AND "))
     }
   } while (changed)
+  // Inserting sessions fires the target database's default app classification trigger.
+  // Copy the source classification explicitly because the generic INSERT OR IGNORE keeps that default row.
+  if (byName.has("session_classification")) {
+    db.prepare(`UPDATE main.session_classification SET
+      purpose=(SELECT source.purpose FROM legacy.session_classification source WHERE source.session_id=session_classification.session_id),
+      source_channel=(SELECT source.source_channel FROM legacy.session_classification source WHERE source.session_id=session_classification.session_id)
+      WHERE EXISTS(SELECT 1 FROM legacy.session_classification source WHERE source.session_id=session_classification.session_id)`).run()
+  }
+  db.prepare(`UPDATE main.session_classification SET purpose='subagent',source_channel='internal'
+    WHERE purpose='user_chat' AND (
+      EXISTS(SELECT 1 FROM main.subagent_threads t WHERE t.child_session_id=session_classification.session_id)
+      OR EXISTS(SELECT 1 FROM main.events e WHERE e.session_id=session_classification.session_id
+        AND e.kind IN ('session.created','session.metadata.updated')
+        AND json_extract(e.payload_json,'$.environment.sessionPurpose')='subagent'))`).run()
+  db.prepare(`UPDATE main.session_classification SET purpose='self_awake',source_channel='internal'
+    WHERE purpose='user_chat' AND (
+      EXISTS(SELECT 1 FROM main.jobs j WHERE j.session_id=session_classification.session_id AND j.kind='self_awake')
+      OR EXISTS(SELECT 1 FROM main.self_awake_runs r WHERE r.session_id=session_classification.session_id)
+      OR EXISTS(SELECT 1 FROM main.events e WHERE e.session_id=session_classification.session_id
+        AND e.kind IN ('session.created','session.metadata.updated')
+        AND json_extract(e.payload_json,'$.environment.sessionPurpose')='self_awake'))`).run()
   copyReferencedContent(db, accountKey)
 }
