@@ -186,7 +186,11 @@ export async function openRuntime(config: ServerConfig) {
         services.mcp.start()
         services.connectorLifecycle.start()
       } catch (error) {
-        await this.close()
+        try {
+          await this.close()
+        } catch {
+          // Keep the startup failure as the reported cause if cleanup also fails.
+        }
         throw error
       }
     },

@@ -15,17 +15,31 @@ import { selectSkill, skillSelectionCurrent, availableSkillSummaries } from './s
 
 export interface CapabilityScope { sessionId: string; owner: string; profile: string; workspaceRoot: string; sourceChannel?: 'app' | 'qq' | 'internal' }
 
+// QQ is an authenticated conversation channel. Keep a bounded builtin list;
+// contact tools still perform their own capability approval and use Core's owner target.
+const qqTools = new Set(['web_search', 'web_fetch', 'web_find', 'read_file', 'list_directory', 'search_files',
+  'write_file', 'edit_file', 'exec_command', 'list_memos', 'create_reminder',
+  'list_contact_channels', 'send_external_email', 'read_attachment', 'send_qq_file'])
+const qqReadTools = new Set(['web_find', 'read_file', 'list_directory', 'search_files', 'list_memos'])
+
 export class SessionCapabilities {
   private readonly selections: SelectionRepository
   constructor(private readonly database: EdenDatabase, events: SessionRepository['events'], private readonly skills: SkillRepository,
-    private readonly scopeProvider: () => CapabilityScope, private readonly definitions: () => RuntimeTool[]) {
+    private readonly scopeProvider: () => CapabilityScope, private readonly definitions: () => RuntimeTool[],
+    private readonly approveQqRead?: (tool: RuntimeTool, input: unknown, context: Parameters<RuntimeTool['execute']>[1]) => Promise<void>) {
     this.selections = new SelectionRepository(database, events)
   }
 
   private get scope() { return this.scopeProvider() }
 
   registry(): ToolRegistry {
-    if (this.scope.sourceChannel === 'qq') return new ToolRegistry([])
+    if (this.scope.sourceChannel === 'qq') return new ToolRegistry(this.definitions().filter(tool =>
+      (tool.source === undefined || tool.source === 'builtin') && qqTools.has(tool.name)).map(tool =>
+      qqReadTools.has(tool.name) ? { ...tool, execute: async (input: Record<string, unknown>, context: Parameters<RuntimeTool['execute']>[1]) => {
+        if (!this.approveQqRead) throw new Error('QQ tool approval is unavailable')
+        await this.approveQqRead(tool, input, context)
+        return tool.execute(input, context)
+      } } : tool))
     const tools = [...this.definitions(), ...discoveryTools(this)].filter(tool => tool.name !== 'read_skill')
     return new ToolRegistry(filterSubagentTools(this.database, this.scope.sessionId, tools))
   }
@@ -40,6 +54,7 @@ export class SessionCapabilities {
       : selection.tools.every(tool => registry.matches(tool))
   }
   private visible(registry: ToolRegistry): Set<string> {
+    if (this.scope.sourceChannel === 'qq') return new Set(registry.tools.map(tool => tool.identity!))
     const visible = new Set(registry.tools.filter(tool => defaultTool(tool, this.scope.profile, Boolean(this.scope.workspaceRoot))).map(tool => tool.identity!))
     for (const selection of this.saved()) if (selection.kind === 'tool' && this.current(selection, registry)) {
       for (const tool of selection.tools) visible.add(tool.id)

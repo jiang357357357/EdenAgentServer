@@ -11,7 +11,7 @@ export function timerReceipt(job: JobInfo, requestedAt: number, deadline: number
     hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23', timeZoneName: 'longOffset' }).format(at)
   return toJson({ ...job, requestedAt: new Date(requestedAt).toISOString(), scheduledAt: new Date(job.dueAt).toISOString(),
     scheduledLocal: local(job.dueAt), timezone, adjusted: job.dueAt !== requestedAt,
-    adjustment: job.dueAt === requestedAt ? null : { reason: deadline <= Date.now() ? 'watchdog_overdue' : 'watchdog_deadline',
+    adjustment: job.dueAt === requestedAt ? null : { reason: deadline <= Date.now() ? 'max_24h_overdue' : 'max_24h_deadline',
       latestWakeAt: new Date(deadline).toISOString() },
     delivery: 'persisted_and_published',
   })

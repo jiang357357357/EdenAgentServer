@@ -22,6 +22,10 @@ test('explicit Mon installation identity stays isolated and environment override
     assert.equal(loaded.scheduleStateFile, scheduleStateFile)
     assert.deepEqual(monServiceConfig('local', root, {}), { env: {} })
     assert.throws(() => monServiceConfig('mon', root, { MON_SERVICE_USER_ID: '3' }), /缺少 MON_SERVICE_SHARED_SECRET/)
+    const explicit = { MON_SERVICE_SHARED_SECRET: 'override', MON_SERVICE_USER_ID: '3', MONOS_SELF_AWAKE_STATE_PATH: scheduleStateFile }
+    assert.deepEqual(monServiceConfig('mon', root, explicit), { env: explicit, scheduleStateFile })
+    assert.throws(() => monServiceConfig('mon', root, { ...explicit, MONOS_SELF_AWAKE_STATE_PATH: 'relative.json' }), /必须是绝对文件路径/)
+    assert.throws(() => monServiceConfig('mon', root, { ...explicit, MONOS_SELF_AWAKE_STATE_PATH: path.join(root, 'missing.json') }), /scheduleStateFile.*不可读/)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -31,9 +35,9 @@ test('external schedule preserves time zone and rejects malformed state', () => 
   try {
     assert.equal(readExternalSchedule(), null)
     writeFileSync(file, JSON.stringify({ enabled: true, next_wake_at: '2026-09-10T19:41:53+08:00', next_wake_reason: 'timer' }))
-    assert.deepEqual(readExternalSchedule(file), { status: 'scheduled', nextWakeAt: '2026-09-10T11:41:53.000Z', reason: 'timer' })
+    assert.deepEqual(readExternalSchedule(file), { status: 'scheduled', nextWakeAt: '2026-09-10T11:41:53.000Z', source: 'unknown', reason: 'timer' })
     writeFileSync(file, JSON.stringify({ enabled: false, next_wake_at: null }))
-    assert.equal(readExternalSchedule(file), null)
+    assert.deepEqual(readExternalSchedule(file), { status: 'disabled', nextWakeAt: null, reason: 'MonOs 自醒已暂停' })
     writeFileSync(file, '{')
     assert.throws(() => readExternalSchedule(file), /无法读取 MonOs/)
   } finally { rmSync(root, { recursive: true, force: true }) }

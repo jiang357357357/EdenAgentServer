@@ -4,7 +4,9 @@ import { serviceSignature } from '@eden/integrations'
 import type { QqChannelBridge } from '../../modules/qq-channel/bridge.ts'
 import { BodyError, readBlobBody } from './blob-body.ts'
 
-const paths = ['/internal/channels/qq/turns', '/internal/channels/qq/status']
+const paths = ['/internal/channels/qq/turns', '/internal/channels/qq/status', '/internal/channels/qq/availability',
+  '/internal/channels/qq/permissions', '/internal/channels/qq/permission-mode',
+  '/internal/channels/qq/upload', '/internal/channels/qq/file', '/internal/channels/qq/stage']
 function reply(response: ServerResponse, status: number, value: unknown) {
   if (!response.destroyed && !response.writableEnded)
     response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify(value))
@@ -39,11 +41,17 @@ export class QqChannelHttp {
   }
 
   private async dispatch(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const body = await readBlobBody(request, 65536)
+    const body = await readBlobBody(request, request.url === paths[5] ? 11_300_000 : 65536)
     if (this.closed) { reply(response, 503, { error: 'Server is closing' }); return }
     if (!this.authorize(request, body)) { reply(response, 401, { error: 'Invalid service signature' }); return }
     const raw: unknown = JSON.parse(body.toString('utf8'))
-    const value = request.url === paths[1] ? this.bridge!.status(raw) : await this.bridge!.submit(raw)
+    const value = request.url === paths[1] ? this.bridge!.status(raw)
+      : request.url === paths[2] ? await this.bridge!.availability(raw)
+      : request.url === paths[3] ? this.bridge!.resolvePermission(raw)
+      : request.url === paths[4] ? this.bridge!.permissionMode(raw)
+      : request.url === paths[5] ? await this.bridge!.upload(raw)
+      : request.url === paths[6] ? await this.bridge!.file(raw)
+      : request.url === paths[7] ? await this.bridge!.stage(raw) : await this.bridge!.submit(raw)
     reply(response, 200, value)
   }
 

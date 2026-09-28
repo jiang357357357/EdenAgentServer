@@ -35,11 +35,12 @@ function assistantReply(database: EdenDatabase, sessionId: string, turnId: strin
 }
 
 export function extractionSource(database: EdenDatabase, inputId: string, actorId?: string | number) {
-  const row = database.connection.prepare(`SELECT inputs.*, sessions.status AS session_status, turns.state AS turn_state
+  const row = database.connection.prepare(`SELECT inputs.*, sessions.status AS session_status, turns.state AS turn_state,
+      c.purpose AS session_purpose, c.source_channel AS source_channel
     FROM inputs JOIN sessions ON sessions.id=inputs.session_id JOIN turns ON turns.id=inputs.turn_id
-    JOIN session_classification c ON c.session_id=sessions.id WHERE inputs.id=?
-      AND c.purpose='user_chat' AND c.source_channel='app'`).get(inputId)
+    LEFT JOIN session_classification c ON c.session_id=sessions.id WHERE inputs.id=?`).get(inputId)
   if (!row || row.state !== 'completed' || row.turn_state !== 'completed' || row.session_status !== 'active') throw new Error('Memory extraction requires a completed input in an active session')
+  if (row.session_purpose !== 'user_chat' || !['app', 'qq'].includes(String(row.source_channel))) return undefined
   const metadata = object(JSON.parse(String(row.metadata_json)))
   if (metadata.job) return undefined
   if (row.kind !== 'prompt' || metadata.internalHandoff === true) return undefined

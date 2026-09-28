@@ -42,7 +42,7 @@ export const BUILTIN_SKILL_GUIDES = [
       'list_esp32_devices', 'control_esp32_device', 'get_esp32_command_status'], profiles: ['user_chat', 'self_awake'],
     content: `# 主动联系
 想起共同话题、有发现想分享、想问近况或邀请用户一起做点事，都可以成为联系的理由，无需包装成任务汇报。结合当前角色自然开口，也可以暂时安静。
-需要接上聊天时，read_qq_messages 查看 QQ 最近十轮，read_recent_conversation 查看最新会话最近三轮。联系渠道用 list_contact_channels。短聊优先 QQ，长信可用邮件，设备需先发现在线设备与声明能力，再选择消息卡片、短提示或合适的来电。
+需要接上聊天时，read_qq_messages 查看 QQ 最近十轮，read_recent_conversation 查看最新会话最近三轮。联系渠道用 list_contact_channels。发送邮件用 send_external_email；本机 sendmail/Exim 与已配置的外部邮件渠道是两回事。短聊优先 QQ，长信可用邮件，设备需先发现在线设备与声明能力，再选择消息卡片、短提示或合适的来电。
 一次选一个合适渠道；相同话题近期已发送且无新回复时留出空间，避免跨渠道追问。接受、送达、已读和回复是不同事实，结果未知先查询，明确失败后再判断是否换渠道。
 邮件与设备当前没有回复正文读取接口，保留未知；设备命令可查询执行/接听状态。行动遵循已有授权及用户的渠道与时段偏好，权限不足就记录原因。`,
   },

@@ -96,7 +96,7 @@ export class SessionService {
     return accepted
   }
 
-  startWithAttachments(sessionId: string, text: string, references: readonly AttachmentRef[], idempotencyKey: string = randomUUID(), environment?: JsonValue): Promise<AcceptedInput> {
+  startWithAttachments(sessionId: string, text: string, references: readonly AttachmentRef[], idempotencyKey: string = randomUUID(), environment?: JsonValue, onCommit?: (input: AcceptedInput) => void): Promise<AcceptedInput> {
     const captured = structuredClone(this.inputMetadata(sessionId, environment))
     if (!this.attachments) return Promise.reject(new Error('Attachment service unavailable'))
     const refs = structuredClone(references)
@@ -105,7 +105,7 @@ export class SessionService {
       const snapshots = await this.attachments!.snapshot(refs)
       signal.throwIfAborted()
       if (JSON.stringify(this.inputMetadata(sessionId, savedEnvironment)) !== JSON.stringify(captured)) throw new Error('Session configuration changed during attachment validation; resubmit')
-      return this.accept(sessionId, text, idempotencyKey, savedEnvironment, 'prompt', snapshots)
+      return this.accept(sessionId, text, idempotencyKey, savedEnvironment, 'prompt', snapshots, onCommit)
     })
   }
 
@@ -218,7 +218,7 @@ export class SessionService {
     const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata) ? input.metadata : {}
     const job = metadata.job && typeof metadata.job === 'object' && !Array.isArray(metadata.job) ? metadata.job : {}
     const recallQuery = job.kind === 'self_awake' ? (typeof metadata.recallQuery === 'string' ? metadata.recallQuery : '') : input.text
-    const memory = this.repository.read(input.sessionId).sourceChannel === 'qq' ? '' : this.memoryRecall?.prompt(input.sessionId, input.turnId, recallQuery) ?? ''
+    const memory = this.memoryRecall?.prompt(input.sessionId, input.turnId, recallQuery) ?? ''
     const runtime = createRuntime({
       sessionId: input.sessionId, systemPrompt: context.prompt + memory,
       contextSources: toJson([...context.sources, { kind: 'memory', title: '召回记忆', content: memory }]) as JsonValue[],

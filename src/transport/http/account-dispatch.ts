@@ -14,7 +14,7 @@ export class AccountHttp {
     const url = request.url ?? "",
       blob = url === "/blobs" || url.startsWith("/blobs/"),
       selfAwake = url === "/internal/self-awake/run" || url === "/internal/self-awake/status",
-      qqChannel = url === "/internal/channels/qq/turns" || url === "/internal/channels/qq/status",
+      qqChannel = url === "/internal/channels/qq/turns" || url === "/internal/channels/qq/status" || url === "/internal/channels/qq/availability" || url === "/internal/channels/qq/permissions" || url === "/internal/channels/qq/permission-mode" || url === "/internal/channels/qq/upload" || url === "/internal/channels/qq/file" || url === "/internal/channels/qq/stage",
       internal = selfAwake || qqChannel
     if (!blob && !internal) return false
     if (this.closing || this.tasks.size >= 64) {

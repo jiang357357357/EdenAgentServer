@@ -64,16 +64,26 @@ test('denied approval preserves the current plan and never publishes a replaceme
   assert.equal(readdirSync(path.join(f.root, 'schedule_requests')).length, 1)
 })
 
-test('actual timer result and published plan respect the persisted twelve-hour deadline', async context => {
+test('actual timer result and published plan respect the persisted twenty-four-hour limit', async context => {
   const f = fixture(context), anchor = Date.now() - 11 * 3600000
   writeFileSync(path.join(f.root, 'state.json'), JSON.stringify({ enabled: true, wake_anchor_at: new Date(anchor).toISOString() }))
   await f.execute('long', 1440)
   const first = f.jobs.list({ state: 'queued' })[0]!
-  assert.equal(first.dueAt, anchor + 12 * 3600000)
+  assert.equal(first.dueAt, anchor + 24 * 3600000)
   await f.execute('later', 2880)
   const next = f.jobs.list({ state: 'queued' })[0]!
   assert.equal(next.dueAt, first.dueAt)
   assert.equal(f.jobs.read(first.id).state, 'cancelled')
   const request = JSON.parse(readFileSync(path.join(f.root, 'schedule_requests', `${next.id}.json`), 'utf8'))
   assert.equal(Date.parse(request.next_wake_at), first.dueAt)
+})
+
+test('explicit timer beyond twelve-hour fallback keeps the requested time', async context => {
+  const f = fixture(context), anchor = Date.now()
+  writeFileSync(path.join(f.root, 'state.json'), JSON.stringify({ enabled: true, wake_anchor_at: new Date(anchor).toISOString() }))
+  const receipt = await f.execute('next-morning', 16 * 60) as Record<string, unknown>
+  assert.equal(receipt.adjusted, false)
+  assert.equal(receipt.dueAt, Date.parse(String(receipt.requestedAt)))
+  assert.ok(Number(receipt.dueAt) > anchor + 12 * 3600000)
+  assert.ok(Number(receipt.dueAt) < anchor + 24 * 3600000)
 })

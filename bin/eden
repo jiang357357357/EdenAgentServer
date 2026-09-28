@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source_path="${BASH_SOURCE[0]}"
+while [[ -L "$source_path" ]]; do
+  source_dir="$(cd -P "$(dirname "$source_path")" && pwd)"
+  target="$(readlink "$source_path")"
+  if [[ "$target" = /* ]]; then source_path="$target"; else source_path="$source_dir/$target"; fi
+done
+bin_dir="$(cd -P "$(dirname "$source_path")" && pwd)"
+
+if [[ -f "$bin_dir/../tui/main.ts" ]]; then
+  cd "$bin_dir/.."
+  exec node --import tsx tui/main.ts "$@"
+fi
+
+runtime_dir="$(cd "$bin_dir/.." && pwd)"
+if [[ -x "$runtime_dir/node/node" && -f "$runtime_dir/server/tui.mjs" ]]; then
+  exec "$runtime_dir/node/node" "$runtime_dir/server/tui.mjs" "$@"
+fi
+
+printf 'Eden TUI 未找到源码或已打包运行时。\n' >&2
+exit 1

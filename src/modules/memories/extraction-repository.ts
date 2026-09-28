@@ -63,6 +63,7 @@ export class MemoryExtractionRepository {
     pageBounds(after, limit)
     const rows = this.database.connection.prepare(`SELECT inputs.id,inputs.rowid AS cursor FROM inputs
       JOIN sessions ON sessions.id=inputs.session_id JOIN turns ON turns.id=inputs.turn_id
+      JOIN session_classification c ON c.session_id=sessions.id AND c.purpose='user_chat' AND c.source_channel IN ('app','qq')
       WHERE inputs.state='completed' AND inputs.kind='prompt' AND turns.state='completed' AND sessions.status='active'
       AND inputs.rowid>? ORDER BY inputs.rowid LIMIT ?`).all(Number(after), limit + 1)
     const page = rows.slice(0, limit)

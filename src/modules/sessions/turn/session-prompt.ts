@@ -3,16 +3,20 @@ import { modelEnvironment, modelParticipant } from '@eden/api'
 import type { JsonValue } from '@eden/api'
 import { characterIdentity, identityPrompt } from '../../../model-prompts/character-identity.ts'
 import { SESSION_SYSTEM_RULES } from '../../../model-prompts/session.ts'
-import { QQ_CHANNEL_RULES } from '../../../model-prompts/qq-channel.ts'
 
 export function sessionPrompt(metadata: JsonValue): string { return sessionPromptContent(metadata).prompt }
 
 export function sessionPromptContent(metadata: JsonValue) {
   const source = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}
-  const { recallQuery: _recallQuery, replyLengths: _replyLengths, ...raw } = source
-  const context: Record<string, JsonValue> = { ...raw, participants: Array.isArray(raw.participants) ? raw.participants.map(modelParticipant) : [] }
+  const { recallQuery: _recallQuery, replyLengths: _replyLengths, sourceChannel: _sourceChannel, ...raw } = source
+  const originalEnvironment = raw.environment
+  const environmentSource = originalEnvironment && typeof originalEnvironment === 'object' && !Array.isArray(originalEnvironment)
+    ? originalEnvironment : {}
+  const { sourceChannel: _environmentChannel, botQq: _botQq, contactQq: _contactQq, ...promptEnvironment } = environmentSource
+  const context: Record<string, JsonValue> = { ...raw, environment: promptEnvironment,
+    participants: Array.isArray(raw.participants) ? raw.participants.map(modelParticipant) : [] }
   const preference = replyLengthInstruction(source, Array.isArray(raw.participants) && raw.participants.length === 1 ? raw.participants[0]! : null)
-  const rules = [SESSION_SYSTEM_RULES, source.sourceChannel === 'qq' ? QQ_CHANNEL_RULES : '', preference].filter(Boolean).join('\n')
+  const rules = [SESSION_SYSTEM_RULES, preference].filter(Boolean).join('\n')
   const { participants, environment: _environment, ...other } = context
   const environment = modelEnvironment(context.environment)
   const identity = Array.isArray(participants) && participants.length === 1 ? characterIdentity(participants[0]!) : ''

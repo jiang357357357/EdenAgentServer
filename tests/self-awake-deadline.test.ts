@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EdenDatabase } from '@eden/store'
-import { wakeDeadline, wakeIntervalMs } from '../src/modules/self-awake/deadline.ts'
+import { wakeDeadline, maxWakeIntervalMs } from '../src/modules/self-awake/deadline.ts'
 import { SelfAwakeRepository } from '../src/modules/self-awake/repository.ts'
 import { SessionRepository } from '../src/modules/sessions/session-repository.ts'
 import { JobRepository } from '../src/modules/jobs/repository.ts'
@@ -24,8 +24,8 @@ test('initial deadline survives another repository and repeated timer calls with
   const db = new EdenDatabase(':memory:', 'local')
   try {
     const initial = 1_800_000_000_000
-    assert.equal(wakeDeadline(db, undefined, initial), initial + wakeIntervalMs)
-    assert.equal(new SelfAwakeRepository(db).deadline(initial + 13 * 3600000), initial + wakeIntervalMs)
+    assert.equal(wakeDeadline(db, undefined, initial), initial + maxWakeIntervalMs)
+    assert.equal(new SelfAwakeRepository(db).deadline(initial + 13 * 3600000), initial + maxWakeIntervalMs)
   } finally { db.close() }
 })
 

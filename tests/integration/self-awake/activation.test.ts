@@ -8,7 +8,7 @@ import { SessionRepository } from '../../../src/modules/sessions/session-reposit
 import { JobRepository } from '../../../src/modules/jobs/repository.ts'
 import { SelfAwakeRepository } from '../../../src/modules/self-awake/repository.ts'
 import { publishWakeActivation } from '../../../src/modules/self-awake/activation-publication.ts'
-import { wakeDeadline, wakeIntervalMs } from '../../../src/modules/self-awake/deadline.ts'
+import { wakeDeadline, maxWakeIntervalMs } from '../../../src/modules/self-awake/deadline.ts'
 
 test('publication uses actual first execution, survives rereading, and does not modify scheduler state', () => {
  const root=mkdtempSync(path.join(tmpdir(),'wake-activation-')), db=new EdenDatabase(':memory:','mon')
@@ -25,7 +25,7 @@ test('publication uses actual first execution, survives rereading, and does not 
   sessions.events.append(session.id,turn,'agent.agent_start',{})
   publishWakeActivation(db,state)
   assert.equal(readFileSync(path.join(root,'agent_activation.json'),'utf8'),first)
-  assert.equal(wakeDeadline(db),Number(event.createdAt)+wakeIntervalMs)
+  assert.equal(wakeDeadline(db),Number(event.createdAt)+maxWakeIntervalMs)
   assert.equal(existsSync(state),false)
  } finally {db.close();rmSync(root,{recursive:true,force:true})}
 })

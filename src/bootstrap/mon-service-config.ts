@@ -18,12 +18,26 @@ function validateIdentity(env: NodeJS.ProcessEnv, source: string) {
   if (missing.length) throw new Error(`Mon 认证配置 ${source} 缺少 ${missing.join('、')}；认证字段必须来自同一套部署`)
 }
 
+function environmentScheduleStateFile(env: NodeJS.ProcessEnv): string | undefined {
+  if (env.MONOS_SELF_AWAKE_STATE_PATH === undefined) return undefined
+  const parsed = filePath.safeParse(env.MONOS_SELF_AWAKE_STATE_PATH)
+  if (!parsed.success) throw new Error('MONOS_SELF_AWAKE_STATE_PATH 必须是非空绝对文件路径')
+  const filename = parsed.data
+  if (!path.isAbsolute(filename)) throw new Error('MONOS_SELF_AWAKE_STATE_PATH 必须是绝对文件路径')
+  const resolved = path.resolve(filename)
+  readable(resolved, 'MONOS_SELF_AWAKE_STATE_PATH', 'scheduleStateFile')
+  return resolved
+}
+
 /** Explicit realm-local references avoid choosing a different installed Mon account. */
 export function monServiceConfig(origin: 'mon' | 'local', dataRoot: string, env: NodeJS.ProcessEnv): { env: NodeJS.ProcessEnv; scheduleStateFile?: string | undefined } {
   if (origin !== 'mon') return { env }
-  // An explicit environment identity overrides the entire file binding, including stale paths.
+  // Explicit environment credentials and the explicit MonOs state path belong to one deployment;
+  // do not combine them with a possibly stale mon-service.json binding.
   if (env.MON_SERVICE_SHARED_SECRET !== undefined || env.MON_SERVICE_USER_ID !== undefined) {
-    validateIdentity(env, '环境变量'); return { env }
+    validateIdentity(env, '环境变量')
+    const scheduleStateFile = environmentScheduleStateFile(env)
+    return { env, ...(scheduleStateFile ? { scheduleStateFile } : {}) }
   }
   const filename = path.join(dataRoot, 'mon-service.json')
   if (!existsSync(filename)) return { env }

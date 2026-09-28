@@ -27,14 +27,14 @@ test('timer returns readable persisted time and explicit watchdog adjustment', a
   f.db.connection.prepare("INSERT INTO realm_meta VALUES('self_awake_initial_anchor',?)").run(String(anchor))
   const requestedAt = now + 24 * 3600000
   const result = await f.tool.execute({ at: new Date(requestedAt).toISOString(), reason: '休息后醒来' }, { callId: 'timer', signal: new AbortController().signal }) as Record<string, any>
-  const expected = anchor + 12 * 3600000
+  const expected = anchor + 24 * 3600000
   assert.equal(result.dueAt, expected)
   assert.equal(result.scheduledAt, new Date(expected).toISOString())
   assert.equal(result.requestedAt, new Date(requestedAt).toISOString())
   assert.equal(result.timezone, 'Asia/Shanghai')
   assert.match(result.scheduledLocal, /GMT\+08:00/)
   assert.equal(result.adjusted, true)
-  assert.equal(result.adjustment.reason, 'watchdog_deadline')
+  assert.equal(result.adjustment.reason, 'max_24h_deadline')
   assert.equal(f.jobs.read(result.id).dueAt, expected)
 })
 

@@ -26,12 +26,14 @@ import { ModelService, ModelBindingRepository, ModelPricingRepository, LocalChil
 import { MonBindingService } from '../modules/mon/index.ts'
 import { DirectorRunRepository, CompanionTurnCoordinator, CompanionSessionExtension } from '../modules/director/index.ts'
 import type { RuntimeTool } from '@eden/runtime-pi'
+import { toJson } from '@eden/api'
 import { QuestionService, questionTool } from '../modules/questions/index.ts'
 import { BlobRepository, BlobService } from '../modules/blobs/index.ts'
 import { AttachmentService, AttachmentRepository, attachmentTool } from '../modules/attachments/index.ts'
 import { MemoryRepository, MemoryScopes, MemoryRecall, memoryTools, MemoryExtractionService } from '../modules/memories/index.ts'
 import { WebResourceRepository, WebService, webTools } from '../modules/web/index.ts'
 import { QqChannelBridge } from '../modules/qq-channel/bridge.ts'
+import { qqFileTool } from '../modules/qq-channel/file-tool.ts'
 
 export function createServices(database: EdenDatabase, config: ServerConfig) {
   database.connection.prepare("UPDATE connector_operations SET state='unknown',error='Host restarted before connector result confirmation' WHERE state='running'").run()
@@ -103,7 +105,8 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
     ...desktopReminderTools(desktopReminders, permissions, sessionId, turnId),
     ...selfAwakeTools(selfAwakeRepository, jobs, permissions, selfAwakeContext, sessionId, turnId),
     questionTool(questions, sessionId, turnId), ...memoTools(memos, permissions, sessionId, turnId),
-    attachmentTool(attachmentRepository, attachments, sessionId, turnId, permissions),
+    attachmentTool(attachmentRepository, attachments, sessionId, turnId),
+    ...(config.origin === 'mon' ? [qqFileTool(repository, blobs, workspace, permissions, sessionId, turnId)] : []),
     ...memoryTools(memories, memoryScopes, permissions, { sessionId, turnId, ...(actorId === undefined ? {} : { actorId }) }),
     ...webTools(web, permissions, sessionId, turnId),
     ...(config.origin === 'mon' ? contactTools(mon, permissions, sessionId, turnId) : []),
@@ -114,7 +117,8 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
     database, repository.events, skills.repository, () => ({ sessionId, owner: capabilityOwner(sessionId === '00000000-0000-4000-8000-000000000000' ? [] : repository.read(sessionId).participants, actorId),
       profile: skillProfile(sessionId === '00000000-0000-4000-8000-000000000000' ? null : repository.read(sessionId).environment),
       sourceChannel: sessionId === '00000000-0000-4000-8000-000000000000' ? 'app' : repository.read(sessionId).sourceChannel,
-      workspaceRoot: workspace.info().path }), () => toolDefinitions(sessionId, turnId, actorId))
+      workspaceRoot: workspace.info().path }), () => toolDefinitions(sessionId, turnId, actorId),
+    (tool, input, context) => permissions.request({ ...context, sessionId, turnId }, 'qq.tool.read', tool.name, toJson(input)))
   const tools = (sessionId: string, turnId: string, actorId?: string | number): RuntimeTool[] => {
     const scope = capabilitySession(sessionId, turnId, actorId)
     if (sessionId !== '00000000-0000-4000-8000-000000000000') return scope.tools()
@@ -128,7 +132,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
   const mon: MonBindingService = new MonBindingService(models, sessions)
   const selfAwakeBridge = config.monIdentity && config.origin === 'mon' ? new SelfAwakeBridge(config.monIdentity, new SelfAwakeBridgeRepository(database, jobs), sessions, mon) : undefined
   const qqChannelBridge = config.monIdentity && config.origin === 'mon'
-    ? new QqChannelBridge(config.monIdentity, database, sessions, mon) : undefined
+    ? new QqChannelBridge(config.monIdentity, database, sessions, mon, permissions, blobs, attachments) : undefined
   const memoryExtractions = new MemoryExtractionService(repository, models, permissions)
   const selfAwakeActions = new SelfAwakeActions(repository, permissions, memos, desktopReminders, questions, (channel, sessionId, input, signal) => channel === 'qq' ? mon.contactOwnerByQq(sessionId, input, signal) : mon.contactOwnerByEmail(sessionId, input, signal))
   const selfAwake = new SelfAwakeService(selfAwakeRepository, jobs, sessions)
