@@ -1,3 +1,4 @@
+import { logDiagnostic } from '../logging/index.ts'
 import { executeContactAction } from './contact-action.ts'
 import { desktopReminderCreateSchema, memoCreateSchema, toJson } from '@eden/api'
 import type { JsonValue } from '@eden/api'
@@ -37,7 +38,7 @@ export class SelfAwakeActions {
           this.repository.finish(action.id, null, error instanceof Error ? error.message.slice(0, 4000) : String(error))
         }).catch(error => {
           this.error = error instanceof Error ? error.message : String(error)
-          process.stderr.write(`Self-awake action storage failed: ${this.error}\n`)
+          logDiagnostic({ event: 'self_awake.action.storage_failed', message: '自醒行动结果持久化失败。', origin: this.sessions.origin, actionId: action.id, sessionId: action.sessionId, error }, 'error')
         }).finally(() => { this.active.delete(action.id); this.wake() })
         this.active.set(action.id, { controller, task })
       }

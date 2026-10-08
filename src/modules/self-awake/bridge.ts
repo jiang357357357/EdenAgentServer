@@ -9,6 +9,7 @@ import { assistantParticipant } from '../mon/index.ts'
 import type { MonBindingService } from '../mon/index.ts'
 import { SelfAwakeBridgeRepository } from './bridge-repository.ts'
 import { SelfAwakeStageError, selfAwakeStage, selfAwakeStageAsync } from './diagnostic.ts'
+import { SessionWakeSubmissions, sessionWakeSubmission } from './session-submission.ts'
 
 const userId = z.union([z.string().min(1).max(128), z.number().int()]).transform(String)
 const submission = z.object({ user_id: userId, schema_version: z.literal('self-awake.v1'), idempotency_key: z.string().min(1).max(256),
@@ -18,15 +19,20 @@ const status = z.object({ user_id: userId, job_id: z.uuid() }).strict()
 export class SelfAwakeBridge {
   private tail: Promise<unknown> = Promise.resolve()
   private readonly abort = new AbortController()
+  private readonly scoped: SessionWakeSubmissions
   constructor(readonly identity: MonServiceIdentity, readonly repository: SelfAwakeBridgeRepository,
-    private readonly sessions: SessionService, private readonly mon: MonBindingService) {}
-  async close(): Promise<void> { this.abort.abort(); await this.tail.catch(() => {}) }
+    private readonly sessions: SessionService, private readonly mon: MonBindingService) {
+    this.scoped = new SessionWakeSubmissions(identity, repository, sessions)
+  }
+  async close(): Promise<void> { this.abort.abort(); await Promise.all([this.tail.catch(() => {}), this.scoped.close()]) }
   readStatus(raw: unknown) {
     const input = selfAwakeStage('status_validation', () => status.parse(raw))
     selfAwakeStage('owner_identity', () => { if (input.user_id !== this.identity.userId) throw new Error('Self-awake user mismatch') })
     return selfAwakeStage('status_lookup', () => toJson(this.repository.status(input.user_id, input.job_id)))
   }
   submit(raw: unknown) {
+    if (raw && typeof raw === 'object' && 'schema_version' in raw && raw.schema_version === 'self-awake.v2')
+      return this.scoped.submit(selfAwakeStage('submission_validation', () => sessionWakeSubmission.parse(raw)))
     const input = selfAwakeStage('submission_validation', () => submission.parse(raw))
     selfAwakeStage('owner_identity', () => { if (input.user_id !== this.identity.userId) throw new Error('Self-awake user mismatch') })
     const task = this.tail.then(async () => {
@@ -43,10 +49,10 @@ export class SelfAwakeBridge {
           { sessionPurpose: 'self_awake', selfAwakeUserId: input.user_id, timezone: 'Asia/Shanghai', locale: 'zh-CN' },
           { purpose: 'self_awake', sourceChannel: 'internal' })))
         try {
-          await selfAwakeStageAsync('model_catalog', () => this.mon.catalog({ sessionId: session.id, coreBaseUrl: this.identity.coreBaseUrl, coreToken: token }))
+          await selfAwakeStageAsync('model_catalog', () => this.mon.catalog({ sessionId: session.id, coreBaseUrl: this.identity.coreBaseUrl, coreToken: token, serviceCredential: true }))
           selfAwakeStage('service_availability', () => this.abort.signal.throwIfAborted())
           job = selfAwakeStage('job_persist', () => this.repository.submit(input.user_id, input.idempotency_key, hash, { kind: 'self_awake', sessionId: session.id, dueAt: Date.now(),
-            payload: { schemaVersion: 'self-awake.v1', scheduler: 'monos', eventId: input.event_id, userId: input.user_id, trigger: input.context,
+            payload: { schemaVersion: 'self-awake.v1', scheduler: 'monos', scheduleScope: 'legacy', eventId: input.event_id, userId: input.user_id, trigger: input.context,
               prompt: '按当前角色的意愿与处境决定本轮行动，按需使用工具，最后记录经历。' },
             key: `self-awake:${input.user_id}:${input.idempotency_key}`, causationId: input.event_id, depth: 0 }))
         } catch (error) {

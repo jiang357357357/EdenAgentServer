@@ -5,12 +5,14 @@ import type { EdenDatabase } from '@eden/store'
 import type { SessionService } from '../sessions/index.ts'
 import type { PermissionService } from '../permissions/index.ts'
 import type { BlobService } from '../blobs/index.ts'
-import type { AttachmentService } from '../attachments/service.ts'
+import type { AttachmentService } from '../attachments/index.ts'
 import { attachmentRefsSchema } from '@eden/api'
-import { assistantParticipant, loadMonCatalog } from '../mon/index.ts'
+import { loadMonCatalog } from '../mon/index.ts'
 import type { MonBindingService } from '../mon/index.ts'
-import { parseCoreAssistant } from '../mon/model-schema.ts'
 import { z } from 'zod'
+import { privateTurnStatus } from './reply-status.ts'
+import { QqPrivateSessionBindings } from './private-session.ts'
+import { isGroupChannelInput, QqGroupBridge } from './group-bridge.ts'
 
 const qq = z.string().regex(/^\d{5,20}$/)
 const identity = { assistant_id: z.number().int().positive(), character_id: z.number().int().positive() }
@@ -33,45 +35,18 @@ const approvalInput = z.object({ user_id: z.string(), bot_qq: qq, contact_qq: qq
 const permissionModeInput = z.object({ user_id: z.string(), bot_qq: qq, contact_qq: qq,
   mode: z.enum(['restricted', 'full_access', 'takeover']).optional() }).strict()
 
-function brief(value: unknown, limit = 180): string {
-  return String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\b(password|token|secret|api[_-]?key)=\S+/gi, '$1=[隐藏]').slice(0, limit)
-}
-
-function permissionPreview(details: unknown): string {
-  if (!details || typeof details !== 'object' || Array.isArray(details)) return ''
-  const value = details as Record<string, unknown>
-  if (value.action === 'create_reminder' && value.input && typeof value.input === 'object' && !Array.isArray(value.input)) {
-    const reminder = value.input as Record<string, unknown>
-    const remindAt = typeof reminder.remindAt === 'number' && Number.isFinite(reminder.remindAt)
-      && Math.abs(reminder.remindAt) <= 8.64e15
-      ? new Date(reminder.remindAt).toISOString() : reminder.remindAt
-    return `提醒: ${brief(reminder.title, 100)}；时间: ${brief(remindAt, 60)}`
-  }
-  for (const key of ['command', 'path', 'url', 'queries', 'query', 'action']) {
-    const item = value[key]
-    if (item !== undefined) return `${key}: ${brief(Array.isArray(item) ? item.join(', ') : item)}`
-  }
-  return ''
-}
-
-function resultSummary(result: unknown): string {
-  if (!result || typeof result !== 'object' || Array.isArray(result)) return ''
-  const value = result as Record<string, unknown>
-  if (typeof value.exitCode === 'number') return `退出码 ${value.exitCode}`
-  if (typeof value.path === 'string' && typeof value.bytes === 'number') return `${brief(value.path, 100)}，${value.bytes} 字节`
-  for (const key of ['results', 'entries', 'items']) {
-    if (Array.isArray(value[key])) return `${value[key].length} 项`
-  }
-  return ''
-}
-
 export class QqChannelBridge {
   private tail: Promise<unknown> = Promise.resolve()
   private readonly abort = new AbortController()
+  private readonly group: QqGroupBridge
+  private readonly privateSessions: QqPrivateSessionBindings
   constructor(readonly identity: MonServiceIdentity, readonly database: EdenDatabase,
     private readonly sessions: SessionService, private readonly mon: MonBindingService,
     private readonly permissions: PermissionService, private readonly blobs: BlobService,
-    private readonly attachments: AttachmentService) {}
+    private readonly attachments: AttachmentService) {
+    this.group = new QqGroupBridge(identity, database, sessions, mon, this.abort.signal)
+    this.privateSessions = new QqPrivateSessionBindings(identity, database, sessions, mon, this.abort.signal)
+  }
 
   stage(raw: unknown): Promise<unknown> {
     const input = stageInput.parse(raw)
@@ -143,7 +118,7 @@ export class QqChannelBridge {
     })
   }
 
-  async close(): Promise<void> { this.abort.abort(); await this.tail.catch(() => {}) }
+  async close(): Promise<void> { this.abort.abort(); await Promise.all([this.tail.catch(() => {}), this.group.close()]) }
 
   consumeNonce(nonce: string): void {
     this.database.transaction(() => {
@@ -165,57 +140,14 @@ export class QqChannelBridge {
   }
 
   submit(raw: unknown): Promise<unknown> {
+    if (isGroupChannelInput(raw)) return this.group.submit(raw)
     const input = submitInput.parse(raw)
     if (input.user_id !== this.identity.userId) throw new Error('QQ channel owner mismatch')
     const task = this.tail.then(async () => {
       this.abort.signal.throwIfAborted()
       const account = { key: accountKey(this.identity.coreBaseUrl, input.user_id),
         userId: input.user_id, coreBaseUrl: this.identity.coreBaseUrl }
-      let row = this.database.connection.prepare('SELECT session_id FROM qq_channel_conversations WHERE bot_qq=? AND contact_qq=?')
-        .get(input.bot_qq, input.contact_qq)
-      const oldSessionId = row ? String(row.session_id) : undefined
-      const oldSession = oldSessionId ? withAccount(account, () => this.sessions.repository.read(oldSessionId)) : undefined
-      const existingAuthor = oldSession?.participants[0]
-      const correctAuthor = oldSession?.status === 'active' && existingAuthor && typeof existingAuthor === 'object' &&
-        !Array.isArray(existingAuthor) && String(existingAuthor.assistantId) === String(input.assistant_id) &&
-        String(existingAuthor.characterId) === String(input.character_id)
-      if (!correctAuthor) {
-        if (oldSessionId && this.database.connection.prepare(
-          "SELECT 1 FROM inputs WHERE session_id=? AND state IN ('queued','running','held') LIMIT 1").get(oldSessionId))
-          throw new Error('Wait for the current QQ turn before changing its bound character')
-        const token = await acquireMonServiceToken(this.identity, this.abort.signal)
-        const client = new MonClient(this.identity.coreBaseUrl, token)
-        const detail = parseCoreAssistant(await client.get(`/api/assistants/${input.assistant_id}/`, this.abort.signal), input.assistant_id)
-        if (String(detail.character.id) !== String(input.character_id)) throw new Error('QQ bound character does not match assistant')
-        const catalog = await loadMonCatalog(client, input.assistant_id, this.abort.signal)
-        if (!catalog.binding || String(catalog.catalog.character.id) !== String(input.character_id))
-          throw new Error('QQ bound character has no available model')
-        const author = assistantParticipant(detail)
-        const session = withAccount(account, () => this.sessions.repository.create('QQ 私聊', [author],
-          { sessionPurpose: 'user_chat', sourceChannel: 'qq', botQq: input.bot_qq, contactQq: input.contact_qq,
-            locale: 'zh-CN', timezone: 'Asia/Shanghai' }, { purpose: 'user_chat', sourceChannel: 'qq' }))
-        try {
-          await this.mon.catalog({ sessionId: session.id, coreBaseUrl: this.identity.coreBaseUrl, coreToken: token })
-          this.abort.signal.throwIfAborted()
-          if (oldSessionId) {
-            const changed = this.database.connection.prepare(
-              'UPDATE qq_channel_conversations SET session_id=?,created_at=? WHERE bot_qq=? AND contact_qq=? AND session_id=?')
-              .run(session.id, Date.now(), input.bot_qq, input.contact_qq, oldSessionId)
-            if (changed.changes !== 1) throw new Error('QQ conversation changed while rebinding')
-          } else {
-            this.database.connection.prepare('INSERT INTO qq_channel_conversations(bot_qq,contact_qq,session_id,created_at) VALUES(?,?,?,?)')
-              .run(input.bot_qq, input.contact_qq, session.id, Date.now())
-          }
-          row = { session_id: session.id }
-        } catch (error) {
-          await withAccount(account, () => this.sessions.endSession(session.id, 'closed'))
-          throw error
-        }
-        if (oldSessionId && oldSession?.status === 'active')
-          await withAccount(account, () => this.sessions.endSession(oldSessionId, 'closed'))
-      }
-      if (!row) throw new Error('QQ conversation was not created')
-      const sessionId = String(row.session_id)
+      const sessionId = await this.privateSessions.resolve(input)
       withAccount(account, () => this.sessions.repository.ownership.assert(sessionId))
       const key = `qq:${input.bot_qq}:${input.contact_qq}:${input.message_id}`
       const previous = this.database.connection.prepare('SELECT id,turn_id,state,text,metadata_json FROM inputs WHERE session_id=? AND idempotency_key=?')
@@ -257,6 +189,7 @@ export class QqChannelBridge {
   }
 
   status(raw: unknown): unknown {
+    if (isGroupChannelInput(raw)) return this.group.status(raw)
     const input = statusInput.parse(raw)
     if (input.user_id !== this.identity.userId) throw new Error('QQ channel owner mismatch')
     const row = this.database.connection.prepare(`SELECT i.session_id,i.turn_id,i.state,t.error FROM inputs i
@@ -269,51 +202,7 @@ export class QqChannelBridge {
     const account = { key: accountKey(this.identity.coreBaseUrl, input.user_id),
       userId: input.user_id, coreBaseUrl: this.identity.coreBaseUrl }
     withAccount(account, () => this.sessions.repository.ownership.assert(sessionId))
-    const eventRows = this.database.connection.prepare(`SELECT CAST(seq AS TEXT) AS seq,kind,payload_json FROM events
-      WHERE session_id=? AND turn_id=? AND seq>? AND kind IN
-        ('operation.started','operation.completed','permission.requested','permission.resolved','qq.file_requested') ORDER BY seq LIMIT 100`)
-      .all(sessionId, turnId, BigInt(input.after_seq))
-    const updates: Record<string, unknown>[] = []
-    for (const event of eventRows) {
-      const payload = JSON.parse(String(event.payload_json)) as Record<string, unknown>
-      const seq = String(event.seq)
-      if (event.kind === 'operation.started') {
-        updates.push({ seq, kind: 'tool_start', name: brief(payload.name, 80) })
-      } else if (event.kind === 'operation.completed') {
-        const operation = this.database.connection.prepare('SELECT tool_name FROM tool_operations WHERE id=? AND session_id=?')
-          .get(`${turnId}:${String(payload.callId ?? '')}`, sessionId)
-        updates.push({ seq, kind: 'tool_end', name: brief(operation?.tool_name, 80),
-          outcome: payload.outcome === 'completed' ? 'completed' : 'failed', summary: resultSummary(payload.result) })
-      } else if (event.kind === 'permission.requested') {
-        const permission = this.database.connection.prepare('SELECT state FROM permission_requests WHERE id=? AND session_id=?')
-          .get(String(payload.id ?? ''), sessionId)
-        if (permission?.state !== 'pending') continue
-        updates.push({ seq, kind: 'approval', request_id: String(payload.id ?? ''),
-          capability: brief(payload.capability, 80), resource: brief(payload.resource, 180),
-          preview: permissionPreview(payload.details) })
-      } else if (event.kind === 'permission.resolved') {
-        updates.push({ seq, kind: 'approval_resolved', request_id: String(payload.requestId ?? ''),
-          state: brief(payload.state, 30) })
-      } else if (event.kind === 'qq.file_requested') {
-        updates.push({ seq, kind: 'file_send', blob_id: String(payload.blobId ?? ''),
-          filename: String(payload.filename ?? ''), byte_length: Number(payload.byteLength ?? 0) })
-      }
-    }
-    const next_seq = eventRows.length ? String(eventRows[eventRows.length - 1]!.seq) : input.after_seq
-    const has_more = eventRows.length === 100
-    const state = String(row.state)
-    if (state !== 'completed') return { status: state, error: row.error == null ? null : String(row.error), updates, next_seq, has_more }
-    const messages = this.database.connection.prepare(`SELECT payload_json FROM events WHERE session_id=? AND turn_id=?
-      AND kind='agent.message_end' ORDER BY seq DESC`).all(row.session_id!, row.turn_id!)
-    for (const item of messages) {
-      const payload = JSON.parse(String(item.payload_json)) as { message?: { role?: string; content?: string | { type?: string; text?: string }[] } }
-      if (payload.message?.role !== 'assistant') continue
-      const content = payload.message.content
-      const text = typeof content === 'string' ? content : Array.isArray(content)
-        ? content.filter(block => block.type === 'text').map(block => block.text ?? '').join('\n') : ''
-      return { status: 'completed', text, updates, next_seq, has_more }
-    }
-    return { status: 'completed', text: '', updates, next_seq, has_more }
+    return privateTurnStatus(this.database, sessionId, turnId, row, input.after_seq)
   }
 
   resolvePermission(raw: unknown): unknown {

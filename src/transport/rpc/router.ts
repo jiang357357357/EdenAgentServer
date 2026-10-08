@@ -3,12 +3,13 @@ import { ZodError } from 'zod'
 import { initializeSchema, initializeResultSchema, protocolVersion, rpcRequestSchema, toJson } from '@eden/api'
 import type { JsonValue, RuntimeOrigin } from '@eden/api'
 import { RpcFailure } from './errors.ts'
+import { OperationFailure } from '@eden/api'
 
 export class RpcRouter {
   private initialized = false
   constructor(private readonly origin: RuntimeOrigin,
     private readonly routes: Record<string, (params: JsonValue) => JsonValue | Promise<JsonValue>>,
-    private readonly authenticate?: (token: string) => Promise<void>) {}
+    private readonly authenticate?: (token: string) => Promise<void>, private readonly workspaceId?: string) {}
 
   async dispatch(raw: unknown): Promise<JsonValue | undefined> {
     let id: string | number | null = null
@@ -21,9 +22,10 @@ export class RpcRouter {
         if (this.initialized) throw new RpcFailure(-32002, 'Connection already initialized')
         const params = initializeSchema.parse(request.params)
         if (params.runtimeOrigin !== this.origin) throw new RpcFailure(-32001, 'Runtime origin mismatch')
+        this.assertWorkspace(params.workspaceId)
         await this.authenticate?.(params.coreToken ?? '')
         result = toJson(initializeResultSchema.parse({ protocolVersion, serverName: 'eden-agent-server', serverVersion,
-          agentCoreVersion: 'pi-0.82.0', runtimeOrigin: this.origin, capabilities: Object.keys(this.routes) }))
+          agentCoreVersion: 'pi-0.82.0', runtimeOrigin: this.origin, workspaceId: this.workspaceId, capabilities: Object.keys(this.routes) }))
         this.initialized = true
       } else {
         if (!this.initialized) throw new RpcFailure(-32002, 'Initialize the connection first')
@@ -35,7 +37,13 @@ export class RpcRouter {
     } catch (error) {
       const code = error instanceof RpcFailure ? error.code : error instanceof ZodError ? -32602 : -32000
       const message = error instanceof ZodError ? 'Invalid request parameters' : error instanceof Error ? error.message : 'Request failed'
-      return toJson({ jsonrpc: '2.0', id, result: null, error: { code, message } })
+      return toJson({ jsonrpc: '2.0', id, result: null, error: { code, message,
+        ...(error instanceof OperationFailure ? { data: error.details } : {}) } })
     }
+  }
+
+  private assertWorkspace(expected?: string) {
+    if (expected && expected !== this.workspaceId)
+      throw new RpcFailure(-32001, '服务属于其他 EDEN 工作区，请使用对应的配置管理和客户端')
   }
 }

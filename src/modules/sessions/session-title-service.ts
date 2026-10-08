@@ -1,4 +1,4 @@
-import { completeText, TextCompletionError } from '@eden/runtime-pi'
+import { completeTextIsolated as completeText, TextCompletionError } from '@eden/runtime-pi'
 import type { RuntimeModel } from '@eden/runtime-pi'
 import type { SessionRepository } from './session-repository.ts'
 

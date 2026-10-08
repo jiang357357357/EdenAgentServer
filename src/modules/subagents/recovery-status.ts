@@ -32,7 +32,7 @@ export function subagentRecoveryStatus(database: EdenDatabase, agentId: string):
     checks: [
       check('inactive', !['queued', 'running'].includes(String(thread.state)), '任务须停止后才能恢复配置。'),
       check('context', contextRecovered(checkpoint, historical, context), '历史上下文须已转换或明确应用人工摘要。'),
-      check('workspace', Boolean(root) && root === new WorkspaceRepository(database).read(), '须明确绑定并选择原任务工作区。'),
+      check('workspace', Boolean(root) && root === new WorkspaceRepository(database, child).read(), '须明确绑定并选择原任务工作区。'),
       check('parent', parentRecovered(thread.parent_id, parent, root), '嵌套任务须先恢复父任务与工作区归属。'),
       check('policy', Boolean(policy && role), '须保存经过历史限制收窄的工具策略及角色技能快照。'),
       check('modelReview', !historical || Boolean(modelReview), '须明确确认恢复模型；待激活快照不代表已经绑定到运行会话。'),

@@ -5,7 +5,7 @@ export function assertSubagentWorkspace(database: EdenDatabase, sessionId: strin
   const row = database.connection.prepare('SELECT workspace_root FROM subagent_threads WHERE child_session_id=?').get(sessionId)
   if (!row) return
   if (row.workspace_root === null) throw new Error('Historical task workspace ownership must be restored')
-  if (row.workspace_root !== (new WorkspaceRepository(database).read() ?? '')) throw new Error('Task belongs to another workspace; select its original workspace before continuing')
+  if (row.workspace_root !== (new WorkspaceRepository(database, sessionId).read() ?? '')) throw new Error('Task belongs to another workspace; select its original workspace before continuing')
 }
 
 export function restoreSubagentWorkspace(database: EdenDatabase, agentId: string, currentRoot: string) {
@@ -13,7 +13,7 @@ export function restoreSubagentWorkspace(database: EdenDatabase, agentId: string
     const db = database.connection, row = db.prepare('SELECT * FROM subagent_threads WHERE id=?').get(agentId)
     if (!row) throw new Error('Subagent not found')
     if (['queued', 'running'].includes(String(row.state))) throw new Error('Stop the task before restoring its workspace')
-    if (!currentRoot || new WorkspaceRepository(database).read() !== currentRoot) throw new Error('Workspace changed; reload before restoring ownership')
+    if (!currentRoot || new WorkspaceRepository(database, String(row.child_session_id)).read() !== currentRoot) throw new Error('Workspace changed; reload before restoring ownership')
     if (row.workspace_root === currentRoot) return
     if (row.workspace_root !== null && row.workspace_root !== '') throw new Error('Task already belongs to a different workspace; select that workspace')
     if (row.parent_id !== null) {

@@ -25,7 +25,7 @@ export async function startServer(config: ServerConfig) {
     sessionFaults: 0,
     memoryExtraction: true,
     accounts: runtimes.ready(),
-  }))
+  }), config.workspaceId)
   const http = createServer((request, response) => {
     if (dispatch.handle(request, response)) return
     if (config.origin === "local") runtimes.defaultRuntime().health(request, response)

@@ -1,3 +1,4 @@
+import { logDiagnostic } from '../logging/index.ts'
 import { recentSharedTopics } from '../sessions/index.ts'
 import { toJson } from '@eden/api'
 import type { JobInfo } from '@eden/api'
@@ -38,7 +39,7 @@ export class SelfAwakeService {
     const author = session.participants[0] ?? {}
     const recovery = this.recovery.assertDispatch(job, author, session.environment)
     const topics = recentSharedTopics(this.repository.database, job.sessionId, author)
-    const request = toJson({ current_time: new Date().toISOString(), recent_conversation: topics, wakeSchedule: this.repository.wakeSchedule(), ...selfAwakeRequest(job, author, session.environment), ...(recovery ? { recovery } : {}) })
+    const request = toJson({ current_time: new Date().toISOString(), recent_conversation: topics, wakeSchedule: this.repository.wakeSchedule(job.sessionId), ...selfAwakeRequest(job, author, session.environment), ...(recovery ? { recovery } : {}) })
     const id = this.repository.begin(job, request, author)
     try {
       this.sessions.submitJob(job.sessionId, selfAwakePrompt(request), job.id, job.kind, input => {
@@ -61,18 +62,26 @@ export class SelfAwakeService {
       try {
         const results = this.repository.pendingResults()
         for (const result of results) {
-          if (result.state !== 'completed') { this.repository.fail(result.id, this.repository.inputFailure(this.repository.read(result.id).sessionId, result.inputId, result.state)); continue }
-          const run = this.repository.read(result.id)
-          const text = this.repository.finalText(run.sessionId, result.turnId)
-          if (!text.trim() && !run.diaries.length) { this.repository.fail(result.id, '自醒完成但没有日记正文'); continue }
-          this.repository.finish(result.id, text)
+          try { this.finishResult(result) }
+          catch (error) {
+            this.repository.fail(result.id, error instanceof Error ? error.message : String(error))
+            logDiagnostic({ event: 'self_awake.completion.failed', message: '本会话自醒结果处理失败。', runId: result.id, origin: this.sessions.repository.origin, error }, 'error')
+          }
         }
         if (results.length === 100) this.wake()
       } catch (error) {
         this.error = error instanceof Error ? error.message : String(error)
         this.close()
-        process.stderr.write(`Self-awake completion processing stopped: ${this.error}\n`)
+        logDiagnostic({ event: 'self_awake.completion.stopped', message: '自醒完成结果处理已停止。', origin: this.sessions.repository.origin, error }, 'error')
       }
     })
+  }
+
+  private finishResult(result: ReturnType<SelfAwakeRepository['pendingResults']>[number]): void {
+    const run = this.repository.read(result.id)
+    if (result.state !== 'completed') { this.repository.fail(result.id, this.repository.inputFailure(run.sessionId, result.inputId, result.state)); return }
+    const text = this.repository.finalText(run.sessionId, result.turnId)
+    if (!text.trim() && !run.diaries.length) { this.repository.fail(result.id, '自醒完成但没有日记正文'); return }
+    this.repository.finish(result.id, text)
   }
 }

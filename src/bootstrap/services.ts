@@ -2,7 +2,7 @@ import { SessionCapabilities, ToolRegistry, defaultTool, capabilityOwner } from 
 import { CommandService } from '../modules/commands/command-service.ts'
 import { McpResults, McpLifecycle, mcpTools } from '../modules/mcp/index.ts'
 import { ConnectorCredentials, ConnectorCatalog, ConnectorRepository, ConnectorEventRepository, connectorEventTools, ConnectorPermissions, ConnectorLifecycle, connectorCapabilityTools, connectorDiscoveryTools } from '../modules/connectors/index.ts'
-import { contactTools, deviceTools } from '../modules/mon/index.ts'
+import { contactTools, deviceTools, NapcatClient, napcatTools } from '../modules/mon/index.ts'
 import { MediaService, mediaTools } from '../modules/media/index.ts'
 import { VoiceConfigRepository, VoiceService, SpeechRepository, SpeechService, RealtimeVoiceService } from '../modules/voice/index.ts'
 import { SubagentRepository, SubagentService, SubagentMailbox, SubagentLifecycle, subagentTools, subagentPolicy, filterSubagentTools } from '../modules/subagents/index.ts'
@@ -22,6 +22,8 @@ import { SessionRepository, SessionService } from '../modules/sessions/index.ts'
 import { pluginTools } from '../modules/plugins/index.ts'
 import type { ServerConfig } from './config.ts'
 import { WorkspaceService, workspaceTools } from '../modules/workspace/index.ts'
+import { SharedWorkspaceService, sharedWorkspaceTool, sharedLibraryFileTools } from '../modules/shared-workspace/index.ts'
+import { discoverSharedWorkspace } from '../modules/shared-workspace/discovery.ts'
 import { ModelService, ModelBindingRepository, ModelPricingRepository, LocalChildModels } from '../modules/models/index.ts'
 import { MonBindingService } from '../modules/mon/index.ts'
 import { DirectorRunRepository, CompanionTurnCoordinator, CompanionSessionExtension } from '../modules/director/index.ts'
@@ -34,8 +36,10 @@ import { MemoryRepository, MemoryScopes, MemoryRecall, memoryTools, MemoryExtrac
 import { WebResourceRepository, WebService, webTools } from '../modules/web/index.ts'
 import { QqChannelBridge } from '../modules/qq-channel/bridge.ts'
 import { qqFileTool } from '../modules/qq-channel/file-tool.ts'
+import { logDiagnostic } from '../modules/logging/index.ts'
 
 export function createServices(database: EdenDatabase, config: ServerConfig) {
+  const privateDataRoots = config.privateDataRoots ?? [config.dataRoot, path.resolve('Data')]
   database.connection.prepare("UPDATE connector_operations SET state='unknown',error='Host restarted before connector result confirmation' WHERE state='running'").run()
   database.connection.prepare("UPDATE mcp_operations SET state='unknown',error='Host restarted before MCP result confirmation' WHERE state='running'").run()
   const connectorCatalog = new ConnectorCatalog()
@@ -48,6 +52,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
   connectorCatalog.attachComponentProvider(() => pluginMarket.installed.connectorSelectionPlans())
   const mcp = new McpLifecycle(pluginMarket.installed, config.externalCommandSandbox)
   const repository = new SessionRepository(database, config.origin)
+  const napcat = new NapcatClient(repository, config.monIdentity)
   const desktopReminders = new DesktopReminderRepository(repository)
   const blobs = new BlobService(path.join(config.dataRoot, 'blobs'), new BlobRepository(database), config.maxBlobBytes)
   const mcpResults = new McpResults(database, blobs)
@@ -72,15 +77,24 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
   directors.recoverInterrupted()
   const modelBindings = config.origin === 'mon' ? new ModelBindingRepository(database) : undefined
   const models = new ModelService(config.origin, config.model, modelBindings, new ModelPricingRepository(database), config.origin === 'local' ? new LocalChildModels(database) : undefined)
-  const plugins = new PluginService(database, config.privateDataRoots ?? [config.dataRoot, path.resolve('Data')])
-  const commands = new CommandService(database, config.privateDataRoots ?? [config.dataRoot, path.resolve('Data')], config.externalCommandSandbox,
+  const plugins = new PluginService(database, privateDataRoots)
+  const commands = new CommandService(database, privateDataRoots, config.externalCommandSandbox,
     { deviceSettingsPath: config.terminalSettingsPath, assertSession: sessionId => { repository.read(sessionId) } })
-  const workspace = new WorkspaceService(database, config.privateDataRoots ?? [config.dataRoot, path.resolve('Data')])
-  if (config.defaultWorkspaceRoot && !workspace.info().path) workspace.switch(config.defaultWorkspaceRoot)
+  const workspace = new WorkspaceService(database, privateDataRoots, config.defaultWorkspaceRoot)
+  const sharedWorkspace = new SharedWorkspaceService({ dataRoot: config.dataRoot, account: config.account, workspace,
+    assertSession: sessionId => { repository.readMetadata(sessionId) },
+    ...(config.monWorkspaceRoot ? { discover: () => discoverSharedWorkspace([config.monWorkspaceRoot!], '', config.monWorkspaceRoot) } : {}) })
+  const workspaceStatus = workspace.info()
+  if (!['ready', 'unselected'].includes(workspaceStatus.status)) logDiagnostic({
+    event: 'server.workspace.unavailable', origin: config.origin, status: workspaceStatus.status,
+    path: workspaceStatus.path, message: workspaceStatus.error, recoverable: true,
+  }, 'warn')
   const systemSkills = new SystemSkillCatalog(config.systemSkillRoots ?? [])
-  const projectSkills = new SystemSkillCatalog(() => workspace.info().path
-    ? ['.agents/skills', '.edenagent/skills'].map(relative => path.join(workspace.root(), relative)) : [], true)
-  const skills: SkillService = new SkillService(new SkillRepository(database, () => workspace.info().path ? workspace.root() : '', () => pluginMarket.installed.skillContributions(),
+  const projectSkills = new SystemSkillCatalog(() => {
+    const root = workspace.availableRoot()
+    return root ? ['.agents/skills', '.edenagent/skills'].map(relative => path.join(root, relative)) : []
+  }, true)
+  const skills: SkillService = new SkillService(new SkillRepository(database, () => workspace.availableRoot(), () => pluginMarket.installed.skillContributions(),
     () => ({ tools: sessions.toolCatalog().map(tool => tool.name), codeToolsAvailable: skills.codeToolsAvailable }), () => systemSkills.list(), () => projectSkills.list(), builtinSkillSnapshots), systemSkills, projectSkills, config.externalCommandSandbox)
   const permissions = new PermissionService(database, repository.events, sessionId => {
     const environment = repository.read(sessionId).environment
@@ -89,6 +103,9 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
   })
   const web = new WebService(config.web, new WebResourceRepository(database, repository))
   const questions = new QuestionService(repository)
+  const sessionWorkspace = (sessionId: string) => sessionId === '00000000-0000-4000-8000-000000000000' ? workspace : workspace.forSession(sessionId)
+  const sessionSkills = (sessionId: string) => sessionId === '00000000-0000-4000-8000-000000000000' ? skills
+    : skills.forWorkspace(() => sessionWorkspace(sessionId).availableRoot(), sessionId)
   const toolDefinitions = (sessionId: string, turnId: string, actorId?: string | number): RuntimeTool[] => filterSubagentTools(database, sessionId, [
     ...mcpTools(mcp, database, permissions, sessionId, turnId),
     ...connectorDiscoveryTools(connectors, connectorCatalog, sessionId),
@@ -96,54 +113,58 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
     ...connectorEventTools(connectorEvents, permissions, sessionId, turnId),
     ...mediaTools(media, permissions, sessionId, turnId),
     ...subagentTools(subagents, permissions, sessionId, turnId, actorId),
-    ...skillTools(skills, permissions, sessionId, turnId, skillProfile(sessionId === '00000000-0000-4000-8000-000000000000' ? null : repository.read(sessionId).environment), () => capabilitySession(sessionId, turnId, actorId).registry().tools.map(tool => tool.name), {
+    ...skillTools(sessionSkills(sessionId), permissions, sessionId, turnId, skillProfile(sessionId === '00000000-0000-4000-8000-000000000000' ? null : repository.read(sessionId).environment), () => capabilitySession(sessionId, turnId, actorId).registry().tools.map(tool => tool.name), {
       load: (name, expected) => capabilitySession(sessionId, turnId, actorId).loadSkill(name, expected),
       unload: name => capabilitySession(sessionId, turnId, actorId).unloadSkill(name),
     }),
     ...connectorPluginTools(pluginMarket, permissions, sessionId, turnId),
-    ...pluginTools(plugins, permissions, sessionId, turnId, actorId), ...workspaceTools(workspace, permissions, sessionId, turnId, commands, subagentPolicy(database, sessionId)?.sandboxMode === 'workspace-write', actorId),
+    ...pluginTools(plugins, permissions, sessionId, turnId, actorId, sessionWorkspace(sessionId)), ...workspaceTools(sessionWorkspace(sessionId), permissions, sessionId, turnId, commands, subagentPolicy(database, sessionId)?.sandboxMode === 'workspace-write', actorId),
     ...desktopReminderTools(desktopReminders, permissions, sessionId, turnId),
     ...selfAwakeTools(selfAwakeRepository, jobs, permissions, selfAwakeContext, sessionId, turnId),
     questionTool(questions, sessionId, turnId), ...memoTools(memos, permissions, sessionId, turnId),
     attachmentTool(attachmentRepository, attachments, sessionId, turnId),
-    ...(config.origin === 'mon' ? [qqFileTool(repository, blobs, workspace, permissions, sessionId, turnId)] : []),
+    ...(config.origin === 'mon' ? [sharedWorkspaceTool(sharedWorkspace, sessionId),
+      ...sharedLibraryFileTools(sharedWorkspace, permissions, sessionId, turnId, actorId)] : []),
+    ...(config.origin === 'mon' ? [qqFileTool(repository, blobs, sessionWorkspace(sessionId), permissions, sessionId, turnId)] : []),
     ...memoryTools(memories, memoryScopes, permissions, { sessionId, turnId, ...(actorId === undefined ? {} : { actorId }) }),
     ...webTools(web, permissions, sessionId, turnId),
-    ...(config.origin === 'mon' ? contactTools(mon, permissions, sessionId, turnId) : []),
+    ...(config.origin === 'mon' ? [...contactTools(mon, permissions, sessionId, turnId),
+      ...napcatTools(napcat, permissions, sessionId, turnId)] : []),
     ...(config.origin === 'mon' ? deviceTools(mon, permissions, sessionId, turnId) : []),
     ...(config.origin === 'mon' ? handoffTools(mon, handoffs.repository, permissions, sessionId, turnId) : []),
   ])
   const capabilitySession = (sessionId: string, turnId: string, actorId?: string | number): SessionCapabilities => new SessionCapabilities(
-    database, repository.events, skills.repository, () => ({ sessionId, owner: capabilityOwner(sessionId === '00000000-0000-4000-8000-000000000000' ? [] : repository.read(sessionId).participants, actorId),
+    database, repository.events, sessionSkills(sessionId).repository, () => ({ sessionId, owner: capabilityOwner(sessionId === '00000000-0000-4000-8000-000000000000' ? [] : repository.read(sessionId).participants, actorId),
       profile: skillProfile(sessionId === '00000000-0000-4000-8000-000000000000' ? null : repository.read(sessionId).environment),
       sourceChannel: sessionId === '00000000-0000-4000-8000-000000000000' ? 'app' : repository.read(sessionId).sourceChannel,
-      workspaceRoot: workspace.info().path }), () => toolDefinitions(sessionId, turnId, actorId),
+      workspaceRoot: sessionWorkspace(sessionId).availableRoot() }), () => toolDefinitions(sessionId, turnId, actorId),
     (tool, input, context) => permissions.request({ ...context, sessionId, turnId }, 'qq.tool.read', tool.name, toJson(input)))
   const tools = (sessionId: string, turnId: string, actorId?: string | number): RuntimeTool[] => {
     const scope = capabilitySession(sessionId, turnId, actorId)
     if (sessionId !== '00000000-0000-4000-8000-000000000000') return scope.tools()
     return new ToolRegistry(scope.registry().tools).tools.map(tool => ({ ...tool,
-      exposure: defaultTool(tool, 'user_chat', Boolean(workspace.info().path)) ? 'direct' : 'deferred' }))
+      exposure: defaultTool(tool, 'user_chat', Boolean(workspace.availableRoot())) ? 'direct' : 'deferred' }))
   }
   const companion = new CompanionTurnCoordinator(repository, directors, attachments, memoryRecall)
   const handoffs = new HandoffDispatcher(repository, models, (sessionId, assistantId, signal) => mon.prepareHandoff(sessionId, assistantId, signal), modelBindings)
   const sessions = new SessionService(repository, sessionId => models.resolve(sessionId), tools,
     sessionId => models.invalidateSession(sessionId), new CompanionSessionExtension(companion, models, tools), handoffs, attachments, memoryRecall)
-  const mon: MonBindingService = new MonBindingService(models, sessions)
+  const mon: MonBindingService = new MonBindingService(models, sessions, config.monIdentity, config.account)
   const selfAwakeBridge = config.monIdentity && config.origin === 'mon' ? new SelfAwakeBridge(config.monIdentity, new SelfAwakeBridgeRepository(database, jobs), sessions, mon) : undefined
   const qqChannelBridge = config.monIdentity && config.origin === 'mon'
     ? new QqChannelBridge(config.monIdentity, database, sessions, mon, permissions, blobs, attachments) : undefined
   const memoryExtractions = new MemoryExtractionService(repository, models, permissions)
   const selfAwakeActions = new SelfAwakeActions(repository, permissions, memos, desktopReminders, questions, (channel, sessionId, input, signal) => channel === 'qq' ? mon.contactOwnerByQq(sessionId, input, signal) : mon.contactOwnerByEmail(sessionId, input, signal))
   const selfAwake = new SelfAwakeService(selfAwakeRepository, jobs, sessions)
-  const subagents = new SubagentService(new SubagentRepository(database, jobs, () => workspace.info().path), sessions, models, jobs, new SubagentMailbox(database), skills.repository)
+  const subagents = new SubagentService(new SubagentRepository(database, jobs, sessionId => sessionId ? sessionWorkspace(sessionId).info().path : workspace.info().path), sessions, models, jobs, new SubagentMailbox(database), sessionId => sessionSkills(sessionId).repository)
   const subagentLifecycle = new SubagentLifecycle(subagents)
   sessions.setDescendantStop(sessionId => subagents.stopChildren(sessionId))
+  sessions.setEndCleanup(sessionId => skills.releaseWorkspace(sessionId))
   sessions.toolCatalog()
   const pluginHooks = new PluginHookService(new PluginHookRepository(database, jobs), pluginMarket.installed, sessions, jobs)
   const memoJobRecovery = new MemoJobRecovery(database, memos, memoNotifications, jobs, sessions)
   const scheduler = new JobScheduler(jobs, { 'subagent.turn': job => subagents.dispatch(job), 'plugin.hook': job => pluginHooks.dispatch(job), self_awake: job => selfAwake.dispatch(job), 'memo.reminder': memoDispatcher(database, memos, memoNotifications, jobs, sessions), 'memo.reminder.redelivery': job => memoJobRecovery.dispatch(job) })
-  return { memoJobRecovery, commands, repository, mcpResults, mcp, connectorCredentials, connectorLifecycle, connectorPermissions, connectorEvents, connectors, connectorCatalog, media, realtimeVoice, speech, voice, voiceConfig, subagentLifecycle, subagents, packageAssets, pluginHooks, pluginMarket, skills, plugins, permissions, sessions, workspace, models, mon, directors, companion, questions, handoffs, blobs, attachments, memories, memos, memoNotifications, jobs, scheduler, selfAwake, selfAwakeActions, selfAwakeBridge, qqChannelBridge, desktopReminders, memoryExtractions }
+  return { sharedWorkspace, memoJobRecovery, commands, repository, mcpResults, mcp, connectorCredentials, connectorLifecycle, connectorPermissions, connectorEvents, connectors, connectorCatalog, media, realtimeVoice, speech, voice, voiceConfig, subagentLifecycle, subagents, packageAssets, pluginHooks, pluginMarket, skills, plugins, permissions, sessions, workspace, models, mon, directors, companion, questions, handoffs, blobs, attachments, memories, memos, memoNotifications, jobs, scheduler, selfAwake, selfAwakeActions, selfAwakeBridge, qqChannelBridge, desktopReminders, memoryExtractions }
 }
 
 function skillProfile(environment: unknown): string {

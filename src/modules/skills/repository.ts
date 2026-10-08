@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { SQLOutputValue } from 'node:sqlite'
 import type { EdenDatabase } from '@eden/store'
 import type { SkillSnapshot } from './snapshot.ts'
+import { WorkspaceRepository } from '../workspace/index.ts'
 import { skillAvailability, type SkillCapabilities } from './availability.ts'
 export interface SkillSource { type: string; uri: string; ref: string; subpath: string }
 type Expected = { expectedContentHash?: string | undefined; expectedWorkspaceRoot?: string | undefined }
@@ -12,8 +13,12 @@ export class SkillRepository {
     private readonly capabilities: () => SkillCapabilities = () => ({ tools: [], codeToolsAvailable: false }),
     private readonly systemSkills: () => readonly SkillSnapshot[] = () => [],
     private readonly projectSkills: () => readonly SkillSnapshot[] = () => [],
-    private readonly builtinSkills: () => readonly SkillSnapshot[] = () => []) {}
+    private readonly builtinSkills: () => readonly SkillSnapshot[] = () => [], private readonly sessionId?: string) {}
+  forWorkspace(workspace: () => string, projectSkills: () => readonly SkillSnapshot[] = () => [], sessionId?: string): SkillRepository {
+    return new SkillRepository(this.database, workspace, this.contributions, this.capabilities, this.systemSkills, projectSkills, this.builtinSkills, sessionId)
+  }
   target(scope: string): string {
+    this.assertMutableScope(scope)
     if (scope === 'user') return ''
     if (scope !== 'project') throw new Error('Unsupported skill scope')
     const root = this.workspace()
@@ -26,8 +31,9 @@ export class SkillRepository {
     this.database.transaction(() => {
       this.database.connection.prepare('DELETE FROM skill_previews WHERE expires_at<?').run(Date.now())
       if (Number(this.database.connection.prepare('SELECT COUNT(*) AS n FROM skill_previews').get()?.n) >= 32) throw new Error('Too many pending skill previews')
-      this.database.connection.prepare(`INSERT INTO skill_previews(id,snapshot_json,source_json,scope,expires_at,previous_hash,workspace_root)
-        VALUES(?,?,?,?,?,?,?)`).run(id, JSON.stringify(data), JSON.stringify(source), scope, expires, this.hash(data.name, root), root)
+      this.database.connection.prepare(`INSERT INTO skill_previews(id,snapshot_json,source_json,scope,expires_at,previous_hash,workspace_root,session_id,workspace_revision)
+        VALUES(?,?,?,?,?,?,?,?,?)`).run(id, JSON.stringify(data), JSON.stringify(source), scope, expires, this.hash(data.name, root), root,
+          this.sessionId ?? null, this.sessionId ? new WorkspaceRepository(this.database, this.sessionId).revision() : null)
     })
     return { previewID: id, skillName: data.name, displayName: data.displayName, description: data.description, version: data.version,
       scope, workspaceRoot: root, source, tools: data.tools, profiles: data.profiles, modelInvocable: data.modelInvocable, contentHash: data.contentHash,
@@ -37,6 +43,10 @@ export class SkillRepository {
     return this.database.transaction(() => {
       const row = this.database.connection.prepare('SELECT * FROM skill_previews WHERE id=?').get(previewId)
       if (!row || Number(row.expires_at) < Date.now()) throw new Error('Skill preview expired; inspect the source again')
+      this.assertMutableScope(String(row.scope))
+      if ((row.session_id ?? null) !== (this.sessionId ?? null)) throw new Error('Skill preview belongs to another session')
+      if (this.sessionId && row.workspace_revision !== new WorkspaceRepository(this.database, this.sessionId).revision())
+        throw new Error('Session workspace changed after skill preview; inspect again')
       const root = String(row.workspace_root)
       if (root !== this.target(String(row.scope))) throw new Error('Skill preview belongs to another workspace; inspect again')
       const data: SkillSnapshot = JSON.parse(String(row.snapshot_json))
@@ -87,6 +97,7 @@ export class SkillRepository {
   }
   enable(name: string, enabled: boolean, expected: Expected = {}) {
     const row = this.resolve(name)
+    this.assertMutableScope(String(row.scope))
     if (row.contributed) throw new Error('Manage this skill through its owning plugin component')
     this.assertExpected(row, expected)
     if (row.builtin) {
@@ -100,6 +111,7 @@ export class SkillRepository {
   }
   uninstall(name: string, expected: Expected = {}) {
     const row = this.resolve(name)
+    this.assertMutableScope(String(row.scope))
     if (row.contributed) throw new Error('Manage this skill through its owning plugin component')
     if (row.builtin) throw new Error('Discovered skills cannot be uninstalled; disable the skill or remove its source directory')
     this.assertExpected(row, expected)
@@ -111,6 +123,9 @@ export class SkillRepository {
       || (expected.expectedWorkspaceRoot !== undefined && expected.expectedWorkspaceRoot !== row.workspace_root)) {
       throw new Error('Displayed skill or workspace changed; refresh before changing it')
     }
+  }
+  private assertMutableScope(scope: string) {
+    if (this.sessionId && scope !== 'project') throw new Error('Session skill mutations require project scope; manage account skills from the account control connection')
   }
   private resolve(name: string): Row {
     const root = this.workspace(), row = (root ? this.exact(name, root) : undefined) ?? this.discoveredProjectRows().find(item => item.name === name) ?? this.exact(name, '') ?? this.contributedRows().find(item => item.name === name) ?? this.systemRows().find(item => item.name === name)

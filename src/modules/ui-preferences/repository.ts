@@ -1,4 +1,4 @@
-import { replyLengthSchema } from "@eden/api"
+import { DEFAULT_PANEL_OPACITY, panelOpacitySchema, replyLengthSchema } from "@eden/api"
 import { baseThemeSchema, type BaseTheme, accentThemeSchema, type AccentTheme } from "@eden/api"
 import { currentAccount } from "../accounts/index.ts"
 import type { EdenDatabase } from "@eden/store"
@@ -24,21 +24,22 @@ export class UiPreferenceRepository {
   appearance() {
     const key = `ui.appearance:${currentAccount()?.key ?? "local"}`
     const row = this.database.connection.prepare("SELECT value_json FROM runtime_settings WHERE key=?").get(key)
-    if (!row) return { chatFontScale: 100, componentFontScale: 100, accentTheme: "mist" as const, baseTheme: "night" as const, backgroundMode: "wallpaper" as const }
+    if (!row) return { chatFontScale: 100, componentFontScale: 100, panelOpacity: DEFAULT_PANEL_OPACITY, accentTheme: "mist" as const, baseTheme: "night" as const, backgroundMode: "wallpaper" as const }
     try {
       const value = JSON.parse(String(row.value_json)) as Record<string, unknown>
       const legacyScale = validFontScale(value.fontScale) ? value.fontScale : 100
       const chatFontScale = validFontScale(value.chatFontScale) ? value.chatFontScale : legacyScale
       const componentFontScale = validFontScale(value.componentFontScale) ? value.componentFontScale : legacyScale
+      const panelOpacity = panelOpacitySchema.catch(DEFAULT_PANEL_OPACITY).parse(value.panelOpacity)
       if (validFontScale(chatFontScale) && validFontScale(componentFontScale)) {
-        return { chatFontScale, componentFontScale, baseTheme: baseThemeSchema.catch("night").parse(value.baseTheme), backgroundMode: value.backgroundMode === "theme" ? "theme" as const : "wallpaper" as const, accentTheme: accentThemeSchema.catch("mist").parse(value.accentTheme) }
+        return { chatFontScale, componentFontScale, panelOpacity, baseTheme: baseThemeSchema.catch("night").parse(value.baseTheme), backgroundMode: value.backgroundMode === "theme" ? "theme" as const : "wallpaper" as const, accentTheme: accentThemeSchema.catch("mist").parse(value.accentTheme) }
       }
     } catch {
       /* A corrupt preference falls back to the standard interface size. */
     }
-    return { chatFontScale: 100, componentFontScale: 100, accentTheme: "mist" as const, baseTheme: "night" as const, backgroundMode: "wallpaper" as const }
+    return { chatFontScale: 100, componentFontScale: 100, panelOpacity: DEFAULT_PANEL_OPACITY, accentTheme: "mist" as const, baseTheme: "night" as const, backgroundMode: "wallpaper" as const }
   }
-  updateAppearance(input: { chatFontScale: number; componentFontScale: number; accentTheme?: AccentTheme; baseTheme?: BaseTheme; backgroundMode?: "theme" | "wallpaper" }) {
+  updateAppearance(input: { chatFontScale: number; componentFontScale: number; panelOpacity?: number; accentTheme?: AccentTheme; baseTheme?: BaseTheme; backgroundMode?: "theme" | "wallpaper" }) {
     const key = `ui.appearance:${currentAccount()?.key ?? "local"}`
     this.database.connection.prepare(
       "INSERT INTO runtime_settings VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",

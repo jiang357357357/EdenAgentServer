@@ -1,9 +1,10 @@
+import { logDiagnostic } from '../logging/index.ts'
 import { UiPreferenceRepository } from "../ui-preferences/index.ts"
 import { withAccount } from '../accounts/index.ts'
 import { randomUUID } from 'node:crypto'
 import { toJson } from '@eden/api'
 import type { JsonValue, AttachmentRef, AttachmentSnapshot } from '@eden/api'
-import { createRuntime } from '@eden/runtime-pi'
+import { createIsolatedRuntime as createRuntime } from '@eden/runtime-pi'
 import type { EdenRuntime, RuntimeModel, RuntimeTool } from '@eden/runtime-pi'
 import type { AcceptedInput, SessionInput, SessionTurnExtension, SessionBoundary } from './contracts.ts'
 import { SessionRepository } from './session-repository.ts'
@@ -17,6 +18,9 @@ import { InputAdmissions } from './input/admissions.ts'
 import { InputResubmissionRepository } from './input/resubmission-repository.ts'
 import type { MemoryRecall } from '../memories/index.ts'
 import { SessionTitleService } from './session-title-service.ts'
+import { runtimeStopReason, transientTurnInput, turnRecallQuery } from './turn/single-turn-context.ts'
+import { SessionFaults, sessionFailureReason } from './session-faults.ts'
+import { recoverSessionStorage } from './session-storage-recovery.ts'
 
 export class SessionService {
   private readonly inputs: InputRepository
@@ -29,8 +33,9 @@ export class SessionService {
   private readonly editing = new Set<string>()
   private readonly boundaryWaiting = new Set<string>()
   private descendantStop: ((sessionId: string) => Promise<void>) | undefined
+  private endCleanup: ((sessionId: string) => Promise<void>) | undefined
   private closed = false
-  private readonly faults = new Map<string, string>()
+  private readonly faults: SessionFaults
   private readonly admissions = new InputAdmissions()
   private readonly titles: SessionTitleService
 
@@ -41,6 +46,8 @@ export class SessionService {
     private readonly attachments?: AttachmentService, private readonly memoryRecall?: MemoryRecall) {
     this.inputs = new InputRepository(repository.database, repository.events)
     this.signals = new SignalRepository(repository.database, repository.events)
+    this.faults = new SessionFaults((sessionId, reason) => recoverSessionStorage(repository, this.inputs, this.signals, sessionId, reason,
+      () => this.extension?.validateCheckpoints?.(sessionId)))
     this.titles = new SessionTitleService(repository, sessionId => this.resolveModel(sessionId))
     this.signals.interrupt()
     for (const sessionId of this.inputs.interruptedSessions()) this.stopping.add(sessionId)
@@ -50,7 +57,7 @@ export class SessionService {
   resumePending(): void {
     if (this.closed) return
     for (const sessionId of new Set([...this.inputs.pendingSessions(), ...this.boundary?.pendingSessions() ?? []])) {
-      if (this.stopping.has(sessionId) || !this.repository.ownership.visible(sessionId)) continue
+      if (this.stopping.has(sessionId) || this.faults.has(sessionId) || !this.repository.ownership.visible(sessionId)) continue
       const participants = this.repository.read(sessionId).participants
       const available = participants.length > 1 ? this.extension?.snapshot(sessionId, participants) : this.resolveModel(sessionId)
       if (available) { this.boundaryWaiting.delete(sessionId); this.wake(sessionId) }
@@ -88,7 +95,7 @@ export class SessionService {
   }
 
   submitJob(sessionId: string, text: string, jobId: string, jobKind: string, onCommit: (input: AcceptedInput) => void, recallQuery?: string): AcceptedInput {
-    const metadata = { ...this.inputMetadata(sessionId), job: { id: jobId, kind: jobKind }, ...(recallQuery === undefined ? {} : { recallQuery }) }
+    const metadata = { ...this.inputMetadata(sessionId, undefined, false), job: { id: jobId, kind: jobKind }, ...(recallQuery === undefined ? {} : { recallQuery }) }
     const accepted = this.inputs.enqueue(sessionId, text, `job:${jobId}`, metadata, 'prompt', undefined, onCommit)
     this.stopping.delete(sessionId)
     this.boundaryWaiting.delete(sessionId)
@@ -109,11 +116,12 @@ export class SessionService {
     })
   }
 
-  private inputMetadata(sessionId: string, environment?: JsonValue) {
+  private inputMetadata(sessionId: string, environment?: JsonValue, allowRecovery = true) {
     if (this.closed) throw new Error('Server is shutting down')
     if (this.editing.has(sessionId)) throw new Error('Session is being closed or deleted')
     if (this.stopping.has(sessionId) && this.tasks.has(sessionId)) throw new Error('Session is stopping; wait for the current turn to finish')
-    if (this.faults.has(sessionId)) throw new Error('Session storage failed; restart after repairing the failure')
+    this.repository.ownership.assert(sessionId)
+    this.faults.assertCanSubmit(sessionId, allowRecovery)
     const session = this.repository.read(sessionId)
     if (session.status !== 'active') throw new Error('Session is closed')
     const preferences = new UiPreferenceRepository(this.repository.database)
@@ -150,14 +158,19 @@ export class SessionService {
 
   private wake(sessionId: string): void {
     if (this.tasks.has(sessionId)) return
+    let account: ReturnType<SessionRepository['ownership']['account']>
     const task = Promise.resolve().then(() => {
-      const account = this.repository.ownership.account(sessionId)
+      account = this.repository.ownership.account(sessionId)
       if (this.repository.origin === 'mon' && !account) throw new Error('会话账号归属尚未确认，已暂停执行')
       return withAccount(account, () => this.drain(sessionId))
     }).catch(error => {
-      const reason = error instanceof Error ? error.message : String(error)
-      this.faults.set(sessionId, reason)
-      process.stderr.write(`Session ${sessionId} halted: ${reason}\n`)
+      this.stopping.add(sessionId)
+      let failure = error
+      try { withAccount(account, () => { this.repository.ownership.assert(sessionId); this.inputs.holdQueued(sessionId, sessionFailureReason(error)) }) }
+      catch (storageError) { failure = new AggregateError([error, storageError], '会话暂停失败', { cause: storageError }) }
+      const storage = this.faults.record(sessionId, failure)
+      logDiagnostic({ event: storage ? 'session.halted' : 'session.execution.failed',
+        message: storage ? '会话因存储故障暂停。' : '本轮执行失败，允许提交新输入。', origin: this.repository.origin, sessionId, error: failure }, 'error')
     }).finally(() => {
       this.tasks.delete(sessionId)
       if (!this.closed && !this.stopping.has(sessionId) && !this.boundaryWaiting.has(sessionId) && !this.faults.has(sessionId) && this.inputs.hasPending(sessionId)) this.wake(sessionId)
@@ -198,11 +211,23 @@ export class SessionService {
         await this.extension.execute(input, controller.signal)
       } else reason = await this.executeSingle(input)
     } catch (error) {
-      reason = error instanceof Error ? error.message : String(error)
+      reason = sessionFailureReason(error)
       if (error !== controller.signal.reason) failure = error
-    } finally { this.runtimes.delete(input.sessionId); this.turns.delete(input.sessionId); this.controllers.delete(input.sessionId) }
-    this.signals.interrupt(input.turnId)
-    this.inputs.finish(input, reason)
+    } finally {
+      try { await this.runtimes.get(input.sessionId)?.dispose?.() }
+      catch (error) {
+        failure = failure ? new AggregateError([failure, error], '会话执行与运行时清理失败', { cause: error }) : error
+        reason ??= sessionFailureReason(error)
+      }
+      finally { this.runtimes.delete(input.sessionId); this.turns.delete(input.sessionId); this.controllers.delete(input.sessionId) }
+    }
+    try { this.signals.interrupt(input.turnId); this.inputs.finish(input, reason) }
+    catch (error) {
+      if (failure) logDiagnostic({ event: 'session.turn.failed', origin: this.repository.origin,
+        sessionId: input.sessionId, turnId: input.turnId, error: failure }, 'error')
+      throw error
+    }
+    if (reason) this.stopping.add(input.sessionId)
     if (failure) throw failure
   }
 
@@ -210,14 +235,12 @@ export class SessionService {
     const model = this.resolveModel(input.sessionId)
     if (!model) throw new Error('No model configured for this session')
     assertModelSnapshot(input.metadata, model)
-    const transientInput = Boolean(input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata) && input.metadata.internalHandoff === true)
+    const transientInput = transientTurnInput(input.metadata)
     const checkpoint = this.repository.checkpoint(input.sessionId)
     const images = await this.imagesFor(input)
     this.controllers.get(input.sessionId)?.signal.throwIfAborted()
     const context = sessionPromptContent(input.metadata ?? {})
-    const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata) ? input.metadata : {}
-    const job = metadata.job && typeof metadata.job === 'object' && !Array.isArray(metadata.job) ? metadata.job : {}
-    const recallQuery = job.kind === 'self_awake' ? (typeof metadata.recallQuery === 'string' ? metadata.recallQuery : '') : input.text
+    const recallQuery = turnRecallQuery(input)
     const memory = this.memoryRecall?.prompt(input.sessionId, input.turnId, recallQuery) ?? ''
     const runtime = createRuntime({
       sessionId: input.sessionId, systemPrompt: context.prompt + memory,
@@ -229,8 +252,7 @@ export class SessionService {
     this.runtimes.set(input.sessionId, runtime)
     this.turns.set(input.sessionId, input.turnId)
     const response = input.kind === 'compact' ? await runtime.compact(input.text) : await runtime.prompt(input.text, images)
-    const value = typeof response === 'object' && response !== null && !Array.isArray(response) ? response : {}
-    return value.stopReason === 'error' || value.stopReason === 'aborted' ? String(value.errorMessage ?? value.stopReason) : undefined
+    return runtimeStopReason(response)
   }
 
   private async imagesFor(input: SessionInput) {
@@ -241,6 +263,13 @@ export class SessionService {
   }
 
   setDescendantStop(handler: (sessionId: string) => Promise<void>): void { this.descendantStop = handler }
+  setEndCleanup(handler: (sessionId: string) => Promise<void>): void { this.endCleanup = handler }
+
+  private releaseEndedScope(sessionId: string): void {
+    if (!this.endCleanup) return
+    void Promise.resolve(this.tasks.get(sessionId)).then(() => this.endCleanup!(sessionId)).catch(error =>
+      logDiagnostic({ event: 'session.cleanup.failed', message: '会话资源清理失败。', origin: this.repository.origin, sessionId, error }, 'error'))
+  }
 
   async cancel(sessionId: string): Promise<boolean> {
     this.repository.read(sessionId)
@@ -275,15 +304,17 @@ export class SessionService {
         const turnId = this.turns.get(sessionId)
         if (turnId) this.signals.interrupt(turnId)
         this.repository.setStatus(sessionId, state)
+        this.releaseEndedScope(sessionId)
         // An unresponsive model or child must not hold the delete RPC open.
         const runtime = this.runtimes.get(sessionId)
-        if (runtime) void runtime.abort().catch(error => process.stderr.write(`Session ${sessionId} abort failed: ${String(error)}\n`))
-        if (this.descendantStop) void this.descendantStop(sessionId).catch(error => process.stderr.write(`Session ${sessionId} child stop failed: ${String(error)}\n`))
+        if (runtime) void runtime.abort().catch(error => logDiagnostic({ event: 'session.abort.failed', message: '会话执行中止失败。', origin: this.repository.origin, sessionId, error }, 'error'))
+        if (this.descendantStop) void this.descendantStop(sessionId).catch(error => logDiagnostic({ event: 'session.children.stop_failed', message: '会话的子任务停止失败。', origin: this.repository.origin, sessionId, error }, 'error'))
         return
       }
       await this.cancel(sessionId)
       await this.waitForIdle(sessionId)
       this.repository.setStatus(sessionId, state)
+      this.releaseEndedScope(sessionId)
     } finally { this.editing.delete(sessionId) }
   }
 

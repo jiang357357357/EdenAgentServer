@@ -24,7 +24,7 @@ function fixture(t: test.TestContext) {
 
 test('timer returns readable persisted time and explicit watchdog adjustment', async t => {
   const f = fixture(t), now = Date.now(), anchor = now - 3600000
-  f.db.connection.prepare("INSERT INTO realm_meta VALUES('self_awake_initial_anchor',?)").run(String(anchor))
+  f.db.connection.prepare('UPDATE self_awake_session_schedules SET initial_anchor=? WHERE session_id=?').run(anchor, f.session.id)
   const requestedAt = now + 24 * 3600000
   const result = await f.tool.execute({ at: new Date(requestedAt).toISOString(), reason: '休息后醒来' }, { callId: 'timer', signal: new AbortController().signal }) as Record<string, any>
   const expected = anchor + 24 * 3600000

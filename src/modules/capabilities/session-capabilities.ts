@@ -16,11 +16,13 @@ import { selectSkill, skillSelectionCurrent, availableSkillSummaries } from './s
 export interface CapabilityScope { sessionId: string; owner: string; profile: string; workspaceRoot: string; sourceChannel?: 'app' | 'qq' | 'internal' }
 
 // QQ is an authenticated conversation channel. Keep a bounded builtin list;
-// contact tools still perform their own capability approval and use Core's owner target.
+// Each tool enforces its approval; NapCat tools bind the durable QQ contact, not the owner target.
 const qqTools = new Set(['web_search', 'web_fetch', 'web_find', 'read_file', 'list_directory', 'search_files',
   'write_file', 'edit_file', 'exec_command', 'list_memos', 'create_reminder',
-  'list_contact_channels', 'send_external_email', 'read_attachment', 'send_qq_file'])
+  'list_contact_channels', 'send_external_email', 'read_attachment', 'send_qq_file',
+  'list_qq_capabilities', 'list_qq_events', 'read_qq_action', 'execute_qq_action'])
 const qqReadTools = new Set(['web_find', 'read_file', 'list_directory', 'search_files', 'list_memos'])
+const qqGroupTools = new Set(['list_qq_capabilities', 'read_qq_action', 'execute_qq_action'])
 
 export class SessionCapabilities {
   private readonly selections: SelectionRepository
@@ -33,6 +35,9 @@ export class SessionCapabilities {
   private get scope() { return this.scopeProvider() }
 
   registry(): ToolRegistry {
+    if (this.scope.sourceChannel === 'qq' && this.database.connection.prepare('SELECT 1 FROM qq_group_sessions WHERE session_id=?').get(this.scope.sessionId))
+      return new ToolRegistry(this.definitions().filter(tool =>
+        (tool.source === undefined || tool.source === 'builtin') && qqGroupTools.has(tool.name)))
     if (this.scope.sourceChannel === 'qq') return new ToolRegistry(this.definitions().filter(tool =>
       (tool.source === undefined || tool.source === 'builtin') && qqTools.has(tool.name)).map(tool =>
       qqReadTools.has(tool.name) ? { ...tool, execute: async (input: Record<string, unknown>, context: Parameters<RuntimeTool['execute']>[1]) => {

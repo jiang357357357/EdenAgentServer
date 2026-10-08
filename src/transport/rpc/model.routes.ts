@@ -35,6 +35,7 @@ export function modelRoutes(models: ModelService, sessions: SessionService, mon?
     ...(mon ? { 'mon.sync.legacy.resolve': contractHandler(rpcMethods['mon.sync.legacy.resolve'], input => mon.resolveLegacySync(input)) } : {}),
     ...(mon ? { 'mon.sync.legacy.replay': contractHandler(rpcMethods['mon.sync.legacy.replay'], input => mon.replayLegacySync(input)) } : {}),
     ...(mon ? { 'mon.sync.status': contractHandler(rpcMethods['mon.sync.status'], input => mon.syncStatus(toJson(input))) } : {}),
+    ...(mon ? { 'mon.sync.resume': contractHandler(rpcMethods['mon.sync.resume'], input => mon.resumeSync(input.sessionId)) } : {}),
     ...(mon ? { 'mon.operation.list': contractHandler(rpcMethods['mon.operation.list'], input => mon.listOperations(input)) } : {}),
   }
 }

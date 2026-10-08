@@ -17,7 +17,7 @@ export class SelfAwakeRepository {
   constructor(readonly database: EdenDatabase, private readonly scheduleStateFile?: string, private readonly externalScheduler = Boolean(scheduleStateFile)) {
     this.timerPublication = new SelfAwakeTimerPublication(database, scheduleStateFile, externalScheduler)
   }
-  deadline(now = Date.now()) { return wakeDeadline(this.database, this.scheduleStateFile, now) }
+  deadline(now = Date.now(), sessionId?: string) { if (sessionId) new SessionOwnership(this.database).assert(sessionId); return wakeDeadline(this.database, this.scheduleStateFile, now, sessionId) }
   runReview(runId: string) { this.read(runId); return previewRunReview(this.database, runId) }
   resolveRun(runId: string, fingerprint: string, decision: 'completed' | 'failed', note: string) {
     this.read(runId)
@@ -52,7 +52,9 @@ export class SelfAwakeRepository {
 
   fail(id: string, error: string): void {
     this.database.transaction(() => {
-      this.read(id)
+      const row = this.database.connection.prepare('SELECT session_id FROM self_awake_runs WHERE id=?').get(id)
+      if (!row) throw new Error('Self-awake run not found in this world')
+      new SessionOwnership(this.database).assert(String(row.session_id))
       const now = Date.now()
       this.database.connection.prepare("UPDATE self_awake_runs SET state='failed',last_error=?,completed_at=?,updated_at=? WHERE id=?")
         .run(error.slice(0, 4000), now, now, id)
@@ -134,11 +136,12 @@ export class SelfAwakeRepository {
     return { schedule, count, page: input.page, pageSize: input.pageSize, totalPages: Math.ceil(count / input.pageSize), results: rows.map(row => this.fromRow(row)) }
   }
 
-  wakeSchedule() {
-    const next = this.database.connection.prepare(`SELECT due_at,payload_json FROM jobs WHERE ${accountFilter(this.database, "session_id")} AND kind='self_awake' AND state='queued' ORDER BY due_at LIMIT 1`).get()
-    const external = readExternalSchedule(this.scheduleStateFile)
+  wakeSchedule(sessionId?: string) {
+    if (sessionId) new SessionOwnership(this.database).assert(sessionId)
+    const next = this.database.connection.prepare(`SELECT due_at,payload_json FROM jobs WHERE ${accountFilter(this.database, "session_id")} AND (? IS NULL OR session_id=?) AND kind='self_awake' AND state='queued' ORDER BY due_at LIMIT 1`).get(sessionId ?? null, sessionId ?? null)
+    const external = readExternalSchedule(this.scheduleStateFile, sessionId)
     const local = next ? { status: 'scheduled', source: 'tool', nextWakeAt: new Date(Number(next.due_at)).toISOString(), reason: String(object(JSON.parse(String(next.payload_json))).prompt ?? '') } : null
-    const ownsSchedule = !currentAccount() || Boolean(this.database.connection.prepare(`SELECT 1 FROM self_awake_submissions s JOIN jobs j ON j.id=s.job_id WHERE ${accountFilter(this.database, 'j.session_id')} LIMIT 1`).get())
+    const ownsSchedule = Boolean(sessionId) || !currentAccount() || Boolean(this.database.connection.prepare(`SELECT 1 FROM self_awake_submissions s JOIN jobs j ON j.id=s.job_id WHERE ${accountFilter(this.database, 'j.session_id')} LIMIT 1`).get())
     return this.externalScheduler ? (ownsSchedule ? external : null) : local
   }
 
@@ -166,7 +169,7 @@ export class SelfAwakeRepository {
   context(sessionId: string, turnId: string) {
     const row = this.database.connection.prepare('SELECT id FROM self_awake_runs WHERE session_id=? AND turn_id=?').get(sessionId, turnId)
     new SessionOwnership(this.database).assert(sessionId)
-    return { current_time: new Date().toISOString(), wakeSchedule: this.wakeSchedule(), run: row ? this.read(String(row.id)) : null }
+    return { current_time: new Date().toISOString(), wakeSchedule: this.wakeSchedule(sessionId), run: row ? this.read(String(row.id)) : null }
   }
 
   ownsBackgroundSession(sessionId: string, userId: string): boolean {

@@ -2,6 +2,7 @@ import type { SessionEvent } from '@eden/api'
 import { displayText } from './screen-text.ts'
 
 type Presented = { label: string; text: string; key?: string; complete?: boolean; time?: number }
+type ToolHistory = Map<string, { name: string; args: string }>
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
@@ -16,9 +17,7 @@ function contentText(message: Record<string, unknown>): string {
   }).join('')
 }
 
-export function presentEvent(event: SessionEvent, history = false, tools?: Map<string, { name: string; args: string }>): Presented | undefined {
-  const payload = record(event.payload)
-  if (event.eventType === 'agent.message_start' || event.eventType === 'agent.message_update' || event.eventType === 'agent.message_end') {
+function messageEvent(event: SessionEvent, payload: Record<string, unknown> | undefined): Presented | undefined {
     const message = record(payload?.message)
     if (!message || message.display === false || message.internalHandoff === true) return undefined
     if (message.role !== 'assistant' && message.role !== 'user') return undefined
@@ -30,8 +29,9 @@ export function presentEvent(event: SessionEvent, history = false, tools?: Map<s
     const messageId = typeof payload?.messageId === 'string' ? payload.messageId : event.id
     return { label: message.role === 'user' ? '你' : displayText(name), text: text || '…',
       key: `message:${messageId}`, complete: event.eventType === 'agent.message_end', time: event.createdAt }
-  }
-  if (history) return undefined
+}
+
+function operationEvent(event: SessionEvent, payload: Record<string, unknown> | undefined, tools?: ToolHistory): Presented | undefined {
   if (event.eventType === 'operation.started') {
     const name = String(payload?.name ?? '工具')
     const key = `tool:${event.turnId}:${String(payload?.callId ?? event.id)}`
@@ -46,6 +46,14 @@ export function presentEvent(event: SessionEvent, history = false, tools?: Map<s
     return { key, label: '工具', text: `${tool.name} · ${payload?.failed === true ? '执行失败' : '执行完成'}${tool.args}`,
       complete: true, time: event.createdAt }
   }
+  return undefined
+}
+
+export function presentEvent(event: SessionEvent, history = false, tools?: ToolHistory): Presented | undefined {
+  const payload = record(event.payload)
+  if (['agent.message_start', 'agent.message_update', 'agent.message_end'].includes(event.eventType)) return messageEvent(event, payload)
+  if (history) return undefined
+  if (event.eventType.startsWith('operation.')) return operationEvent(event, payload, tools)
   if (event.eventType === 'turn.started') return { label: '系统', text: '智能体正在处理' }
   if (event.eventType === 'turn.completed') return { label: '系统', text: '本轮完成' }
   if (event.eventType === 'turn.failed' || event.eventType === 'input.interrupted') return {

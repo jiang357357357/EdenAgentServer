@@ -6,6 +6,8 @@ import { TuiRpcClient } from './rpc-client.ts'
 import { AuthFlow } from './auth-flow.ts'
 import { ModelFlow } from './model-flow.ts'
 import type { TuiConfig } from './config.ts'
+import { currentParticipant } from './core-participant.ts'
+import { showCommandHelp, showCommandMenu } from './command-menu.ts'
 
 type Permission = SchemaRpcMethodMap['permission.list']['result'][number]
 type Question = SchemaRpcMethodMap['question.list']['result'][number]
@@ -120,12 +122,14 @@ export class TuiApp {
     }
     const shown = presentEvent(event, false, this.tools)
     if (shown) this.terminal.upsert(shown.key, shown.label, shown.text, shown.complete ?? true, shown.time)
-    if (live && event.eventType === 'permission.requested' && !this.answering) this.enqueue('/permissions')
-    if (live && event.eventType === 'question.requested' && !this.answering) this.enqueue('/questions')
-    if (live && this.answering && (event.eventType === 'permission.requested' || event.eventType === 'question.requested')) {
-      void this.refreshPending().catch(error => this.terminal.print('错误', error instanceof Error ? error.message : String(error)))
-    }
-    if (live && (event.eventType === 'permission.resolved' || event.eventType === 'question.resolved')) {
+    if (live) this.pendingEvent(event.eventType)
+  }
+
+  private pendingEvent(type: SessionEvent['eventType']): void {
+    const commands: Record<string, string> = { 'permission.requested': '/permissions', 'question.requested': '/questions' }
+    const command = commands[type]
+    if (command && !this.answering) this.enqueue(command)
+    if ((command && this.answering) || type === 'permission.resolved' || type === 'question.resolved') {
       void this.refreshPending().catch(error => this.terminal.print('错误', error instanceof Error ? error.message : String(error)))
     }
   }
@@ -206,22 +210,7 @@ export class TuiApp {
   }
 
   private async monParticipant(): Promise<Record<string, unknown>> {
-    const token = this.auth.token
-    if (!token) throw new Error('Mon 世界尚未登录')
-    const response = await fetch(new URL('/api/assistants/current/', this.config.coreUrl), {
-      headers: { Authorization: `Token ${token}` }, signal: AbortSignal.timeout(15_000),
-    })
-    if (!response.ok) throw new Error(`读取当前助手失败（HTTP ${response.status}）；请先在 Core 选择助手`)
-    const assistant: unknown = await response.json()
-    if (!assistant || typeof assistant !== 'object' || Array.isArray(assistant)) throw new Error('Core 助手资料格式无效')
-    const value = assistant as Record<string, unknown>
-    const id = Number(value.id)
-    if (!Number.isSafeInteger(id) || id <= 0) throw new Error('Core 助手 ID 无效')
-    const character = value.character && typeof value.character === 'object' && !Array.isArray(value.character)
-      ? value.character as Record<string, unknown> : {}
-    return { assistantId: id, assistantName: String(value.name ?? character.name ?? `助手 ${id}`),
-      characterId: character.id ?? null, characterName: String(character.name ?? ''),
-      signature: String(character.signature ?? ''), position: 0, profile: value }
+    return currentParticipant(this.config.coreUrl, this.auth.token)
   }
 
   private async createSession(title: string): Promise<void> {
@@ -339,10 +328,7 @@ export class TuiApp {
     if (line === '/quit') { this.terminal.close(); return }
     if (await this.auth.input(line)) return
     if (!line) return
-    if (line === '/login') { await this.auth.logout(); return }
-    if (line === '/logout') { await this.auth.logout(); return }
-    if (line === '/retry') { await this.auth.retry(); return }
-    if (line === '/account') { this.terminal.showPanel('Core 账号', this.auth.accountLines()); return }
+    if (await this.handleAccountCommand(line)) return
     if (!this.auth.authenticated || !this.connected) throw new Error('请先在首页登录，或输入 /retry 重连')
     if (this.answering) {
       if (line === '/back') { this.answering = undefined; this.terminal.prompt('> '); this.terminal.hidePanel(); return }
@@ -350,65 +336,48 @@ export class TuiApp {
       return
     }
     if (!line.startsWith('/') || line.startsWith('//')) {
-      const text = line.startsWith('//') ? line.slice(1) : line
-      try {
-        if (!this.current) await this.createSession('新会话')
-        if (!await this.models.ensure(this.session().id)) { this.terminal.setDraft(text); return }
-      } catch (error) { this.terminal.setDraft(text); throw error }
-      const result = await this.rpc.request('turn.start', { sessionId: this.session().id,
-        text, attachments: [], idempotencyKey: randomUUID() })
-      this.terminal.print('系统', `输入已接受：${result.state}`)
+      await this.submitMessage(line.startsWith('//') ? line.slice(1) : line)
       return
     }
     const space = line.indexOf(' ')
     const command = space < 0 ? line : line.slice(0, space)
     const argument = space < 0 ? '' : line.slice(space + 1).trim()
-    switch (command) {
-      case '/help': this.terminal.showPanel('键盘与命令', [
-        'Enter 发送 · Alt+Enter 或 Ctrl+J 换行 · 输入 / 显示命令 · Ctrl+P 搜索命令',
-        'Ctrl+S 会话 · Ctrl+N 新建 · Ctrl+T 时间线 · Ctrl+X 停止 · Ctrl+C 退出',
-        'Ctrl+B 侧栏 · Ctrl+D 工具详情 · Ctrl+L 到底部 · PgUp/PgDn 滚动',
-        '/sessions · /use 编号或 UUID · /new [标题] · /rename 标题 · /older',
-        '/steer 文字 · /followup 文字 · /permissions · /questions',
-        '/allow 编号 · /always 编号 · /deny 编号 · /answer 编号 · /quit',
-        '/home · /timeline · /status · /sidebar · /details · /timestamps',
-        '/models 查看和选择当前会话模型',
-        '/account 查看账号 · /login 切换账号 · /logout 退出登录 · /retry 重连',
-        '发送以 / 开头的文字请先输入 //',
-      ]); break
-      case '/menu': this.terminal.showMenu('命令', [
-        { label: '返回首页', command: '/home' },
-        { label: '查看 Core 账号', command: '/account' },
-        { label: '查看和选择模型', command: '/models' },
-        { label: '切换 Core 账号', command: '/login' },
-        { label: '退出 Core 登录', command: '/logout' },
-        { label: '重连 Agent Server', command: '/retry' },
-        { label: '切换会话', detail: 'Ctrl+S', command: '/sessions' },
-        { label: '新建会话', detail: 'Ctrl+N', command: '/new' },
-        { label: '消息时间线', detail: 'Ctrl+T', command: '/timeline' },
-        { label: '更早的消息', command: '/older' },
-        { label: '会话状态', command: '/status' },
-        { label: '切换侧栏', detail: 'Ctrl+B', command: '/sidebar' },
-        { label: '切换工具详情', detail: 'Ctrl+D', command: '/details' },
-        { label: '切换消息时间', command: '/timestamps' },
-        { label: '待处理审批', command: '/permissions' },
-        { label: '待回答问题', command: '/questions' },
-        { label: '停止当前回合', detail: 'Ctrl+X', command: '/stop' },
-        { label: '刷新会话与请求', command: '/refresh' }, { label: '帮助', command: '/help' },
-        { label: '退出', command: '/quit' },
-      ], [], true); break
-      case '/sessions': await this.listSessions(); break
-      case '/models': await this.models.showMenu(this.current?.id, true); break
-      case '/model-preview': this.models.preview(argument); break
-      case '/model-confirm': await this.models.select(argument); break
-      case '/home': this.showHome(); break
-      case '/timeline': this.terminal.showTimeline(); break
-      case '/jump': this.terminal.jumpTo(argument); break
-      case '/sidebar': this.terminal.toggleSidebar(); break
-      case '/details': this.terminal.toggleDetails(); break
-      case '/timestamps': this.terminal.toggleTimestamps(); break
-      case '/status': {
-        const current = await this.rpc.request('session.read', { sessionId: this.session().id })
+    const handler = this.commands[command]
+    if (!handler) throw new Error(`未知命令 ${command}；输入 /help 查看`)
+    await handler(argument)
+  }
+
+  private async handleAccountCommand(line: string): Promise<boolean> {
+    if (line === '/login' || line === '/logout') { await this.auth.logout(); return true }
+    if (line === '/retry') { await this.auth.retry(); return true }
+    if (line === '/account') { this.terminal.showPanel('Core 账号', this.auth.accountLines()); return true }
+    return false
+  }
+
+  private async submitMessage(text: string): Promise<void> {
+    try {
+      if (!this.current) await this.createSession('新会话')
+      if (!await this.models.ensure(this.session().id)) { this.terminal.setDraft(text); return }
+    } catch (error) { this.terminal.setDraft(text); throw error }
+    const result = await this.rpc.request('turn.start', { sessionId: this.session().id,
+      text, attachments: [], idempotencyKey: randomUUID() })
+    this.terminal.print('系统', `输入已接受：${result.state}`)
+  }
+
+  private readonly commands: Record<string, (argument: string) => void | Promise<unknown>> = {
+    '/help': (argument: string) => { showCommandHelp(this.terminal) },
+    '/menu': (argument: string) => { showCommandMenu(this.terminal) },
+    '/sessions': async (argument: string) => { await this.listSessions() },
+    '/models': async (argument: string) => { await this.models.showMenu(this.current?.id, true) },
+    '/model-preview': (argument: string) => { this.models.preview(argument) },
+    '/model-confirm': async (argument: string) => { await this.models.select(argument) },
+    '/home': (argument: string) => { this.showHome() },
+    '/timeline': (argument: string) => { this.terminal.showTimeline() },
+    '/jump': (argument: string) => { this.terminal.jumpTo(argument) },
+    '/sidebar': (argument: string) => { this.terminal.toggleSidebar() },
+    '/details': (argument: string) => { this.terminal.toggleDetails() },
+    '/timestamps': (argument: string) => { this.terminal.toggleTimestamps() },
+    '/status': async (argument: string) => { const current = await this.rpc.request('session.read', { sessionId: this.session().id })
         await this.refreshPending()
         this.current = current
         this.terminal.setSession(current.id, current.title, current.executionStatus === 'busy', current.contextTokens)
@@ -416,83 +385,64 @@ export class TuiApp {
           `标题：${current.title}`, `ID：${current.id}`, `世界：${current.runtimeOrigin}`,
           `执行：${current.executionStatus}`, `上下文：${current.contextTokens?.toLocaleString() ?? '未知'} tokens`,
           `待审批：${this.permissions.length} · 待回答：${this.questions.length}`,
-        ])
-        break
-      }
-      case '/rename': {
-        if (!argument) throw new Error('用法：/rename 新标题')
+        ]) },
+    '/rename': async (argument: string) => { if (!argument) throw new Error('用法：/rename 新标题')
         const updated = await this.rpc.request('session.rename', { sessionId: this.session().id, title: argument })
         this.current = updated
         this.terminal.setSession(updated.id, updated.title, updated.executionStatus === 'busy', updated.contextTokens)
-        await this.listSessions(false)
-        break
-      }
-      case '/refresh': await this.listSessions(false); await this.refreshPending(); this.terminal.print('系统', '已刷新'); break
-      case '/older': await this.olderMessages(); break
-      case '/use': {
-        if (!argument) throw new Error('用法：/use 编号或 UUID')
+        await this.listSessions(false) },
+    '/refresh': async (argument: string) => { await this.listSessions(false); await this.refreshPending(); this.terminal.print('系统', '已刷新') },
+    '/older': async (argument: string) => { await this.olderMessages() },
+    '/use': async (argument: string) => { if (!argument) throw new Error('用法：/use 编号或 UUID')
         const id = /^\d+$/.test(argument) ? this.sessions[Number(argument) - 1]?.id : argument
         if (!id) throw new Error('会话编号无效；先输入 /sessions')
-        await this.selectSession(id)
-        break
-      }
-      case '/new': if (argument) await this.createSession(argument); else this.showHome(); break
-      case '/stop': {
-        const result = await this.rpc.request('turn.cancel', { sessionId: this.session().id })
-        this.terminal.print('系统', result.cancellationRequested ? '已请求停止' : '当前没有运行中的回合')
-        break
-      }
-      case '/steer': case '/followup': {
-        if (!argument) throw new Error(`用法：${command} 文字`)
-        const method = command === '/steer' ? 'turn.steer' : 'turn.follow_up'
-        const result = await this.rpc.request(method, { sessionId: this.session().id, text: argument })
-        this.terminal.print('系统', `输入已接受：${result.state}`)
-        break
-      }
-      case '/permissions': await this.listPermissions(); break
-      case '/permission-detail': {
-        await this.listPermissions(false)
+        await this.selectSession(id) },
+    '/new': async (argument: string) => { if (argument) await this.createSession(argument); else this.showHome() },
+    '/stop': async (argument: string) => { const result = await this.rpc.request('turn.cancel', { sessionId: this.session().id })
+        this.terminal.print('系统', result.cancellationRequested ? '已请求停止' : '当前没有运行中的回合') },
+    '/steer': async (argument: string) => { await this.followInput('/steer', argument) },
+    '/followup': async (argument: string) => { await this.followInput('/followup', argument) },
+    '/permissions': async (argument: string) => { await this.listPermissions() },
+    '/permission-detail': async (argument: string) => { await this.listPermissions(false)
         const item = reference(this.permissions, argument)
         this.terminal.showPanel(`审批详情 · ${item.capability}`, [
           `资源：${item.resource}`, `详情：${JSON.stringify(item.details)}`, `请求：${JSON.stringify(item.request)}`,
           'Esc 关闭；输入 /permissions 返回审批选项',
-        ])
-        break
-      }
-      case '/confirm-always': {
-        await this.listPermissions(false)
+        ]) },
+    '/confirm-always': async (argument: string) => { await this.listPermissions(false)
         const item = reference(this.permissions, argument)
         this.terminal.showMenu('确认总是允许', [
           { label: '取消', command: `/permission ${item.id}` },
           { label: '确认总是允许', command: `/always ${item.id}` },
-        ], [`能力：${item.capability}`, `资源：${item.resource}`])
-        break
-      }
-      case '/permission': {
-        if (!argument) throw new Error('用法：/permission 编号或 ID')
+        ], [`能力：${item.capability}`, `资源：${item.resource}`]) },
+    '/permission': async (argument: string) => { if (!argument) throw new Error('用法：/permission 编号或 ID')
         await this.listPermissions(false)
-        this.showPermission(reference(this.permissions, argument))
-        break
-      }
-      case '/allow': case '/always': case '/deny': {
-        if (!argument) throw new Error(`用法：${command} 编号或 ID`)
+        this.showPermission(reference(this.permissions, argument)) },
+    '/allow': async (argument: string) => { await this.resolvePermission('/allow', argument) },
+    '/always': async (argument: string) => { await this.resolvePermission('/always', argument) },
+    '/deny': async (argument: string) => { await this.resolvePermission('/deny', argument) },
+    '/questions': async (argument: string) => { await this.listQuestions() },
+    '/answer': async (argument: string) => { if (!argument) throw new Error('用法：/answer 编号或 ID')
+        await this.listQuestions(false)
+        this.answering = { request: reference(this.questions, argument), index: 0, answers: [] }
+        this.showQuestion() },
+  }
+
+  private async followInput(command: string, argument: string): Promise<void> {
+    if (!argument) throw new Error(`用法：${command} 文字`)
+        const method = command === '/steer' ? 'turn.steer' : 'turn.follow_up'
+        const result = await this.rpc.request(method, { sessionId: this.session().id, text: argument })
+        this.terminal.print('系统', `输入已接受：${result.state}`)
+  }
+
+  private async resolvePermission(command: string, argument: string): Promise<void> {
+    if (!argument) throw new Error(`用法：${command} 编号或 ID`)
         await this.listPermissions(false)
         const permission = reference(this.permissions, argument)
         const decision = command === '/deny' ? 'deny' : command === '/always' ? 'always' : 'once'
         await this.rpc.request('permission.resolve', { requestId: permission.id, decision })
         await this.refreshPending()
         this.terminal.print('审批', `已提交 ${decision}`)
-        break
-      }
-      case '/questions': await this.listQuestions(); break
-      case '/answer': {
-        if (!argument) throw new Error('用法：/answer 编号或 ID')
-        await this.listQuestions(false)
-        this.answering = { request: reference(this.questions, argument), index: 0, answers: [] }
-        this.showQuestion()
-        break
-      }
-      default: throw new Error(`未知命令 ${command}；输入 /help 查看`)
-    }
   }
+
 }

@@ -1,13 +1,35 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { EdenDatabase } from '@eden/store'
+import { DatabaseSync } from 'node:sqlite'
+import { EdenDatabase, migrateDatabase, databaseSchemaVersion } from '@eden/store'
+import { migrations } from '@eden/store/testing'
 import { rpcMethods } from '@eden/api'
 import { withAccount } from '../../../src/modules/accounts/context.ts'
 import { SessionRepository } from '../../../src/modules/sessions/session-repository.ts'
 import { JobRepository } from '../../../src/modules/jobs/repository.ts'
 import { SelfAwakeRepository } from '../../../src/modules/self-awake/repository.ts'
 import { SelfAwakeBridgeRepository } from '../../../src/modules/self-awake/bridge-repository.ts'
-import { migrateDatabase, databaseSchemaVersion } from '../../../../packages/store/src/migrations.ts'
+
+function beforeDiaryMigration(current: EdenDatabase): DatabaseSync {
+  const legacy = new DatabaseSync(':memory:')
+  try {
+    const version = migrations.findIndex(statement => statement.includes('ADD COLUMN diary_cleared '))
+    assert.ok(version >= 0, 'Diary-cleared migration is present in public schema history')
+    for (let index = 0; index < version; index++) {
+      legacy.exec(migrations[index]!)
+      legacy.prepare('INSERT INTO schema_migrations VALUES (?, ?)').run(index + 1, Date.now())
+    }
+    legacy.exec(`PRAGMA user_version=${version}`)
+    for (const table of ['sessions', 'jobs', 'events', 'self_awake_runs', 'self_awake_diaries']) {
+      const columns = legacy.prepare(`PRAGMA table_info(${table})`).all().map(row => String(row.name))
+      const insert = legacy.prepare(`INSERT INTO ${table} (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`)
+      for (const row of current.connection.prepare(`SELECT * FROM ${table}`).all()) {
+        insert.run(...columns.map(column => row[column]!))
+      }
+    }
+    return legacy
+  } catch (error) { legacy.close(); throw error }
+}
 
 test('clearing diaries covers unloaded pages, isolates accounts and preserves executions and future writing', () => {
   const db = new EdenDatabase(':memory:', 'mon')
@@ -97,15 +119,17 @@ test('upgrade recognizes previously cleared completed diaries without marking fa
       else repo.finish(id, '今天的日记。')
     }
     db.connection.prepare('DELETE FROM self_awake_diaries WHERE run_id=?').run(ids[0]!)
-    db.connection.exec('ALTER TABLE self_awake_runs DROP COLUMN diary_cleared')
-    db.connection.prepare('DELETE FROM schema_migrations WHERE version=?').run(databaseSchemaVersion)
-    db.connection.exec(`PRAGMA user_version=${databaseSchemaVersion - 1}`)
-    migrateDatabase(db.connection)
-    assert.equal(repo.read(ids[0]!).diaryCleared, true)
-    assert.equal(repo.read(ids[1]!).diaryCleared, false)
-    assert.equal(repo.read(ids[1]!).diaries.length, 1)
-    assert.equal(repo.read(ids[2]!).diaryCleared, false)
-    migrateDatabase(db.connection)
-    assert.equal(repo.read(ids[0]!).diaryCleared, true)
+    const legacy = beforeDiaryMigration(db)
+    try {
+      migrateDatabase(legacy)
+      const cleared = (id: string) => legacy.prepare('SELECT diary_cleared FROM self_awake_runs WHERE id=?').get(id)!.diary_cleared
+      assert.equal(cleared(ids[0]!), 1)
+      assert.equal(cleared(ids[1]!), 0)
+      assert.equal(legacy.prepare('SELECT count(*) AS n FROM self_awake_diaries WHERE run_id=?').get(ids[1]!)!.n, 1)
+      assert.equal(cleared(ids[2]!), 0)
+      assert.equal(legacy.prepare('PRAGMA user_version').get()!.user_version, databaseSchemaVersion)
+      migrateDatabase(legacy)
+      assert.equal(cleared(ids[0]!), 1)
+    } finally { legacy.close() }
   } finally { db.close() }
 })

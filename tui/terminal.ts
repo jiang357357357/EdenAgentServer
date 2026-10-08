@@ -6,9 +6,9 @@ import { displayText, graphemes } from './screen-text.ts'
 import { searchMenu } from './menu-search.ts'
 import { slashMatches, type SlashCommand } from './slash-commands.ts'
 import { contentWidth, renderFrame, transcriptLines } from './terminal-frame.ts'
-import type { ColoredLine, ScreenEntry, ScreenMenuItem, ScreenPanel, ScreenSession, ScreenState } from './terminal-frame.ts'
+import type { ColoredLine, ScreenEntry, ScreenMenuItem, ScreenPanel, ScreenSession, ScreenState } from './screen-state.ts'
 
-interface KeyPress { name?: string; sequence?: string; ctrl?: boolean; meta?: boolean; shift?: boolean }
+import { commandKey, editInput, isEnter, isPage, isText, isVertical, restrictedKey, type KeyPress } from './terminal-input.ts'
 /** Independent terminal view. Agent actions go through the supplied command callback. */
 export class Terminal {
   private readonly entries: ScreenEntry[] = []
@@ -344,72 +344,56 @@ export class Terminal {
     catch (error) { this.print('错误', error instanceof Error ? error.message : String(error)) }
   }
 
-  private handleKey(text: string | undefined, key: KeyPress): void {
-    if (key.name === 'paste-start') { this.pasting = true; this.paste = ''; return }
+  private pasteKey(text: string | undefined, key: KeyPress): boolean {
+    if (key.name === 'paste-start') { this.pasting = true; this.paste = ''; return true }
     if (key.name === 'paste-end') {
       this.pasting = false
       if (this.panelState?.searchable) this.filterMenu(`${this.panelState.query ?? ''}${displayText(this.paste)}`)
       else this.insert(this.paste)
       this.paste = ''
-      return
+      return true
     }
-    if (this.pasting) { this.paste += key.name === 'return' || key.name === 'enter' ? '\n' : text ?? ''; return }
-    if (key.ctrl && key.name === 'c') { this.close(); return }
-    if (this.panelState?.items) {
-      const items = this.panelState.items
+    if (this.pasting) { this.paste += isEnter(key) ? '\n' : text ?? ''; return true }
+    return false
+  }
+
+  private menuKey(text: string | undefined, key: KeyPress): void {
+    const panel = this.panelState!
+    const items = panel.items!
       if (key.name === 'escape') { this.hidePanel(); return }
-      if (key.name === 'up' || key.name === 'down') {
-        this.panelState.selected = Math.max(0, Math.min(items.length - 1,
-          this.panelState.selected + (key.name === 'up' ? -1 : 1)))
+      if (isVertical(key)) {
+        panel.selected = Math.max(0, Math.min(items.length - 1,
+          panel.selected + (key.name === 'up' ? -1 : 1)))
         this.requestRender(); return
       }
       if (key.name === 'return' || key.name === 'enter') {
-        const command = items[this.panelState.selected]?.command
+        const command = items[panel.selected]?.command
         if (command) { this.hidePanel(); this.onLine(command) }
         return
       }
-      if (this.panelState.searchable) {
-        if (key.name === 'backspace') this.filterMenu(graphemes(this.panelState.query ?? '').slice(0, -1).join(''))
-        else if (key.ctrl && key.name === 'u') this.filterMenu('')
-        else if (!key.ctrl && !key.meta && text && text >= ' ') this.filterMenu(`${this.panelState.query ?? ''}${displayText(text)}`)
-        return
-      }
+      if (panel.searchable) { this.searchKey(text, key); return }
       if (text && /^[1-9]$/.test(text)) {
         const command = items[Number(text) - 1]?.command
         if (command) { this.hidePanel(); this.onLine(command) }
       }
       return
-    }
-    if (this.panelState && (key.name === 'pageup' || key.name === 'pagedown')) {
-      this.panelState.selected = Math.max(0, this.panelState.selected + (key.name === 'pageup' ? -3 : 3))
-      this.requestRender(); return
-    }
-    if (key.name === 'escape') {
+  }
+
+  private searchKey(text: string | undefined, key: KeyPress): void {
+    const panel = this.panelState!
+        if (key.name === 'backspace') this.filterMenu(graphemes(panel.query ?? '').slice(0, -1).join(''))
+        else if (key.ctrl && key.name === 'u') this.filterMenu('')
+        else if (!key.ctrl && !key.meta && text && text >= ' ') this.filterMenu(`${panel.query ?? ''}${displayText(text)}`)
+  }
+
+  private escapeKey(): void {
       if (this.inputMode === 'password') { this.input = ''; this.cursor = 0; this.onLine('/login-back'); return }
       if (this.inputLabel.startsWith('回答')) this.onLine('/back')
       else if (this.panelState) this.hidePanel()
       else if (this.activeSlash().length) { this.slashDismissed = true; this.requestRender() }
-      return
-    }
-    if (this.inputMode !== 'normal' && (key.ctrl || key.meta) && !['a', 'e', 'u'].includes(key.name ?? '')) return
-    if (this.inputLabel.startsWith('回答') && key.ctrl && ['p', 's', 'n', 'x', 'b', 't'].includes(key.name ?? '')) return
-    if (key.ctrl && key.name === 'b') { this.toggleSidebar(); return }
-    if (key.ctrl && key.name === 'd') { this.toggleDetails(); return }
-    if (key.ctrl && key.name === 't') { this.showTimeline(); return }
-    if (key.ctrl && key.name === 'l') { this.scroll = 0; this.requestRender(); return }
-    if (key.ctrl && key.name === 'home') { this.scroll = Math.max(0, this.transcript.length - this.viewportHeight); this.requestRender(); return }
-    if (key.ctrl && key.name === 'end') { this.scroll = 0; this.requestRender(); return }
-    if (key.meta && text && /^[1-9]$/.test(text)) { this.onLine(`/use ${text}`); return }
-    if (key.ctrl && key.name === 'p') { this.onLine('/menu'); return }
-    if (key.ctrl && key.name === 's') { this.onLine('/sessions'); return }
-    if (key.ctrl && key.name === 'n') { this.onLine('/new'); return }
-    if (key.ctrl && key.name === 'x') { this.onLine('/stop'); return }
-    if (key.name === 'f1') { if (!this.inputLabel.startsWith('回答')) this.onLine('/help'); return }
-    if (key.name === 'pageup' || key.name === 'pagedown') {
-      this.scroll = Math.max(0, this.scroll + (key.name === 'pageup' ? 1 : -1) * Math.max(1, this.viewportHeight - 2))
-      this.requestRender(); return
-    }
-    if (key.name === 'return' || key.name === 'enter') {
+  }
+
+  private enterKey(key: KeyPress): void {
       if (this.inputMode === 'normal' && (key.meta || key.shift)) this.insert('\n')
       else {
         const matches = this.activeSlash()
@@ -417,32 +401,63 @@ export class Terminal {
         if (selected && (selected.command !== this.input || selected.argument)) this.chooseSlash(selected, true)
         else this.submit()
       }
-      return
-    }
-    if (key.ctrl && key.name === 'j') { this.insert('\n'); return }
+  }
+
+  private slashKey(key: KeyPress): boolean {
     const matches = this.activeSlash()
     if ((key.name === 'up' || key.name === 'down') && matches.length) {
       this.slashSelected = Math.max(0, Math.min(matches.length - 1,
         this.slashSelected + (key.name === 'up' ? -1 : 1)))
-      this.requestRender(); return
+      this.requestRender(); return true
     }
     if (key.name === 'tab' && matches.length) {
       this.chooseSlash(matches[this.slashSelected] ?? matches[0]!, false)
-      return
+      return true
     }
-    const points = graphemes(this.input)
-    if (key.name === 'left') this.cursor = Math.max(0, this.cursor - 1)
-    else if (key.name === 'right') this.cursor = Math.min(points.length, this.cursor + 1)
-    else if (key.name === 'home' || key.ctrl && key.name === 'a') this.cursor = 0
-    else if (key.name === 'end' || key.ctrl && key.name === 'e') this.cursor = points.length
-    else if (key.name === 'backspace' && this.cursor) { points.splice(--this.cursor, 1); this.input = points.join(''); this.slashDismissed = false; this.slashSelected = 0 }
-    else if (key.name === 'delete' && this.cursor < points.length) { points.splice(this.cursor, 1); this.input = points.join(''); this.slashDismissed = false; this.slashSelected = 0 }
-    else if (key.ctrl && key.name === 'u') { this.input = ''; this.cursor = 0; this.slashDismissed = false; this.slashSelected = 0 }
-    else if ((key.name === 'up' || key.name === 'down') && this.inputMode === 'normal') {
-      this.navigateHistory(key.name === 'up' ? -1 : 1); return
-    }
-    else if (!key.ctrl && !key.meta && text && text >= ' ') this.insert(text)
+    return false
+  }
+
+  private shortcutKey(text: string | undefined, key: KeyPress): boolean {
+    const views: Record<string, () => void> = { b: () => { this.toggleSidebar() }, d: () => { this.toggleDetails() },
+      t: () => this.showTimeline(), l: () => { this.scroll = 0 }, end: () => { this.scroll = 0 },
+      home: () => { this.scroll = Math.max(0, this.transcript.length - this.viewportHeight) } }
+    const view = key.ctrl ? views[key.name ?? ''] : undefined
+    if (view) { view(); this.requestRender(); return true }
+    const command = commandKey(text, key, this.inputLabel.startsWith('回答'))
+    if (command) { this.onLine(command); return true }
+    if (key.name === 'f1') return true
+    if (!isPage(key)) return false
+    this.scroll = Math.max(0, this.scroll + (key.name === 'pageup' ? 1 : -1) * Math.max(1, this.viewportHeight - 2))
     this.requestRender()
+    return true
+  }
+
+  private editorKey(text: string | undefined, key: KeyPress): void {
+    const edit = editInput(this.input, this.cursor, key)
+    if (edit) {
+      this.input = edit.input; this.cursor = edit.cursor
+      if (edit.changed) { this.slashDismissed = false; this.slashSelected = 0 }
+    } else if (isVertical(key) && this.inputMode === 'normal') {
+      this.navigateHistory(key.name === 'up' ? -1 : 1); return
+    } else if (isText(text, key)) this.insert(text)
+    this.requestRender()
+  }
+
+  private handleKey(text: string | undefined, key: KeyPress): void {
+    if (this.pasteKey(text, key)) return
+    if (key.ctrl && key.name === 'c') { this.close(); return }
+    if (this.panelState?.items) { this.menuKey(text, key); return }
+    if (this.panelState && isPage(key)) {
+      this.panelState.selected = Math.max(0, this.panelState.selected + (key.name === 'pageup' ? -3 : 3))
+      this.requestRender(); return
+    }
+    if (key.name === 'escape') { this.escapeKey(); return }
+    if (restrictedKey(key, this.inputMode, this.inputLabel.startsWith('回答'))) return
+    if (this.shortcutKey(text, key)) return
+    if (isEnter(key)) { this.enterKey(key); return }
+    if (key.ctrl && key.name === 'j') { this.insert('\n'); return }
+    if (this.slashKey(key)) return
+    this.editorKey(text, key)
   }
 
   private navigateHistory(direction: -1 | 1): void {

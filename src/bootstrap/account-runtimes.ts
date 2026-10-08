@@ -12,6 +12,8 @@ import {
 } from "../modules/accounts/index.ts"
 import type { ServerConfig } from "./config.ts"
 import { openRuntime, type RuntimeScope } from "./runtime-scope.ts"
+import { prepareDefaultWorkspace } from "./default-workspace.ts"
+import { logDiagnostic } from "../modules/logging/index.ts"
 import {
   AccountStartupError,
   accountStartupFailure,
@@ -129,10 +131,10 @@ export class AccountRuntimes {
     await this.atStage("account.import", directory, () => importAccountPartition(this.config.dataRoot, dataRoot, account))
     const runtime = await this.atStage("account.services", directory, async () => {
       const workspace = path.join(root, "workspace"),
-        skills = path.join(root, "skills")
-      mkdirSync(workspace, { recursive: true, mode: 0o700 })
+        skills = path.join(root, "skills"),
+        metadata = path.join(root, "account.json")
+      if (!existsSync(metadata)) prepareDefaultWorkspace(workspace)
       mkdirSync(skills, { recursive: true, mode: 0o700 })
-      const metadata = path.join(root, "account.json")
       writeFileSync(metadata + ".tmp", JSON.stringify(account), { mode: 0o600 })
       renameSync(metadata + ".tmp", metadata)
       const service = this.serviceAccount()?.key === account.key
@@ -169,10 +171,10 @@ export class AccountRuntimes {
     }
   }
   private stage(stage: string, directory?: string): void {
-    process.stdout.write(startupStage(this.config.origin, stage, directory) + "\n")
+    logDiagnostic(startupStage(this.config.origin, stage, directory))
   }
   private failure(stage: AccountStartupStage | "account.resume", directory: string, error: unknown): void {
-    process.stderr.write(accountStartupFailure(this.config.origin, stage, directory, error) + "\n")
+    logDiagnostic(accountStartupFailure(this.config.origin, stage, directory, error), "error")
   }
   ready(): boolean {
     return this.started && !this.closed && this.failedAccounts.size === 0

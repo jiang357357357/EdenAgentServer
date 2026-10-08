@@ -1,20 +1,23 @@
 import { SynthesisJobs } from './synthesis-jobs.ts'
 import { createHash, randomUUID } from 'node:crypto'
 import type { VoiceSynthesizeInput } from '@eden/api'
-import { voiceSynthesizeSchema, voiceSegmentsSchema, voiceCancelSchema } from '@eden/api'
+import { OperationFailure, voiceSynthesizeSchema, voiceSegmentsSchema, voiceCancelSchema } from '@eden/api'
 import type { BlobService } from '../blobs/index.ts'
 import type { SessionRepository } from '../sessions/index.ts'
 import type { VoiceConfigRepository } from './config-repository.ts'
 import type { SpeechRepository } from './speech-repository.ts'
 import { synthesizeGsv } from './gsv-synthesis.ts'
+import { SynthesisBudget } from './synthesis-budget.ts'
 type MonSynthesis = (input: VoiceSynthesizeInput, signal: AbortSignal) => Promise<{ bytes: Buffer; mime: string; durationMs: number | null }>
 type CachedAudio = NonNullable<ReturnType<SpeechRepository['cached']>>
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 export class SpeechService {
   private readonly abort = new AbortController()
-  private readonly pending = new SynthesisJobs<CachedAudio>()
+  private readonly pending: SynthesisJobs<CachedAudio>
+  private readonly budget: SynthesisBudget
   constructor(private readonly repository: SpeechRepository, private readonly sessions: SessionRepository,
-    private readonly config: VoiceConfigRepository, private readonly blobs: BlobService, private readonly monSynthesis: MonSynthesis) {}
+    private readonly config: VoiceConfigRepository, private readonly blobs: BlobService, private readonly monSynthesis: MonSynthesis,
+    limits?: ConstructorParameters<typeof SynthesisJobs>[0]) { this.budget = new SynthesisBudget(sessions); this.pending = new SynthesisJobs(limits) }
   list(raw: unknown) {
     const input = voiceSegmentsSchema.parse(raw)
     this.sessions.read(input.sessionId)
@@ -26,15 +29,20 @@ export class SpeechService {
     return { cancelled: this.pending.cancel(`${input.sessionId}:${input.requestId}`) }
   }
   async synthesize(raw: unknown) {
-    const { requestId, ...input } = voiceSynthesizeSchema.parse(raw)
+    const { requestId, intent, ...content } = voiceSynthesizeSchema.parse(raw)
+    const input = { ...content, ...(intent ? { intent } : {}) }
     this.abort.signal.throwIfAborted()
     const session = this.sessions.read(input.sessionId)
+    this.budget.prepare(input); this.budget.check(input)
     const config = session.runtimeOrigin === 'local' ? this.config.read().tts : undefined
-    const key = hash(JSON.stringify(config ? { config, text: input.text, mode: input.mode, configId: String(input.configId) } : { origin: 'mon', input }))
+    const key = hash(JSON.stringify(config ? { config, text: input.text, mode: input.mode, configId: String(input.configId) } : { origin: 'mon', input: content }))
     const cached = this.repository.cached(key)
-    const audio = cached ?? await this.pending.run(key, `${input.sessionId}:${requestId ?? randomUUID()}`, async signal => {
+    const synthesis = () => this.pending.run(key, `${input.sessionId}:${requestId ?? randomUUID()}`, async signal => {
       signal.throwIfAborted()
-      const audio = await (config ? synthesizeGsv(config, input.text, signal) : this.monSynthesis(input, signal))
+      this.budget.check(input)
+      let audio
+      try { audio = await (config ? synthesizeGsv(config, input.text, signal) : this.monSynthesis(input, signal)) }
+      catch (error) { if (!signal.aborted) this.budget.failed(input, error); throw error }
       signal.throwIfAborted()
       const blob = await this.blobs.put(audio.bytes, audio.mime)
       signal.throwIfAborted()
@@ -43,6 +51,15 @@ export class SpeechService {
       this.repository.save(key, result)
       return result
     })
+    let audio = cached
+    if (!audio) {
+      try { audio = await synthesis() }
+      catch (error) {
+        // Queue deadlines reject independently of an upstream that ignores cancellation.
+        if (error instanceof OperationFailure && ['speech_timeout', 'speech_queue_full'].includes(error.details.kind)) this.budget.failed(input, error)
+        throw error
+      }
+    }
     this.abort.signal.throwIfAborted()
     this.sessions.read(input.sessionId)
     const id = this.repository.segment(input, key, hash(input.text))

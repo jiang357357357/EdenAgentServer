@@ -5,13 +5,16 @@ import { recordedModel } from '@eden/runtime-pi/testing'
 import { SessionRepository, SessionService } from '../src/modules/sessions/index.ts'
 import { InputRepository } from '../src/modules/sessions/input/input-repository.ts'
 import { HandoffRepository, HandoffCommitRepository } from '../src/modules/handoffs/index.ts'
+import { accountKey, withAccount } from '../src/modules/accounts/index.ts'
 
 // Exercises committed handoff inputs through the production session executor; scheduling is tested separately.
 test('internal handoff input executes without becoming a public or future model user message', async () => {
   const model = await recordedModel([{ text: 'Hello from the new assistant' }, { text: 'Answer to real user' }])
   const db = new EdenDatabase(':memory:', 'mon')
   const repository = new SessionRepository(db, 'mon')
-  const session = repository.create('Internal handoff', [{ assistantId: 1 }])
+  const coreBaseUrl = 'http://127.0.0.1:1', userId = 'handoff-test-account'
+  const session = withAccount({ coreBaseUrl, userId, key: accountKey(coreBaseUrl, userId) },
+    () => repository.create('Internal handoff', [{ assistantId: 1 }]))
   const inputs = new InputRepository(db, repository.events)
   const handoffs = new HandoffRepository(repository)
   let service = new SessionService(repository, model.config)

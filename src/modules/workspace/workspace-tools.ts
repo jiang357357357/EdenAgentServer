@@ -24,11 +24,11 @@ export function workspaceTools(workspace: WorkspaceService, permissions: Permiss
       parameters: toJson(z.toJSONSchema(commandSchema, { io: 'input' })) as Record<string, import('@eden/api').JsonValue>,
       async execute(input, context) {
         const params = commandSchema.parse(input)
-        const root = workspace.commandRoot()
+        const location = workspace.snapshot(true), root = location.root
         const snapshot = commands.snapshot(sessionId)
         await permissions.request({ ...context, sessionId, turnId }, 'command.execute', root, toJson({ ...params, execution: snapshot }))
         return workspace.mutateCommand(root, context.signal, async () => toJson(await commands.execute(snapshot, root, params.command,
-          context.signal, params.timeoutSeconds * 1000)))
+          context.signal, params.timeoutSeconds * 1000)), location)
       }
     },
   ]

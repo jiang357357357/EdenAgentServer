@@ -12,6 +12,8 @@ const sessionKey = (sessionId: string) => `command.terminal.session.${sessionId}
 export class CommandService {
   private active = 0
   private generation = 0
+  private readonly activeSessions = new Map<string, number>()
+  private readonly sessionGenerations = new Map<string, number>()
   constructor(private readonly database: EdenDatabase, _protectedRoots: readonly string[],
     _external?: ReturnType<typeof configuredExternalCommandSandbox>,
     private readonly terminalOptions: { deviceSettingsPath?: string | undefined; assertSession?: (sessionId: string) => void } = {}) { }
@@ -46,7 +48,8 @@ export class CommandService {
 
   async terminalSet(raw: unknown) {
     const input = terminalSetSchema.parse(raw)
-    if (this.active) throw new Error('Wait for running commands before changing terminal environment')
+    if (input.scope === 'device' ? this.active : this.activeSessions.get(input.sessionId))
+      throw new Error('Wait for running commands in the affected scope before changing terminal environment')
     if (input.target?.kind === 'wsl' && !(await listWslDistributions()).includes(input.target.distribution))
       throw new Error(`WSL distribution is unavailable: ${input.target.distribution}`)
     if (input.target?.kind === 'host' && !hostCommandInfo().available) throw new Error('Host terminal is unavailable')
@@ -64,14 +67,16 @@ export class CommandService {
         else this.database.connection.prepare('DELETE FROM runtime_settings WHERE key=?').run(sessionKey(input.sessionId))
       })
     }
-    this.generation++
+    if (input.scope === 'device') this.generation++
+    else this.sessionGenerations.set(input.sessionId, (this.sessionGenerations.get(input.sessionId) ?? 0) + 1)
     return this.terminalInfo(input.scope === 'session' ? input.sessionId : undefined)
   }
 
   snapshot(sessionId?: string) {
     // Ignore saved sandbox settings while the developer-review suspension is in force.
     return { config: { mode: 'host' as const, networkAccess: true, writableRoots: [] as string[] },
-      terminal: this.sessionOverride(sessionId) ?? this.deviceDefault(), sessionId, generation: this.generation }
+      terminal: this.sessionOverride(sessionId) ?? this.deviceDefault(), sessionId, generation: this.generation,
+      sessionGeneration: sessionId ? this.sessionGenerations.get(sessionId) ?? 0 : 0 }
   }
 
   async info() {
@@ -102,13 +107,23 @@ export class CommandService {
 
   async execute(snapshot: ReturnType<CommandService['snapshot']>, root: string, command: string, signal: AbortSignal, timeoutMs = 30000) {
     signal.throwIfAborted()
-    if (snapshot.generation !== this.generation || JSON.stringify(snapshot.terminal) !== JSON.stringify(this.snapshot(snapshot.sessionId).terminal))
+    const current = this.snapshot(snapshot.sessionId)
+    if (snapshot.generation !== this.generation || snapshot.sessionGeneration !== current.sessionGeneration
+      || JSON.stringify(snapshot.terminal) !== JSON.stringify(current.terminal))
       throw new Error('Terminal environment changed after approval; submit the command again')
     this.active++
+    if (snapshot.sessionId) this.activeSessions.set(snapshot.sessionId, (this.activeSessions.get(snapshot.sessionId) ?? 0) + 1)
     try {
       return snapshot.terminal.kind === 'wsl'
         ? await runWslCommand(root, command, snapshot.terminal.distribution, signal, timeoutMs)
         : await runHostCommand(root, command, signal, timeoutMs)
-    } finally { this.active-- }
+    } finally {
+      this.active--
+      if (snapshot.sessionId) {
+        const remaining = (this.activeSessions.get(snapshot.sessionId) ?? 1) - 1
+        if (remaining) this.activeSessions.set(snapshot.sessionId, remaining)
+        else this.activeSessions.delete(snapshot.sessionId)
+      }
+    }
   }
 }

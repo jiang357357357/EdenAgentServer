@@ -1,6 +1,6 @@
 import type { JsonValue, DirectorRun } from '@eden/api'
 import type { RuntimeModel, RuntimeTool } from '@eden/runtime-pi'
-import { ActorExecutionService, ActorCompactionService } from '../actors/index.ts'
+import { ActorExecutionService, ActorCompactionService, ActorCheckpointRepository } from '../actors/index.ts'
 import type { SessionInput, SessionRepository } from '../sessions/index.ts'
 import { DirectorPlanningService } from './planning-service.ts'
 import { DirectorRunRepository } from './run-repository.ts'
@@ -33,6 +33,8 @@ export class CompanionTurnCoordinator {
   compact(input: SessionInput, models: Map<string, RuntimeModel>, signal: AbortSignal): Promise<void> {
     return this.schedule(input.sessionId, signal, combined => this.compactor.compact(input, models, combined))
   }
+
+  validateCheckpoints(sessionId: string): void { new ActorCheckpointRepository(this.sessions).assertRecoverable(sessionId) }
 
   private schedule<T>(id: string, parentSignal: AbortSignal, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
     if (this.closed) return Promise.reject(new Error('Companion coordinator is shutting down'))

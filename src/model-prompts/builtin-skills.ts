@@ -3,6 +3,17 @@ import { SELF_AWAKE_DIARY_CLOCK } from './self-awake.ts'
 /** Instruction content only: execution schemas and permissions belong to their tools. */
 export const BUILTIN_SKILL_GUIDES = [
   {
+    name: 'eden-shared-library', description: '独立共享资料库：查询资料库及同步状态，读取、创建和编辑共享文件，不改变当前工作区。',
+    tools: ['query_shared_workspace', 'read_shared_file', 'write_shared_file', 'edit_shared_file'], profiles: ['user_chat', 'self_awake', 'subagent'],
+    content: `# 共享资料库
+共享资料库有自己的本地目录选择，按当前伊甸园账号保存，与会话工作区分开。共享文件使用库内相对路径，不通过 read_file/write_file 操作，也不需要切换工作区。
+先用 query_shared_workspace 查询 action=status；action=spaces 查看已授权的资料库，action=files 查询所选共享目录绑定库的同步索引。用户在共享资料库页面独立选择目录、绑定和修改权限，智能体不能自行改变共享范围。
+读取使用 read_shared_file，可按字节 offset/limit 分页。索引记录存在不保证文件已经下载；以实际读取结果为准。
+创建或替换使用 write_shared_file，局部修改使用 edit_shared_file。宿主要求资料库编辑权限和写入审批，并在提交时检查文件版本及目录绑定。只有读取权限时不尝试修改；失败后读取最新内容，再决定是否重试。
+写入成功表示本地文件已修改，不代表对端收到；通过 query_shared_workspace 查询同步、暂停、离线或冲突情况。当前工作区和共享目录的同名文件是不同资源。
+工具接口可用时直接调用；尚未暴露时通过 list_tools 找到相应共享文件工具，再用 load_tools 加载。需要流程指导时读取本技能，不要求每轮重复加载。`,
+  },
+  {
     name: 'web-research', description: '搜索实时网页信息、读取公开网页正文，并在已读取页面中定位相关内容。',
     tools: ['web_search', 'web_fetch', 'web_find'], profiles: ['user_chat', 'self_awake', 'subagent'],
     content: `# 网页搜索与研究

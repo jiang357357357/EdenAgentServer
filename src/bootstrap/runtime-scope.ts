@@ -26,6 +26,7 @@ import { acquireProcessLock } from "./process-lock.ts"
 import { pluginRoutes } from "../transport/rpc/plugin.routes.ts"
 import { permissionRoutes } from "../transport/rpc/permission.routes.ts"
 import { workspaceRoutes } from "../transport/rpc/workspace.routes.ts"
+import { sharedWorkspaceRoutes } from "../transport/rpc/shared-workspace.routes.ts"
 import { modelRoutes } from "../transport/rpc/model.routes.ts"
 import { directorRoutes } from "../transport/rpc/director.routes.ts"
 import { questionRoutes } from "../transport/rpc/question.routes.ts"
@@ -89,6 +90,7 @@ export async function openRuntime(config: ServerConfig) {
     services.pluginHooks.close()
     services.selfAwake.close()
     return Promise.allSettled([
+      services.sharedWorkspace.close(),
       services.mcpResults.close(),
       services.mcp.close(),
       services.connectorLifecycle.close(),
@@ -119,7 +121,7 @@ export async function openRuntime(config: ServerConfig) {
     pluginHooks: services.pluginHooks.fault === undefined,
     subagents: services.subagentLifecycle.fault === undefined,
     selfAwake: services.selfAwake.fault === undefined && services.selfAwakeActions.fault === undefined,
-  }))
+  }), config.workspaceId)
   const routes = {
     "memo.job.resubmit": contractHandler(rpcMethods["memo.job.resubmit"], (input) =>
       services.memoJobRecovery.resubmit(input.id, input.expectedUpdatedAt, input.note),
@@ -155,10 +157,11 @@ export async function openRuntime(config: ServerConfig) {
     ...questionRoutes(questions),
     ...pluginAssetRoutes(services.packageAssets),
     ...pluginMarketRoutes(services.pluginMarket),
-    ...skillRoutes(services.skills),
+    ...skillRoutes(services.skills, workspace),
     ...pluginRoutes(plugins, services.pluginMarket.installed),
     ...permissionRoutes(permissions),
     ...workspaceRoutes(workspace, sessions),
+    ...sharedWorkspaceRoutes(services.sharedWorkspace),
     ...modelRoutes(models, sessions, config.origin === "mon" ? mon : undefined),
   }
   let closing: Promise<void> | undefined

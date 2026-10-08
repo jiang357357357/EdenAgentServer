@@ -8,10 +8,12 @@ import type { JsonValue } from '@eden/api'
 import type { PermissionService } from '../permissions/index.ts'
 import { modelDraftSnapshots } from './model-draft-snapshots.ts'
 import { toolDescription } from '../../model-prompts/tool-descriptions.ts'
+import type { WorkspaceService } from '../workspace/index.ts'
+import { assertPluginWorkspace, pluginWorkspaceSnapshot, capturePluginActionWorkspace, assertPluginActionWorkspace } from './plugin-workspace.ts'
 
 const modelInvokeSchema = pluginIdSchema.extend({ input: z.record(z.string(), z.unknown()) })
 
-export function pluginTools(plugins: PluginService, permissions: PermissionService, sessionId: string, turnId: string, actorId?: string | number): RuntimeTool[] {
+export function pluginTools(plugins: PluginService, permissions: PermissionService, sessionId: string, turnId: string, actorId?: string | number, workspace?: WorkspaceService): RuntimeTool[] {
   const drafts = modelDraftSnapshots(plugins, JSON.stringify([sessionId, turnId, actorId ?? null]))
   const management: RuntimeTool = {
     name: 'manage_plugins', revision: 'eden.plugin-management.v1', executionMode: 'sequential',
@@ -54,8 +56,10 @@ export function pluginTools(plugins: PluginService, permissions: PermissionServi
       // Exact request details are durable and visible before any plugin mutation or execution.
       const testInput = command.action === 'test' ? pluginDraftOperationSchema.parse(command.args) : undefined
       const testedRevision = testInput ? (await plugins.validate(testInput.id, context.signal, testInput.expectedDraftRevision)).revision : undefined
+      const workspaceSnapshot = capturePluginActionWorkspace(plugins, workspace, command.action, command.args)
       await permissions.request({ ...context, sessionId, turnId }, `plugin.${command.action}`, testedRevision ? `plugin-test@${testedRevision}` : 'plugin-registry', command.args)
       context.signal.throwIfAborted()
+      assertPluginActionWorkspace(plugins, workspace, command.action, command.args, workspaceSnapshot)
       const result = await managePlugin(plugins, command.action, command.args, context.signal, testedRevision)
       if (command.action === 'draft') {
         const draft = result as { manifest: { id: string }; source: string; draftRevision: string }
@@ -72,7 +76,13 @@ export function pluginTools(plugins: PluginService, permissions: PermissionServi
       name: `plugin_${item.id.replaceAll('-', '_').slice(0, 24)}_${createHash('sha256').update(item.id).digest('hex').slice(0, 8)}_${plugin.manifest.tool.name.slice(0, 22)}`,
       revision: item.revision, description: plugin.manifest.tool.description, parameters: plugin.manifest.tool.parameters,
       async execute(input, context) {
+        const location = workspace ? pluginWorkspaceSnapshot(workspace) : undefined
+        if (location) assertPluginWorkspace(plugins, item.id, item.revision, location.root)
         await permissions.request({ ...context, sessionId, turnId }, 'plugin.invoke', `${item.id}@${item.revision}`, toJson(input))
+        if (workspace && location) {
+          workspace.assertSnapshot(location, true)
+          assertPluginWorkspace(plugins, item.id, item.revision, location.root)
+        }
         return plugins.invoke(item.id, item.revision, toJson(input), context.signal)
       },
     }

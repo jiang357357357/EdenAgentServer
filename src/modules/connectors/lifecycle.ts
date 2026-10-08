@@ -1,3 +1,4 @@
+import { logDiagnostic } from '../logging/index.ts'
 import { launchComponent } from './launch-component.ts'
 import type { ConnectorCatalog } from './catalog.ts'
 import type { ConnectorRepository } from './repository.ts'
@@ -23,7 +24,7 @@ export class ConnectorLifecycle {
     if (this.timer || this.abort.signal.aborted) return
     const tick = () => {
       if (this.task) return
-      this.task = this.reconcile().catch(() => { process.stderr.write('Connector lifecycle reconciliation failed\n') }).finally(() => { this.task = undefined })
+      this.task = this.reconcile().catch(error => { logDiagnostic({ event: 'connector.reconciliation.failed', message: '连接器状态同步失败。', error }, 'error') }).finally(() => { this.task = undefined })
     }
     this.timer = setInterval(tick, 2000); this.timer.unref(); tick()
   }
@@ -31,7 +32,7 @@ export class ConnectorLifecycle {
     const connectors = this.repository.list(), present = new Set(connectors.map(item => item.id))
     for (const [id, running] of this.active) if (!present.has(id)) {
       try { await running.runtime.close(); this.active.delete(id); this.retry.delete(id) }
-      catch { process.stderr.write('Removed connector termination failed; retaining process ownership\n') }
+      catch (error) { logDiagnostic({ event: 'connector.termination.failed', message: '已移除连接器的进程终止失败，继续保留进程管理记录。', connectorId: id, removed: true, error }, 'error') }
     }
     for (const connector of connectors) {
       if (this.abort.signal.aborted) return
@@ -40,7 +41,7 @@ export class ConnectorLifecycle {
         const running = this.active.get(connector.id)
         if (running) {
           try { await running.runtime.close(); this.active.delete(connector.id) }
-          catch { process.stderr.write('Connector termination failed; retaining process ownership\n') }
+          catch (error) { logDiagnostic({ event: 'connector.termination.failed', message: '连接器进程终止失败，继续保留进程管理记录。', connectorId: connector.id, error }, 'error') }
         }
         this.retry.set(connector.id, Date.now() + 30000)
         try { this.repository.runtimeState(connector.id, connector.generation, 'error', 'Connector permission, artifact or transport is unavailable') }
@@ -62,7 +63,7 @@ export class ConnectorLifecycle {
         this.active.delete(connector.id)
         this.retry.set(connector.id, Date.now() + 30000)
       }
-    }).catch(() => { process.stderr.write('Connector exit cleanup failed\n') })
+    }).catch(error => { logDiagnostic({ event: 'connector.exit.cleanup_failed', message: '连接器退出清理失败。', connectorId: connector.id, error }, 'error') })
   }
   async close() {
     if (this.timer) clearInterval(this.timer)

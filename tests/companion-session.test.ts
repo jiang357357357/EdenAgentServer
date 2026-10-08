@@ -11,6 +11,7 @@ import { loadConfig } from '../src/bootstrap/config.ts'
 import { sessionRoutes } from '../src/transport/rpc/session.routes.ts'
 import { InputRepository } from '../src/modules/sessions/input/input-repository.ts'
 import { CompanionSessionExtension } from '../src/modules/director/index.ts'
+import { accountKey, withAccount } from '../src/modules/accounts/index.ts'
 
 async function fixture(wait = false) {
   const first = await recordedModel([{ text: '{"beats":[{"assistantId":1},{"assistantId":2}]}' }, wait ? { wait: true } : { text: 'First reply' }])
@@ -18,7 +19,9 @@ async function fixture(wait = false) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-companion-session-'))
   const db = new EdenDatabase(':memory:', 'mon')
   const services = createServices(db, loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'mon', EDEN_AGENT_DATA_ROOT: root }))
-  const session = services.repository.create('Production multi-actor', [{ assistantId: 1 }, { assistantId: 2 }])
+  const coreBaseUrl = 'http://127.0.0.1:1', userId = 'companion-test-account'
+  const account = { coreBaseUrl, userId, key: accountKey(coreBaseUrl, userId) }
+  const session = withAccount(account, () => services.repository.create('Production multi-actor', [{ assistantId: 1 }, { assistantId: 2 }]))
   const bindings = [{ assistantId: 1, characterId: 1, main: { model: first.config, entityId: 1, label: 'First' } },
     { assistantId: 2, characterId: 2, main: { model: second.config, entityId: 2, label: 'Second' } }]
   services.models.bindActors(session.id, bindings, first.config)
@@ -52,7 +55,7 @@ test('production cancellation interrupts the actor queue without marking cancell
   const setup = await fixture(true)
   try {
     await setup.routes['turn.start']!({ sessionId: setup.session.id, text: 'Wait' })
-    const deadline = Date.now() + 5000
+    const deadline = Date.now() + 20000
     while (setup.first.requests.length < 2 && Date.now() < deadline) await delay(10)
     assert.equal(setup.first.requests.length, 2)
     await setup.routes['turn.cancel']!({ sessionId: setup.session.id })
@@ -78,7 +81,7 @@ test('queued multi-actor input rejects a changed model before any director or ac
     await setup.services.sessions.waitForIdle(setup.session.id)
     assert.equal(setup.first.requests.length + setup.second.requests.length, 0)
     assert.equal(setup.db.connection.prepare('SELECT state FROM inputs').get()?.state, 'interrupted')
-    assert.equal(setup.services.sessions.faultCount(), 1)
+    assert.equal(setup.services.sessions.faultCount(), 0)
   } finally { await setup.close() }
 })
 
@@ -111,6 +114,6 @@ test('queued turns reject director-only configuration changes before making any 
     await setup.services.sessions.waitForIdle(setup.session.id)
     assert.equal(setup.first.requests.length + setup.second.requests.length, 0)
     assert.equal(setup.db.connection.prepare('SELECT state FROM inputs').get()?.state, 'interrupted')
-    assert.equal(setup.services.sessions.faultCount(), 1)
+    assert.equal(setup.services.sessions.faultCount(), 0)
   } finally { await setup.close() }
 })

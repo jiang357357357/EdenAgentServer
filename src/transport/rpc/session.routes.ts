@@ -12,7 +12,7 @@ export function wireEvent(event: DurableEvent): JsonValue {
     eventType: event.kind, payload: eventPayload(event.payload), createdAt: event.createdAt }
 }
 
-export function sessionRoutes(service: SessionService): Record<string, (params: JsonValue) => JsonValue | Promise<JsonValue>> {
+export function sessionRoutes(service: SessionService, signal?: AbortSignal): Record<string, (params: JsonValue) => JsonValue | Promise<JsonValue>> {
   const repository = service.repository
   const summary = (value: SessionSummary): SessionSummary => ({
     ...value, executionStatus: service.isRunning(value.id) ? 'busy' : value.executionStatus,
@@ -24,11 +24,13 @@ export function sessionRoutes(service: SessionService): Record<string, (params: 
       const params = sessionCreateSchema.parse(value)
       return toJson(summary(repository.create(params.title, params.participants, toJson(params.environment ?? null))))
     },
-    'session.list': value => {
+    'session.list': async value => {
       const params = sessionListSchema.parse(value)
-      return toJson(repository.list(params.limit, params.includeClosed, params.includeBackground, params.purpose, params.sourceChannel).map(summary))
+      const sessions = await repository.listAsync(params.limit, params.includeClosed, params.includeBackground, params.purpose, params.sourceChannel, signal)
+      return toJson(sessions.map(summary))
     },
     'session.read': value => toJson(summary(repository.read(sessionIdSchema.parse(value).sessionId))),
+    'session.timing.read': value => toJson(repository.replyTimer(sessionIdSchema.parse(value).sessionId)),
     'session.context': value => {
       const { sessionId } = sessionIdSchema.parse(value)
       repository.read(sessionId)
@@ -57,10 +59,10 @@ export function sessionRoutes(service: SessionService): Record<string, (params: 
     },
     'turn.steer': async value => { const params = turnQueueSchema.parse(value); return toJson(await service.inject(params.sessionId, params.text, 'steer')) },
     'turn.follow_up': async value => { const params = turnQueueSchema.parse(value); return toJson(await service.inject(params.sessionId, params.text, 'follow_up')) },
-    'event.list': value => {
+    'event.list': async value => {
       const params = eventListSchema.parse(value)
       repository.read(params.sessionId)
-      const items = repository.events.list(params.sessionId, String(params.afterSeq), params.limit + 1)
+      const items = await repository.events.listAsync(params.sessionId, String(params.afterSeq), params.limit + 1, signal)
       const page = items.slice(0, params.limit)
       return { items: page.map(wireEvent), hasMore: items.length > params.limit, nextCursor: page.at(-1)?.seq ?? null }
     },

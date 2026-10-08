@@ -1,3 +1,4 @@
+import { logDiagnostic } from '../logging/index.ts'
 import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
 import { launchConnectorProcess } from '@eden/execution'
@@ -40,7 +41,7 @@ export async function launchComponent(id: string, dataRoot: string, repository: 
       ...(identity ? { identity } : {}), ...(network ? { networkBridgeDirectory: network.directory } : {}), signal })
     const process = child
     const exited = process.exited.finally(async () => { try { await network?.close() } finally { await prepared?.cleanup() } })
-    void exited.catch(() => { globalThis.process.stderr.write('Connector component cleanup failed\n') })
+    void exited.catch(error => { logDiagnostic({ event: 'connector.component.cleanup_failed', message: '连接器组件清理失败。', connectorId: id, error }, 'error') })
     const runtime = new ConnectorWorkerRuntime(id, current.generation, process.input, process.output, repository, events,
       async () => { await process.stop(); await exited }, () => { authorize(); network?.assertCurrent() }, descriptor.manifest.id)
     try {

@@ -22,6 +22,14 @@ npm run test:server
 
 修改服务端后先在本仓库提交并推送，再在主项目提交 `Server` 子模块指针。共享 SDK 等改动需要与主项目配套提交。
 
+## 运行日志
+
+Server 默认输出中文控制台日志，包含本地时间、`INFO/WARN/ERROR` 等级、伊甸园或尘世标识及必要诊断字段；被桌面监管器或 MonPM 通过管道读取时也保持文本。TTY 自动着色，`FORCE_COLOR=1` 可强制着色，`FORCE_COLOR=0` 关闭；设置 `NO_COLOR` 优先关闭颜色。需要机器读取时设置 `EDEN_AGENT_LOG_FORMAT=json`，两种格式均保留 `info/debug → stdout`、`warn/error → stderr`。
+
+日志同时以 JSONL 保存，目录优先级为 `EDEN_AGENT_LOG_DIR`、`MON_LOG_START_DIR/Text/MonAgent`、当前 Server `dataRoot/logs`。文件名为 `agent-<mon|local>-<pid>.jsonl`，按 10 MiB 阈值轮转，最多保留 `.1`、`.2`、`.3` 三份备份；单条记录不拆分，不同世界及进程独立，不自动清理历史 PID 文件，也不承诺整个日志目录的总大小上限。
+
+统一日志会脱敏凭据字段及错误消息中的常见认证内容，过滤控制字符；结构化诊断与堆栈另存 JSONL，控制台仅显示必要摘要。文件写入失败会提示并继续控制台输出，不阻断业务。Node.js 的 SQLite 实验性提示纳入统一显示；未处理异常仍按 Node 默认行为退出并输出原生诊断，任意第三方输出不在统一脱敏保证内。实施及测试证据见主仓库 `文档/技术/ts-migration/实施记录/159-Agent日志统一与结构化留档.md`。
+
 ## 终端保底界面
 
 前端不可用但 Agent Server 仍在运行时，可用 `eden` 进入全屏终端工作台：

@@ -1,3 +1,4 @@
+import { logDiagnostic } from '../logging/index.ts'
 import type { ExternalCommandSandbox } from '@eden/execution'
 import type { InstalledPackageRepository } from '../plugin-market/index.ts'
 import { connectMcpStdio } from './stdio-runtime.ts'
@@ -33,7 +34,7 @@ export class McpLifecycle {
     if (this.timer || this.abort.signal.aborted) return
     const tick = () => {
       if (this.task) return
-      this.task = this.reconcile().catch(() => { process.stderr.write('MCP lifecycle reconciliation failed\n') }).finally(() => { this.task = undefined })
+      this.task = this.reconcile().catch(error => { logDiagnostic({ event: 'mcp.reconciliation.failed', message: 'MCP 组件状态同步失败。', error }, 'error') }).finally(() => { this.task = undefined })
     }
     this.timer = setInterval(tick, 2000); this.timer.unref(); tick()
   }
@@ -89,7 +90,7 @@ export class McpLifecycle {
         void runtime.exited.finally(() => {
           if (this.active.get(id) === runtime) { this.active.delete(id); this.catalog.remove(id) }
           this.retry.set(id, Date.now() + 15000)
-        }).catch(() => { process.stderr.write('MCP runtime exit cleanup failed\n') })
+        }).catch(error => { logDiagnostic({ event: 'mcp.exit.cleanup_failed', message: 'MCP 组件退出清理失败。', componentId: id, error }, 'error') })
       } catch { this.retry.set(id, Date.now() + 15000); this.errors.set(id, 'MCP initialization failed; check component configuration and permissions') }
     }
 

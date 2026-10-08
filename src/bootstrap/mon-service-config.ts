@@ -30,7 +30,7 @@ function environmentScheduleStateFile(env: NodeJS.ProcessEnv): string | undefine
 }
 
 /** Explicit realm-local references avoid choosing a different installed Mon account. */
-export function monServiceConfig(origin: 'mon' | 'local', dataRoot: string, env: NodeJS.ProcessEnv): { env: NodeJS.ProcessEnv; scheduleStateFile?: string | undefined } {
+export function monServiceConfig(origin: 'mon' | 'local', dataRoot: string, env: NodeJS.ProcessEnv, workspaceRoot?: string): { env: NodeJS.ProcessEnv; scheduleStateFile?: string | undefined } {
   if (origin !== 'mon') return { env }
   // Explicit environment credentials and the explicit MonOs state path belong to one deployment;
   // do not combine them with a possibly stale mon-service.json binding.
@@ -40,20 +40,37 @@ export function monServiceConfig(origin: 'mon' | 'local', dataRoot: string, env:
     return { env, ...(scheduleStateFile ? { scheduleStateFile } : {}) }
   }
   const filename = path.join(dataRoot, 'mon-service.json')
-  if (!existsSync(filename)) return { env }
+  if (!existsSync(filename)) return workspaceServiceConfig(workspaceRoot, env)
   let config: z.infer<typeof configSchema>
   try { config = configSchema.parse(JSON.parse(readFileSync(filename, 'utf8'))) }
   catch { throw new Error(`Mon 服务配置无法读取或格式无效：${filename}；请检查 deploymentRoot、authFile、coreBaseUrl 和 scheduleStateFile`) }
   const root = path.resolve(path.dirname(filename), config.deploymentRoot ?? '.')
   const authFile = path.resolve(root, config.authFile)
   readable(authFile, filename, 'authFile')
+  const scheduleStateFile = config.scheduleStateFile ? path.resolve(root, config.scheduleStateFile) : undefined
+  if (scheduleStateFile) readable(scheduleStateFile, filename, 'scheduleStateFile')
+  return { env: identityEnvironment(authFile, config.coreBaseUrl, env),
+    scheduleStateFile }
+}
+
+function workspaceServiceConfig(workspaceRoot: string | undefined, env: NodeJS.ProcessEnv): { env: NodeJS.ProcessEnv; scheduleStateFile?: string | undefined } {
+  if (!workspaceRoot) return { env }
+  const root = path.resolve(workspaceRoot)
+  if (!existsSync(path.join(root, '.monconfig')) || !existsSync(path.join(root, '.monworkspace')))
+    throw new Error('Mon 服务认证必须来自已锚定的当前工作区')
+  const authFile = path.join(root, 'Config', 'ENV', 'service-auth.env')
+  if (!existsSync(authFile)) return { env }
+  const scheduleStateFile = environmentScheduleStateFile(env)
+  return { env: identityEnvironment(authFile, env.MON_CORE_BASE_URL ?? 'http://127.0.0.1:40011', env),
+    ...(scheduleStateFile ? { scheduleStateFile } : {}) }
+}
+
+function identityEnvironment(authFile: string, coreBaseUrl: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  readable(authFile, authFile, 'authFile')
   let auth: NodeJS.ProcessEnv
   try { auth = parseEnv(readFileSync(authFile, 'utf8')) }
   catch { throw new Error(`Mon 认证文件无法解析：${authFile}`) }
   validateIdentity(auth, authFile)
-  const scheduleStateFile = config.scheduleStateFile ? path.resolve(root, config.scheduleStateFile) : undefined
-  if (scheduleStateFile) readable(scheduleStateFile, filename, 'scheduleStateFile')
-  return { env: { ...env, MON_SERVICE_SHARED_SECRET: auth.MON_SERVICE_SHARED_SECRET,
-    MON_SERVICE_USER_ID: auth.MON_SERVICE_USER_ID, MON_CORE_BASE_URL: env.MON_CORE_BASE_URL ?? config.coreBaseUrl },
-    scheduleStateFile }
+  return { ...env, MON_SERVICE_SHARED_SECRET: auth.MON_SERVICE_SHARED_SECRET,
+    MON_SERVICE_USER_ID: auth.MON_SERVICE_USER_ID, MON_CORE_BASE_URL: env.MON_CORE_BASE_URL ?? coreBaseUrl }
 }

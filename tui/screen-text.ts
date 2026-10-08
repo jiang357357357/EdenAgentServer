@@ -10,15 +10,17 @@ export function graphemes(value: string): string[] {
   return Array.from(segmenter.segment(value), item => item.segment)
 }
 
+const wideRanges: readonly (readonly [number, number])[] = [
+  [0x1100, 0x115f], [0x2329, 0x232a], [0x2e80, 0xa4cf], [0xac00, 0xd7a3],
+  [0xf900, 0xfaff], [0xfe10, 0xfe6f], [0xff00, 0xff60], [0xffe0, 0xffe6],
+]
+
 function cellWidth(cluster: string): number {
   if (!cluster) return 0
   const point = cluster.codePointAt(0) ?? 0
   if (/^\p{Mark}/u.test(cluster)) return 0
   if (/\p{Extended_Pictographic}/u.test(cluster) || /\p{Regional_Indicator}/u.test(cluster)) return 2
-  if (point >= 0x1100 && (point <= 0x115f || point >= 0x2329 && point <= 0x232a ||
-    point >= 0x2e80 && point <= 0xa4cf || point >= 0xac00 && point <= 0xd7a3 ||
-    point >= 0xf900 && point <= 0xfaff || point >= 0xfe10 && point <= 0xfe6f ||
-    point >= 0xff00 && point <= 0xff60 || point >= 0xffe0 && point <= 0xffe6)) return 2
+  if (wideRanges.some(([first, last]) => point >= first && point <= last)) return 2
   return 1
 }
 

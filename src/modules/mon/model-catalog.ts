@@ -11,10 +11,9 @@ export async function loadMonCatalog(client: MonClient, assistantId?: string | n
   }
 }
 
-async function readMonCatalog(client: MonClient, assistantId?: string | number, signal?: AbortSignal) {
+async function readAssistant(client: MonClient, assistantId?: string | number, signal?: AbortSignal) {
   const assistantPath = assistantId === undefined ? '/api/assistants/current/' : `/api/assistants/${encodeURIComponent(String(coreIdSchema.parse(assistantId)))}/`
-  let assistantRaw
-  try { assistantRaw = await client.get(assistantPath, signal) }
+  try { return await client.get(assistantPath, signal) }
   catch (error) {
     if (error instanceof MonHttpError && error.status === 404) {
       if (assistantId !== undefined) throw new Error(`会话助手（ID：${String(assistantId)}）已不在 Mon Core 中，请为本会话重新选择助手。`)
@@ -22,6 +21,10 @@ async function readMonCatalog(client: MonClient, assistantId?: string | number, 
     }
     throw error
   }
+}
+
+async function readMonCatalog(client: MonClient, assistantId?: string | number, signal?: AbortSignal) {
+  const assistantRaw = await readAssistant(client, assistantId, signal)
   const [settingsRaw, vendorsRaw, entitiesRaw] = await Promise.all([
     client.get('/api/agent/settings/my/', signal), client.get('/api/core/vendors/ai/', signal), client.getCollection('/api/ai/entities/', signal),
   ])

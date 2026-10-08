@@ -4,7 +4,16 @@ import { z } from 'zod'
 import { skillReadSchema, skillEnableSchema, skillPreviewInstallSchema, skillFileSchema, toJson } from '@eden/api'
 import type { JsonValue } from '@eden/api'
 import type { SkillService } from '../../modules/skills/index.ts'
-export function skillRoutes(service: SkillService): Record<string, (params: JsonValue) => JsonValue | Promise<JsonValue>> {
+import type { WorkspaceService } from '../../modules/workspace/index.ts'
+export function skillRoutes(service: SkillService, workspace?: WorkspaceService): Record<string, (params: JsonValue) => JsonValue | Promise<JsonValue>> {
+  const scoped = (raw: JsonValue) => {
+    const value = raw as Record<string, JsonValue>, { sessionId, ...params } = value
+    if (!workspace) return { service, params }
+    const selected = typeof sessionId === 'string'
+      ? service.forWorkspace(() => workspace.forSession(sessionId).availableRoot(), sessionId)
+      : service.forWorkspace(() => '', 'account-global')
+    return { service: selected, params }
+  }
   const handlers: Record<string, (params: JsonValue) => JsonValue | Promise<JsonValue>> = {
     'skill.catalog_status': raw => { z.object({}).strict().parse(raw); return service.status() },
     'skill.refresh': async raw => { z.object({}).strict().parse(raw); await service.refresh(); return { refreshed: true } },
@@ -19,6 +28,10 @@ export function skillRoutes(service: SkillService): Record<string, (params: Json
   }
   return Object.fromEntries(Object.entries(handlers).map(([method, handler]) => {
     const contract = rpcMethods[method as keyof typeof rpcMethods]
-    return [method, contractHandler(contract, input => handler(toJson(input)))]
+    return [method, contractHandler(contract, input => {
+      const selected = scoped(toJson(input))
+      if (selected.service !== service) return skillRoutes(selected.service)[method]!(selected.params)
+      return handler(selected.params)
+    })]
   }))
 }

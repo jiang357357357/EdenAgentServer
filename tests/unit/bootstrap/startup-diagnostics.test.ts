@@ -8,7 +8,7 @@ import {
 
 test("startup diagnostics identify processes and accounts without exposing credentials", () => {
   const account = "a".repeat(64)
-  const stage = JSON.parse(startupStage("mon", "account.import", account)) as Record<string, unknown>
+  const stage = startupStage("mon", "account.import", account)
   assert.equal(stage.event, "server.startup")
   assert.equal(stage.account, account.slice(0, 12))
   assert.equal(stage.pid, process.pid)
@@ -18,10 +18,7 @@ test("startup diagnostics identify processes and accounts without exposing crede
     new Error(`request failed?token=private-token Bearer private-bearer ${"b".repeat(64)}`),
     { code: "SQLITE_BUSY" },
   )
-  const failure = JSON.parse(accountStartupFailure("mon", "account.resume", account, error)) as Record<
-    string,
-    unknown
-  >
+  const failure = accountStartupFailure("mon", "account.resume", account, error)
   assert.equal(failure.reason, "account_runtime_error")
   assert.equal(failure.errorCode, "SQLITE_BUSY")
   assert.equal(failure.account, account.slice(0, 12))
@@ -29,17 +26,15 @@ test("startup diagnostics identify processes and accounts without exposing crede
 })
 
 test("startup diagnostics preserve the failing account stage and actionable migration reason", () => {
-  const failure = JSON.parse(
-    accountStartupFailure(
-      "mon",
-      "account.resume",
-      "c".repeat(64),
-      new AccountStartupError(
-        "account.import",
-        new Error("Historical attachment file is missing; account import was not committed"),
-      ),
+  const failure = accountStartupFailure(
+    "mon",
+    "account.resume",
+    "c".repeat(64),
+    new AccountStartupError(
+      "account.import",
+      new Error("Historical attachment file is missing; account import was not committed"),
     ),
-  ) as Record<string, unknown>
+  )
   assert.equal(failure.stage, "account.import")
   assert.equal(failure.reason, "historical_attachment_missing")
   assert.equal(failure.retainedForRecovery, true)

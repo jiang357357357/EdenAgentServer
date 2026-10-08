@@ -1,4 +1,4 @@
-import { createRuntime } from '@eden/runtime-pi'
+import { createIsolatedRuntime as createRuntime } from '@eden/runtime-pi'
 import type { RuntimeModel, RuntimeCallbacks } from '@eden/runtime-pi'
 import { runtimeCallbacks } from '../sessions/index.ts'
 import type { SessionInput, SessionRepository } from '../sessions/index.ts'
@@ -44,6 +44,6 @@ export class ActorCompactionService {
       event(signal.aborted ? 'cancelled' : 'failed')
       if (signal.aborted && !persistenceFailed) throw signal.reason
       throw error
-    } finally { signal.removeEventListener('abort', abort); await aborting }
+    } finally { signal.removeEventListener('abort', abort); try { await aborting } finally { await runtime.dispose() } }
   }
 }

@@ -9,6 +9,7 @@ import { EdenDatabase } from '@eden/store'
 import { recordedModel } from '@eden/runtime-pi/testing'
 import { loadConfig } from '../src/bootstrap/config.ts'
 import { createServices } from '../src/bootstrap/services.ts'
+import { accountKey, withAccount } from '../src/modules/accounts/index.ts'
 
 test('production Mon catalogue commits durable single/vision/actor/director bindings and restores them without another catalogue request', async context => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-mon-binding-restart-'))
@@ -40,9 +41,10 @@ test('production Mon catalogue commits durable single/vision/actor/director bind
     services.questions.close(); db.close()
   }
   context.after(async () => { await close(); await model.close(); core.closeAllConnections(); await new Promise<void>(resolve => core.close(() => resolve())); await rm(root, { recursive: true, force: true }) })
-  const single = services.repository.create('Single', [{ assistantId: 1 }])
-  const multi = services.repository.create('Multiple', [{ assistantId: 1 }, { assistantId: 2 }])
   const params = { coreBaseUrl: `http://127.0.0.1:${(core.address() as AddressInfo).port}`, coreToken: 'private-core-token' }
+  const owner = { key: accountKey(params.coreBaseUrl, 'fixture-owner'), userId: 'fixture-owner', coreBaseUrl: params.coreBaseUrl }
+  const single = withAccount(owner, () => services.repository.create('Single', [{ assistantId: 1 }]))
+  const multi = withAccount(owner, () => services.repository.create('Multiple', [{ assistantId: 1 }, { assistantId: 2 }]))
   let observed = ''
   services.repository.events.subscribe(event => { if (event.kind === 'model.bound') observed = services.models.resolve(single.id)?.id ?? '' })
   const catalogue = await services.mon.catalog({ ...params, sessionId: single.id })

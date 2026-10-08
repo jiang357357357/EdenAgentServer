@@ -1,3 +1,4 @@
+import { logDiagnostic } from '../../modules/logging/index.ts'
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { serviceSignature } from '@eden/integrations'
@@ -57,7 +58,7 @@ export class SelfAwakeHttp {
   private fail(response: ServerResponse, requestId: string, route: 'run' | 'status', status: number,
     stage: SelfAwakeStage, code: string, detail?: SelfAwakeFailure): void {
     const record = { event: 'self_awake.request_failed', time: new Date().toISOString(), pid: process.pid,
-      requestId, route, httpStatus: status, stage, code,
+      origin: this.origin, message: '自醒服务请求处理失败。', requestId, route, httpStatus: status, stage, code,
       ...(detail?.errorName ? { errorName: detail.errorName } : {}),
       ...(detail?.upstreamStatus ? { upstreamStatus: detail.upstreamStatus } : {}),
       ...(detail?.systemCode ? { systemCode: detail.systemCode } : {}),
@@ -65,7 +66,7 @@ export class SelfAwakeHttp {
       ...(detail?.networkCodes ? { networkCodes: detail.networkCodes } : {}),
       ...(detail?.stackFrames ? { stackFrames: detail.stackFrames } : {}),
       ...(detail?.cleanupFailed ? { cleanupFailed: true } : {}) }
-    try { process.stderr.write(`${JSON.stringify(record)}\n`) } catch { /* diagnostics must not hide the HTTP failure */ }
+    logDiagnostic(record, status >= 500 ? 'error' : 'warn')
     reply(response, status, { error: 'Self-awake request could not be processed', code: stage === 'authorization' ? 'authorization_failed' : code,
       stage, requestId, ...(detail?.upstreamStatus ? { upstreamStatus: detail.upstreamStatus } : {}) })
   }
@@ -79,10 +80,12 @@ export class SelfAwakeHttp {
     const expected = serviceSignature(this.bridge!.identity.secret, 'monos', 'self_awake:submit', timestamp, nonce, request.url!, body)
     if (!timingSafeEqual(Buffer.from(signature, 'hex'), Buffer.from(expected, 'hex'))) return 'invalid_signature'
     try { this.bridge!.repository.consumeNonce(nonce, Date.now() + 600000); return undefined }
-    catch (error) {
-      if (error instanceof Error && error.message === 'Service nonce capacity reached') return 'nonce_capacity_reached'
-      const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
-      return typeof code === 'string' && code.startsWith('SQLITE_CONSTRAINT') ? 'nonce_replayed' : 'nonce_storage_error'
-    }
+    catch (error) { return nonceFailureCode(error) }
   }
+}
+
+function nonceFailureCode(error: unknown): string {
+  if (error instanceof Error && error.message === 'Service nonce capacity reached') return 'nonce_capacity_reached'
+  const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
+  return typeof code === 'string' && code.startsWith('SQLITE_CONSTRAINT') ? 'nonce_replayed' : 'nonce_storage_error'
 }

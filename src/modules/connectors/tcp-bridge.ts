@@ -1,3 +1,4 @@
+import { logDiagnostic } from '../logging/index.ts'
 import { randomUUID } from 'node:crypto'
 import { createServer, connect, isIP, type Socket } from 'node:net'
 import { mkdtemp, chmod, rm } from 'node:fs/promises'
@@ -32,7 +33,7 @@ export async function createTcpBridge(target: { address: string; port: number; l
     if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()))
     if (process.platform !== 'win32') await rm(directory, { recursive: true, force: true })
   })()
-  const abort = () => { void close().catch(() => { process.stderr.write('Connector network bridge cleanup failed\n') }) }
+  const abort = () => { void close().catch(error => { logDiagnostic({ event: 'connector.network_bridge.cleanup_failed', message: '连接器网络桥接清理失败。', error }, 'error') }) }
   try {
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject); server.listen(socket, () => { server.removeListener('error', reject); resolve() })

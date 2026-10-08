@@ -78,7 +78,10 @@ export function copyAccountRows(db: DatabaseSync, accountKey: string): void {
     "account_records",
     "account_ui_preferences",
   ])
-  const excluded = new Set(["realm_meta", "schema_migrations", "blobs", "blob_owners", "request_contents"])
+  // Target event/run triggers rebuild these projections from the imported account's facts.
+  // Copying source rowids can collide with generated rows or carry stale derived state.
+  const excluded = new Set(["realm_meta", "schema_migrations", "blobs", "blob_owners", "request_contents",
+    "self_awake_activations", "session_model_request_heads", "session_model_usage_heads", "self_awake_session_schedules"])
   let added = true
   while (added) {
     added = false
@@ -131,6 +134,16 @@ export function copyAccountRows(db: DatabaseSync, accountKey: string): void {
       changed += copy(db, table, predicates.join(" AND "))
     }
   } while (changed)
+  // Schedule delivery revisions include cancellation facts. Restore them after job triggers
+  // and match by session identity; source rowids are unrelated to generated target rows.
+  if (byName.has('self_awake_session_schedules')) {
+    db.prepare(`INSERT INTO main.self_awake_session_schedules(session_id,job_id,revision,published_revision,initial_anchor,legacy_request_id)
+      SELECT x.session_id,x.job_id,x.revision,0,x.initial_anchor,x.legacy_request_id FROM legacy.self_awake_session_schedules x
+      WHERE x.session_id IN (SELECT id FROM main.sessions)
+        AND (x.job_id IS NULL OR x.job_id IN (SELECT id FROM main.jobs))
+      ON CONFLICT(session_id) DO UPDATE SET job_id=excluded.job_id,revision=excluded.revision,
+        published_revision=0,initial_anchor=excluded.initial_anchor,legacy_request_id=excluded.legacy_request_id`).run()
+  }
   // Inserting sessions fires the target database's default app classification trigger.
   // Copy the source classification explicitly because the generic INSERT OR IGNORE keeps that default row.
   if (byName.has("session_classification")) {

@@ -15,14 +15,16 @@ function fixture(context: test.TestContext, external = false) {
   return { db, jobs, sessions, session, plan }
 }
 
-test('new wake replaces the pending wake across sessions; idempotent old replay cannot resurrect it', context => {
+test('new wake replaces only its session pending wake; other sessions and idempotent replay remain independent', context => {
   const f = fixture(context)
   const first = f.jobs.schedule(f.plan('first'))
-  const next = f.jobs.schedule({ ...f.plan('next'), sessionId: f.sessions.create('other').id })
+  const other = f.jobs.schedule({ ...f.plan('other'), sessionId: f.sessions.create('other').id })
+  const next = f.jobs.schedule(f.plan('next'))
   assert.equal(f.jobs.read(first.id).state, 'cancelled')
   assert.equal(f.jobs.schedule(f.plan('first')).state, 'cancelled')
-  assert.equal(f.jobs.list({ state: 'queued' }).length, 1)
-  assert.equal(f.jobs.list({ state: 'queued' })[0]!.id, next.id)
+  assert.equal(f.jobs.list({ state: 'queued' }).length, 2)
+  assert.equal(f.jobs.read(other.id).state, 'queued')
+  assert.deepEqual(new Set(f.jobs.list({ state: 'queued' }).map(job => job.id)), new Set([next.id, other.id]))
   assert.ok(next.createdAt > first.createdAt)
   assert.throws(() => f.db.connection.prepare("UPDATE jobs SET state='queued' WHERE id=?").run(first.id), /UNIQUE/)
 })
@@ -60,7 +62,7 @@ test('external ownership prevents local timer execution and duplicate external t
   const external = bridge.submit('user', 'external', 'hash', f.plan('external', 'monos'))
   assert.equal(f.jobs.read(local.id).state, 'cancelled')
   assert.equal(f.jobs.claim()?.id, external.id)
-  assert.equal(bridge.coalesce('user', 'duplicate', 'hash2')?.id, external.id)
+  assert.equal(bridge.coalesce('user', 'duplicate', 'hash2', f.session.id)?.id, external.id)
   assert.equal(bridge.existing('user', 'duplicate', 'hash2')?.id, external.id)
   assert.throws(() => bridge.existing('user', 'duplicate', 'changed'), /different request/)
   assert.equal(bridge.coalesce('another-user', 'other', 'hash'), undefined)

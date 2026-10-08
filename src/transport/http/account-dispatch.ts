@@ -3,6 +3,13 @@ import type { IncomingMessage, ServerResponse } from "node:http"
 import type { ServerConfig } from "../../bootstrap/config.ts"
 import type { AccountRuntimes } from "../../bootstrap/account-runtimes.ts"
 
+const selfAwakePaths = new Set(["/internal/self-awake/run", "/internal/self-awake/status"])
+const qqChannelPaths = new Set([
+  "/internal/channels/qq/turns", "/internal/channels/qq/status", "/internal/channels/qq/availability",
+  "/internal/channels/qq/permissions", "/internal/channels/qq/permission-mode", "/internal/channels/qq/upload",
+  "/internal/channels/qq/file", "/internal/channels/qq/stage",
+])
+
 export class AccountHttp {
   private readonly tasks = new Set<Promise<void>>()
   private closing = false
@@ -13,8 +20,8 @@ export class AccountHttp {
   handle(request: IncomingMessage, response: ServerResponse): boolean {
     const url = request.url ?? "",
       blob = url === "/blobs" || url.startsWith("/blobs/"),
-      selfAwake = url === "/internal/self-awake/run" || url === "/internal/self-awake/status",
-      qqChannel = url === "/internal/channels/qq/turns" || url === "/internal/channels/qq/status" || url === "/internal/channels/qq/availability" || url === "/internal/channels/qq/permissions" || url === "/internal/channels/qq/permission-mode" || url === "/internal/channels/qq/upload" || url === "/internal/channels/qq/file" || url === "/internal/channels/qq/stage",
+      selfAwake = selfAwakePaths.has(url),
+      qqChannel = qqChannelPaths.has(url),
       internal = selfAwake || qqChannel
     if (!blob && !internal) return false
     if (this.closing || this.tasks.size >= 64) {

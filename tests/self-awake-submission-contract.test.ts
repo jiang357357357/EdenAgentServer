@@ -7,7 +7,15 @@ test('MonOs submission rejects sender-owned job and character fields before side
     null as never, null as never, null as never)
   const request = { schema_version: 'self-awake.v1', user_id: '2', event_id: 'event', idempotency_key: 'request', context: { type: 'startup' } }
   for (const extra of [{ job_id: 'legacy-job' }, { assistant_id: null }, { character: { name: 'Eden' } }]) {
-    assert.throws(() => bridge.submit({ ...request, ...extra }), /Unrecognized key/)
+    assert.throws(() => bridge.submit({ ...request, ...extra }), (error: unknown) => {
+      assert.equal((error as { stage: string }).stage, 'submission_validation')
+      assert.match(String((error as Error).cause), /Unrecognized key/)
+      return true
+    })
   }
-  assert.throws(() => bridge.submit({ ...request, user_id: '1' }), /user mismatch/)
+  assert.throws(() => bridge.submit({ ...request, user_id: '1' }), (error: unknown) => {
+    assert.equal((error as { stage: string }).stage, 'owner_identity')
+    assert.match(String((error as Error).cause), /user mismatch/)
+    return true
+  })
 })

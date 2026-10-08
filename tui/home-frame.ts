@@ -2,7 +2,7 @@ import { cells, clip, fit, graphemes, wrap } from './screen-text.ts'
 import { panelLines } from './panel-frame.ts'
 import { serverVersion } from '../src/version.ts'
 import { edenWordmarkHeight, edenWordmarkRow, edenWordmarkWidth } from './eden-wordmark.ts'
-import type { ColoredLine, Frame, ScreenState } from './terminal-frame.ts'
+import type { ColoredLine, Frame, ScreenState } from './screen-state.ts'
 
 function centered(value: string, width: number, color: boolean, tone = '148;148;148'): string {
   const start = Math.max(0, Math.floor((width - cells(value)) / 2))
@@ -26,22 +26,33 @@ function modalRow(line: ColoredLine, width: number, start: number, modalWidth: n
     : `${' '.repeat(start)} ${content} ${right}`
 }
 
-export function renderHomeFrame(state: ScreenState, color: boolean): Frame {
-  const width = state.width, height = state.height
-  const rows = Array.from({ length: height }, () => fit('', width))
+type HomeLayout = { width: number; height: number; panelWidth: number; start: number; editorRows: number; panelTop: number }
+
+function homeLayout(state: ScreenState): HomeLayout {
+  const { width, height } = state
   const compact = height < 24
   const logoTop = compact ? (height < 17 ? 1 : 2) : Math.max(2, Math.floor(height * 0.17))
-  for (let index = 0; index < edenWordmarkHeight; index++) {
-    const start = Math.max(0, Math.floor((width - edenWordmarkWidth) / 2))
-    rows[logoTop + index] = `${' '.repeat(start)}${edenWordmarkRow(index, color)}${' '.repeat(Math.max(0, width - start - edenWordmarkWidth))}`
-  }
-
   const panelWidth = Math.min(78, width - 6)
   const start = Math.floor((width - panelWidth) / 2)
   const editorRows = height >= 24 ? 5 : height >= 17 ? 3 : 1
   const logoGap = compact ? (height < 18 ? 1 : 2) : 3
   const panelTop = Math.max(logoTop + edenWordmarkHeight + logoGap,
     Math.min(height - editorRows - 4, Math.floor(height * (compact ? 0.4 : 0.43))))
+  return { width, height, panelWidth, start, editorRows, panelTop }
+}
+
+function wordmark(rows: string[], state: ScreenState, color: boolean): void {
+  const { width, height } = state
+  const compact = height < 24
+  const logoTop = compact ? (height < 17 ? 1 : 2) : Math.max(2, Math.floor(height * 0.17))
+  for (let index = 0; index < edenWordmarkHeight; index++) {
+    const start = Math.max(0, Math.floor((width - edenWordmarkWidth) / 2))
+    rows[logoTop + index] = `${' '.repeat(start)}${edenWordmarkRow(index, color)}${' '.repeat(Math.max(0, width - start - edenWordmarkWidth))}`
+  }
+}
+
+function editor(rows: string[], state: ScreenState, layout: HomeLayout, color: boolean): { cursorRow: number; cursorColumn: number } {
+  const { width, panelWidth, start, editorRows, panelTop } = layout
   const editWidth = Math.max(1, panelWidth - 3)
   const lines = wrap(state.input, editWidth)
   const prefix = graphemes(state.input).slice(0, state.inputCursor).join('')
@@ -60,6 +71,14 @@ export function renderHomeFrame(state: ScreenState, color: boolean): Frame {
     const shown = !state.input && index === 0 ? placeholder : line
     rows[panelTop + index] = inputRow(shown, width, start, panelWidth, color, !state.input && index === 0)
   }
+  return { cursorRow: panelTop + 1 + cursorLine - editStart, cursorColumn: Math.min(width, start + 3 + cells(before.at(-1) ?? '')) }
+}
+
+function identityRow(rows: string[], state: ScreenState, layout: HomeLayout, color: boolean): void {
+  const { width, panelWidth, start, editorRows, panelTop } = layout
+  const editWidth = Math.max(1, panelWidth - 3)
+  const login = state.authStage === 'username' || state.authStage === 'password'
+  const pending = state.authStage === 'connecting' || state.authStage === 'server_error'
   const agent = state.agentLabel || (state.origin === 'mon' ? '伊甸园' : '尘世')
   const model = state.modelAvailable === false ? '未选择模型 · /models' : state.modelLabel || '模型待选择'
   const modelInfo = login ? 'Mon Core 登录 · 密码不保存' : pending ? '等待连接' : `${agent}  ·  ${model}`
@@ -67,12 +86,21 @@ export function renderHomeFrame(state: ScreenState, color: boolean): Frame {
   const left = clip(modelInfo, Math.max(1, editWidth - cells(identity) - 2))
   const detail = `${left}${' '.repeat(Math.max(2, editWidth - cells(left) - cells(identity)))}${identity}`
   rows[panelTop + editorRows] = inputRow(detail, width, start, panelWidth, color, true)
+}
+
+function notices(rows: string[], state: ScreenState, layout: HomeLayout, color: boolean): void {
+  const { width, panelWidth, start, editorRows, panelTop } = layout
+  const login = state.authStage === 'username' || state.authStage === 'password'
+  const pending = state.authStage === 'connecting' || state.authStage === 'server_error'
   const latestError = state.entries.filter(entry => entry.label === '错误').at(-1)?.text
   const notice = state.authMessage || latestError || ''
   if (notice) rows[panelTop + editorRows + 2] = centered(clip(notice.replace(/\n/g, ' '), panelWidth), width, color, '224;108;117')
   const hint = login ? 'Enter 继续   Esc 返回' : pending ? '/retry 重连   Ctrl+C 退出' : '输入 / 查看命令   Ctrl+P 搜索'
   rows[panelTop + editorRows + 3] = fit(`${' '.repeat(Math.max(0, start + panelWidth - cells(hint)))}${hint}`, width)
+}
 
+function decorations(rows: string[], state: ScreenState, layout: HomeLayout, color: boolean): void {
+  const { width, height, start, editorRows, panelTop } = layout
   if (height >= 28 && height - 4 > panelTop + editorRows + 3) {
     const tip = 'Ctrl+S 切换会话，Ctrl+P 打开命令面板'
     const tipStart = Math.max(0, start + 6)
@@ -86,8 +114,10 @@ export function renderHomeFrame(state: ScreenState, color: boolean): Frame {
   const right = `v${serverVersion}`
   const footer = `${location}${' '.repeat(Math.max(1, width - cells(location) - cells(right)))}${right}`
   rows[height - 1] = color ? `\x1b[38;2;128;128;132m${footer}\x1b[0m` : fit(footer, width)
+}
 
-  if (state.panel) {
+function modalFrame(rows: string[], state: ScreenState & { panel: NonNullable<ScreenState['panel']> }, layout: HomeLayout, color: boolean): Frame {
+  const { width, height, panelTop } = layout
     const modalWidth = Math.min(68, width - 8)
     const panel = panelLines(state.panel, modalWidth - 2, Math.min(13, height - 7))
     const modalTop = Math.max(2, Math.floor((height - panel.length - 2) / 2))
@@ -99,7 +129,10 @@ export function renderHomeFrame(state: ScreenState, color: boolean): Frame {
       cursorRow: state.panel.searchable ? modalTop + 3 : height,
       cursorColumn: state.panel.searchable ? Math.min(modalStart + modalWidth - 2, modalStart + 4 + cells(state.panel.query ?? '')) : 1,
       transcriptHeight: Math.max(1, height - panelTop - 11) }
-  }
+}
+
+function slashMenu(rows: string[], state: ScreenState, layout: HomeLayout, color: boolean): void {
+  const { width, height, panelWidth, start, editorRows, panelTop } = layout
   if (state.slashSuggestions?.items.length) {
     const suggestions = state.slashSuggestions
     const top = panelTop + editorRows + 2
@@ -115,6 +148,17 @@ export function renderHomeFrame(state: ScreenState, color: boolean): Frame {
       }
     }
   }
-  return { lines: rows, cursorRow: panelTop + 1 + cursorLine - editStart,
-    cursorColumn: Math.min(width, start + 3 + cells(before.at(-1) ?? '')), transcriptHeight: Math.max(1, height - panelTop - 11) }
+}
+
+export function renderHomeFrame(state: ScreenState, color: boolean): Frame {
+  const layout = homeLayout(state)
+  const rows = Array.from({ length: layout.height }, () => fit('', layout.width))
+  wordmark(rows, state, color)
+  const cursor = editor(rows, state, layout, color)
+  identityRow(rows, state, layout, color)
+  notices(rows, state, layout, color)
+  decorations(rows, state, layout, color)
+  if (state.panel) return modalFrame(rows, { ...state, panel: state.panel }, layout, color)
+  slashMenu(rows, state, layout, color)
+  return { lines: rows, ...cursor, transcriptHeight: Math.max(1, layout.height - layout.panelTop - 11) }
 }

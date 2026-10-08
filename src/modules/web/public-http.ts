@@ -2,6 +2,9 @@ import { lookup } from 'node:dns/promises'
 import http from 'node:http'
 import https from 'node:https'
 import { isIP } from 'node:net'
+import { isPublicAddress } from './public-address.ts'
+
+export { isPublicAddress } from './public-address.ts'
 
 export interface PublicResponse {
   url: URL
@@ -111,21 +114,4 @@ async function requestOnce(url: URL, options: PublicRequest & { method: 'GET' | 
     if (options.body) request.write(options.body)
     request.end()
   })
-}
-
-export function isPublicAddress(address: string): boolean {
-  if (isIP(address) === 4) {
-    const [a, b, c] = address.split('.').map(Number)
-    return !(a === 0 || a === 10 || a === 127 || (a === 100 && b! >= 64 && b! <= 127)
-      || (a === 169 && b === 254) || (a === 172 && b! >= 16 && b! <= 31) || (a === 192 && b === 0)
-      || (a === 192 && b === 168) || (a === 198 && (b === 18 || b === 19)) || (a === 192 && b === 0 && c === 2)
-      || (a === 198 && b === 51 && c === 100) || (a === 203 && b === 0 && c === 113) || a! >= 224)
-  }
-  if (isIP(address) !== 6) return false
-  const value = address.toLowerCase()
-  // IPv4-mapped IPv6 may encode private IPv4 addresses in hexadecimal form.
-  if (value.includes(':ffff:')) return false
-  return !(value === '::' || value === '::1' || value.startsWith('fc') || value.startsWith('fd')
-    || /^fe[89ab]/.test(value) || value.startsWith('ff') || value.startsWith('2001:db8:')
-    || value.startsWith('2001:0:') || value.startsWith('2001:2:') || value.startsWith('2002:'))
 }

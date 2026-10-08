@@ -12,7 +12,9 @@ import type { ModelService } from '../models/index.ts'
 import type { JobRepository } from '../jobs/index.ts'
 import { SubagentRepository } from './repository.ts'
 export class SubagentService {
-  constructor(readonly repository: SubagentRepository, private readonly sessions: SessionService, private readonly models: ModelService, private readonly jobs: JobRepository, readonly mailbox: SubagentMailbox, private readonly skills?: SkillRepository) { }
+  constructor(readonly repository: SubagentRepository, private readonly sessions: SessionService, private readonly models: ModelService, private readonly jobs: JobRepository, readonly mailbox: SubagentMailbox,
+    private readonly skills?: SkillRepository | ((sessionId: string) => SkillRepository)) { }
+  private skillsFor(sessionId: string) { return typeof this.skills === 'function' ? this.skills(sessionId) : this.skills }
   private readonly stopping = new Set<string>()
   async stopChildren(sessionId: string): Promise<void> {
     if (this.stopping.has(sessionId)) return
@@ -38,7 +40,7 @@ export class SubagentService {
     const input = agentSpawnSchema.parse(raw), key = `subagent:${input.sessionId}:${input.idempotencyKey}`
     const existing = this.repository.existing(key, spawnRequestHash(input.sessionId, input.taskName, input.role, input.message, input.maxTurns, input.timeoutMs, input.maxModelRequests, input.maxToolCalls, input.maxTokens, input.maxCostMicrousd, input.actorId))
     if (existing) return existing
-    const definition = this.repository.roles().read(input.role), skillSnapshots = captureRoleSkills(definition.skills, this.skills)
+    const definition = this.repository.roles(input.sessionId).read(input.role), skillSnapshots = captureRoleSkills(definition.skills, this.skillsFor(input.sessionId))
     this.assertParentActive(input.sessionId)
     const requestedPolicy = rolePolicy(input.role, definition), inheritedPolicy = this.repository.policy(input.sessionId)
     assertRoleSkillPolicy(skillSnapshots, inheritedPolicy ? narrowPolicy(inheritedPolicy, requestedPolicy) : requestedPolicy)
@@ -83,8 +85,9 @@ export class SubagentService {
   }
   restorePolicy(raw: unknown) {
     const input = subagentPolicyRecoverySchema.parse(raw)
-    const definition = this.repository.roles().read(input.role)
-    return this.repository.restorePolicy(input, captureRoleSkills(definition.skills, this.skills))
+    const sessionId = this.repository.read(input.agentId).childSessionId
+    const definition = this.repository.roles(sessionId).read(input.role)
+    return this.repository.restorePolicy(input, captureRoleSkills(definition.skills, this.skillsFor(sessionId)))
   }
   recoveredModelSources(id: string) { return this.repository.modelRecovery(this.models).sources(id) }
   previewRecoveredModel(id: string, actorId?: string | number) { return this.repository.modelRecovery(this.models).preview(id, actorId) }

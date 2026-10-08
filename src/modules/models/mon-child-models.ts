@@ -33,6 +33,12 @@ export class MonChildModels {
     })
   }
   captureConnection(sessionId: string) { return this.connectionHash(sessionId) }
+  /** Same-account service renewal keeps independently confirmed model entities valid. */
+  renewCredential(sessionId: string, base: string, previous: string, next: string) {
+    const hash = (token: string) => createHash('sha256').update(JSON.stringify({ core_base_url: base, core_token: token })).digest('hex')
+    this.database.connection.prepare('UPDATE mon_child_models SET connection_hash=? WHERE session_id=? AND connection_hash=?')
+      .run(hash(next), sessionId, hash(previous))
+  }
   resolve(sessionId: string, key: string): ModelBinding | undefined {
     const row = this.database.connection.prepare('SELECT binding_json,connection_hash FROM mon_child_models WHERE session_id=? AND model_key=?').get(sessionId, key)
     if (!row) return undefined

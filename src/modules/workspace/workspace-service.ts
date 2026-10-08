@@ -1,6 +1,6 @@
 import os from 'node:os'
 import { open, readdir } from 'node:fs/promises'
-import { constants } from 'node:fs'
+import { constants, mkdirSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import type { EdenDatabase } from '@eden/store'
@@ -8,19 +8,29 @@ import { WorkspaceRepository } from './workspace-repository.ts'
 import { workspaceRoot, workspaceFile } from './workspace-path.ts'
 import { WorkspaceMutationQueue } from './mutation-queue.ts'
 import { readWorkspacePage } from './workspace-read-page.ts'
+import { WorkspaceLocation, type WorkspaceInfo } from './workspace-location.ts'
+
+export interface WorkspaceSnapshot { root: string; revision: string }
+const mutations = new WorkspaceMutationQueue()
 
 export class WorkspaceService {
   private readonly repository: WorkspaceRepository
-  private readonly mutations = new WorkspaceMutationQueue()
-  private readonly modelReads = new Map<string, Map<string, string>>()
+  private readonly modelReads: Map<string, Map<string, string>>
+  private location: WorkspaceLocation
+  private resolutionKey: string
 
-  async readForModel(_scope: string, requested: string, offset = 0, limit = 65536) {
-    return readWorkspacePage(this.root(), requested, offset, limit)
+  async readForModel(scope: string, requested: string, offset = 0, limit = 65536) {
+    const root = this.root(), filename = workspaceFile(root, requested)
+    return readWorkspacePage(root, requested, offset, limit, hash => this.rememberHash(scope, filename, hash))
   }
 
   rememberWrite(scope: string, requested: string, content: string) {
+    this.rememberHash(scope, workspaceFile(this.root(), requested), createHash('sha256').update(content).digest('hex'))
+  }
+
+  private rememberHash(scope: string, filename: string, hash: string): void {
     const reads = this.modelReads.get(scope) ?? new Map<string, string>()
-    reads.set(workspaceFile(this.root(), requested), createHash('sha256').update(content).digest('hex'))
+    reads.set(filename, hash)
     this.modelReads.set(scope, reads)
     if (this.modelReads.size > 512) this.modelReads.delete(this.modelReads.keys().next().value!)
   }
@@ -38,45 +48,150 @@ export class WorkspaceService {
       throw error
     }
   }
-  constructor(database: EdenDatabase, private readonly protectedRoots: readonly string[]) {
-    this.repository = new WorkspaceRepository(database)
+  constructor(private readonly database: EdenDatabase, private readonly protectedRoots: readonly string[], private readonly defaultWorkspaceRoot?: string,
+    private readonly sessionId?: string, modelReads?: Map<string, Map<string, string>>) {
+    this.modelReads = modelReads ?? new Map()
+    this.repository = new WorkspaceRepository(database, sessionId)
+    const resolution = this.repository.defaultResolution()
+    this.location = new WorkspaceLocation(defaultWorkspaceRoot, resolution)
+    this.resolutionKey = JSON.stringify(resolution) ?? ''
+    this.repository.initialize(this.location.defaultPath, this.location.provenDefault, this.location.resolution)
+    const info = this.info()
+    if (info.kind === 'managed' && info.defaultPath && info.status !== 'invalid') {
+      this.repository.project(info.path, this.location.resolution)
+    }
+  }
+
+  forSession(sessionId: string): WorkspaceService {
+    if (this.sessionId === sessionId) return this
+    return new WorkspaceService(this.database, this.protectedRoots, this.defaultWorkspaceRoot, sessionId, this.modelReads)
+  }
+
+  /** An explicitly bound shared-folder engine retains its directory independently of tab selection. */
+  pinned() {
+    return this.pin(this.info())
+  }
+
+  /** Restore registered background work without selecting or creating a session directory. */
+  restorePinned(selection: { kind: 'managed' | 'external'; root: string }) {
+    const info = new WorkspaceLocation(this.defaultWorkspaceRoot).info(selection.kind === 'managed'
+      ? { version: 1, kind: 'managed', id: 'default' } : { version: 1, kind: 'external', path: selection.root }, selection.root)
+    return this.pin(info)
+  }
+
+  private pin(info: WorkspaceInfo) {
+    if (info.status !== 'ready') throw new Error(info.error ?? 'Workspace is unavailable')
+    const root = info.path
+    const check = () => {
+      if (workspaceRoot(root, this.protectedRoots) !== root) throw new Error('Shared workspace directory was redirected')
+      return root
+    }
+    return {
+      info: () => ({ ...info }), root: check,
+      mutate: <T>(expected: string, signal: AbortSignal, work: () => Promise<T>) => mutations.run(signal, async () => {
+        if (expected !== check()) throw new Error('Shared workspace target changed')
+        return work()
+      }, { path: root, kind: 'directory' }),
+    }
+  }
+
+  snapshot(command = false): WorkspaceSnapshot {
+    return { root: command ? this.commandRoot() : this.root(), revision: this.repository.revision() }
+  }
+
+  assertSnapshot(snapshot: WorkspaceSnapshot, command = false): void {
+    const current = this.snapshot(command)
+    if (snapshot.root !== current.root || snapshot.revision !== current.revision)
+      throw new Error('Session workspace changed after permission request')
   }
 
   info() {
-    const root = this.repository.read()
-    return { name: root ? path.basename(root) : 'No workspace selected', path: root ?? '' }
+    const resolution = this.repository.defaultResolution()
+    const key = JSON.stringify(resolution) ?? ''
+    if (key !== this.resolutionKey) {
+      this.location = new WorkspaceLocation(this.defaultWorkspaceRoot, resolution)
+      this.resolutionKey = key
+    }
+    return this.location.info(this.repository.selection(), this.repository.read())
+  }
+
+  /** Only for optional directory discovery; execution must call root() or commandRoot(). */
+  availableRoot(): string {
+    const info = this.info()
+    return info.status === 'ready' ? info.path : ''
   }
 
   root(): string {
-    const saved = this.repository.read()
-    if (!saved) throw new Error('Select a workspace first')
-    const canonical = workspaceRoot(saved, this.protectedRoots)
-    if (canonical !== saved) throw new Error('Workspace path changed; select it again')
-    return canonical
+    const info = this.info()
+    if (info.status === 'unselected') throw new Error('Select a workspace first')
+    if (info.status !== 'ready') throw new Error(info.error ?? 'Workspace is unavailable')
+    return info.path
   }
 
   commandRoot(): string {
-    return this.repository.read() ? this.root() : workspaceRoot(os.homedir(), [])
+    return this.info().status === 'unselected' ? workspaceRoot(os.homedir(), []) : this.root()
   }
 
-  async mutateCommand<T>(root: string, signal: AbortSignal, work: () => Promise<T>): Promise<T> {
-    return this.mutations.run(signal, async () => {
+  async mutateCommand<T>(root: string, signal: AbortSignal, work: () => Promise<T>, snapshot?: WorkspaceSnapshot): Promise<T> {
+    return mutations.run(signal, async () => {
       if (this.commandRoot() !== root) throw new Error('Workspace changed after permission request')
+      if (snapshot) this.assertSnapshot(snapshot, true)
       return work()
-    })
+    }, { path: root, kind: 'directory' })
   }
 
   switch(root: string) {
     const canonical = workspaceRoot(root, this.protectedRoots)
     this.repository.set(canonical)
+    this.clearReads()
     return { currentPath: canonical, pendingPath: null, pendingSessionId: null, requestedAt: null, updatedAt: Date.now() }
   }
 
+  useDefault() {
+    const selection = { version: 1, kind: 'managed', id: 'default' } as const
+    let location = new WorkspaceLocation(this.defaultWorkspaceRoot)
+    let info = location.info(selection)
+    if (info.status === 'missing' && this.defaultWorkspaceRoot) {
+      // Only an explicit recovery action may recreate the leaf, never missing ancestors.
+      mkdirSync(this.defaultWorkspaceRoot, { mode: 0o700 })
+      location = new WorkspaceLocation(this.defaultWorkspaceRoot)
+      info = location.info(selection)
+    }
+    if (info.status !== 'ready') throw new Error(info.error ?? 'Default workspace is unavailable')
+    this.repository.select(selection, info.path, location.resolution)
+    this.clearReads()
+    return { currentPath: info.path, pendingPath: null, pendingSessionId: null, requestedAt: null, updatedAt: Date.now() }
+  }
+
   async mutate<T>(root: string, signal: AbortSignal, work: () => Promise<T>): Promise<T> {
-    return this.mutations.run(signal, async () => {
+    return mutations.run(signal, async () => {
       if (this.root() !== root) throw new Error('Workspace changed after permission request')
       return work()
-    })
+    }, { path: root, kind: 'directory' })
+  }
+
+  async mutateFile<T>(snapshot: WorkspaceSnapshot, requested: string, signal: AbortSignal, work: () => Promise<T>): Promise<T> {
+    this.assertSnapshot(snapshot)
+    const filename = this.writeTarget(snapshot.root, requested)
+    return mutations.run(signal, async () => {
+      this.assertSnapshot(snapshot)
+      if (this.writeTarget(snapshot.root, requested) !== filename) throw new Error('File target changed after permission request')
+      return work()
+    }, { path: filename, kind: 'file' })
+  }
+
+  private writeTarget(root: string, requested: string): string {
+    try { return workspaceFile(root, requested) }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      const parent = workspaceFile(root, path.dirname(requested))
+      return path.join(realpathSync(parent), path.basename(requested))
+    }
+  }
+
+  private clearReads(): void {
+    if (!this.sessionId) { this.modelReads.clear(); return }
+    for (const scope of this.modelReads.keys()) if (scope.startsWith(JSON.stringify([this.sessionId]).slice(0, -1) + ',')) this.modelReads.delete(scope)
   }
 
   async list(requested: string) {

@@ -27,10 +27,10 @@ export function selfAwakeTools(repository: SelfAwakeRepository, jobs: JobReposit
     parameters: toJson(z.toJSONSchema(selfAwakeToolTimerSchema, { io: 'input' })) as Record<string, JsonValue>,
     async execute(raw, context) {
       const input = selfAwakeToolTimerSchema.parse(raw)
-      repository.timerPublication.assertAvailable()
+      repository.timerPublication.assertAvailable(true)
       const requestedAt = input.at ?? Date.now() + input.afterMinutes! * 60000
       if (requestedAt <= Date.now() || requestedAt > Date.now() + 10080 * 60000) throw new Error('自醒时间必须在未来七天以内')
-      const deadline = repository.deadline()
+      const deadline = repository.deadline(Date.now(), sessionId)
       const dueAt = Math.max(Date.now() + 1000, Math.min(requestedAt, deadline))
       const parent = repository.parentJob(sessionId, turnId)
       const depth = parent ? parent.depth + 1 : 0
@@ -38,9 +38,9 @@ export function selfAwakeTools(repository: SelfAwakeRepository, jobs: JobReposit
       await permissions.request({ ...context, sessionId, turnId }, 'job.schedule', `self-awake:${sessionId}`, toJson({ dueAt, reason: input.reason, depth }))
       context.signal.throwIfAborted()
       const job = jobs.schedule({ kind: 'self_awake', sessionId, dueAt,
-        payload: { prompt: input.reason, trigger: { type: 'scheduled', source: 'agent', reason: input.reason } },
+        payload: { prompt: input.reason, scheduleScope: 'session', trigger: { type: 'scheduled', source: 'agent', reason: input.reason } },
         key: `self-awake:${sessionId}:${turnId}:${context.callId}`, causationId: parent?.id ?? turnId, depth })
-      repository.timerPublication.publish()
+      repository.timerPublication.publish(sessionId)
       return timerReceipt(job, requestedAt, deadline, repository.context(sessionId, turnId).run?.request)
     },
   }, {

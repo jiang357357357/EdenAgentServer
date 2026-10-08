@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { modelCatalogSchema } from '@eden/api'
 import type { EdenDatabase } from '@eden/store'
+import { migrateDestination } from './destination.ts'
 
 const connectionSchema = modelCatalogSchema.pick({ coreBaseUrl: true, coreToken: true })
 export type MonConnection = z.infer<typeof connectionSchema>
@@ -16,6 +17,8 @@ export class MonConnectionRepository {
     z.uuid().parse(sessionId)
     const connection = connectionSchema.parse(value)
     if (!this.database.connection.prepare("SELECT 1 FROM sessions WHERE id=? AND status='active'").get(sessionId)) throw new Error('Core connection requires an active session')
+    const previous = this.lookup(sessionId, false)
+    if (previous) migrateDestination(this.database, sessionId, previous)
     this.database.connection.prepare(`INSERT INTO mon_connections(session_id,core_base_url,core_token,updated_at) VALUES (?,?,?,?)
       ON CONFLICT(session_id) DO UPDATE SET core_base_url=excluded.core_base_url,core_token=excluded.core_token,updated_at=excluded.updated_at`)
       .run(sessionId, connection.coreBaseUrl, connection.coreToken, Date.now())

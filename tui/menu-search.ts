@@ -1,4 +1,4 @@
-import type { ScreenMenuItem } from './terminal-frame.ts'
+import type { ScreenMenuItem } from './screen-state.ts'
 
 function score(value: string, query: string): number {
   const haystack = value.toLocaleLowerCase()

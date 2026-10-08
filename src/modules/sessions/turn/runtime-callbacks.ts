@@ -1,13 +1,14 @@
 import { chargeSubagentBudget, assertSubagentTool, recordSubagentRequest, recordSubagentResponse } from '../../subagent-execution/index.ts'
 import { requestContext } from './request-context.ts'
 import { randomUUID } from 'node:crypto'
-import type { RuntimeCallbacks } from '@eden/runtime-pi'
+import { RuntimePersistenceError, type RuntimeCallbacks } from '@eden/runtime-pi'
 import { toJson } from '@eden/api'
 import type { JsonValue } from '@eden/api'
 import type { SessionInput } from '../contracts.ts'
 import type { SessionRepository } from '../session-repository.ts'
 import { SignalRepository } from '../input/signal-repository.ts'
 import { attachmentMessage } from '../../attachments/index.ts'
+import { StreamCoalescer } from './stream-coalescer.ts'
 
 export interface RuntimeCallbackScope {
   checkpoint?: RuntimeCallbacks['checkpoint']
@@ -37,28 +38,32 @@ export function runtimeCallbacks(repository: SessionRepository, input: SessionIn
     repository.events.append(input.sessionId, input.turnId, kind, scoped(payload))
   }
   const scoped = (payload: JsonValue): JsonValue => scope.actor ? { ...(payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : { value: payload }), actor: scope.actor } : payload
+  const stream = new StreamCoalescer(append)
   return {
     async checkpoint(snapshot) {
-      if (scope.checkpoint) await scope.checkpoint(snapshot)
-      else repository.saveCheckpoint(snapshot, input.turnId)
+      stream.flush()
+      try {
+        if (scope.checkpoint) await scope.checkpoint(snapshot)
+        else repository.saveCheckpoint(snapshot, input.turnId)
+      } catch (error) { throw new RuntimePersistenceError('会话检查点提交失败', error) }
     },
     async event(kind, payload) {
+      if (kind !== 'message_update') stream.flush()
       const consumed = kind === 'message_end' && signals.consume(input.sessionId, input.turnId, payload)
       const value: Record<string, JsonValue> = typeof payload === 'object' && payload !== null && !Array.isArray(payload) ? { ...payload } : { value: payload }
       if (kind === 'message_start') messageId = randomUUID()
       if (kind.startsWith('message_') && messageId) value.messageId = messageId
       const namespace = messageNamespace(kind, value, scope, consumed)
       const projected = namespace === 'agent' && !initialUserEnded && !consumed && kind.startsWith('message_') ? attachmentMessage(value, input.metadata) : value
-      append(`${namespace}.${kind}`, projected)
+      await stream.event(`${namespace}.${kind}`, projected)
       if (kind === 'message_end' && messageRole(value) === 'user') initialUserEnded = true
     },
     async request(snapshot) {
+      stream.flush()
       const event = repository.database.transaction(() => {
         const value = snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot) ? snapshot : {}
-        const previous = repository.database.connection.prepare(`SELECT json_extract(payload_json,'$.contextEstimate') AS context_estimate FROM events
-          WHERE session_id=? AND kind='model.request' AND COALESCE(CAST(json_extract(payload_json,'$.actor.assistantID') AS TEXT),'')=?
-          ORDER BY seq DESC LIMIT 1`).get(input.sessionId, String(scope.actor?.assistantID ?? '')) as { context_estimate: string | null } | undefined
-        const contextEstimate = requestContext(value, input.metadata, previous?.context_estimate ? JSON.parse(previous.context_estimate) : undefined, scope.actor?.assistantID)
+        const previous = repository.events.latestActorContextEstimate(input.sessionId, scope.actor?.assistantID)
+        const contextEstimate = requestContext(value, input.metadata, previous, scope.actor?.assistantID)
         contexts.set(String(value.requestId), contextEstimate)
         chargeSubagentBudget(repository.database, input.sessionId, 'model', value.costConfigured === true)
         recordSubagentRequest(repository.database, input.sessionId, input.turnId, snapshot)
@@ -67,6 +72,7 @@ export function runtimeCallbacks(repository: SessionRepository, input: SessionIn
       repository.events.publish(event)
     },
     async response(snapshot) {
+      stream.flush()
       const value = snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot) ? snapshot : {}
       const message = value.message && typeof value.message === 'object' && !Array.isArray(value.message) ? value.message : {}
       const event = repository.database.transaction(() => {
@@ -81,6 +87,7 @@ export function runtimeCallbacks(repository: SessionRepository, input: SessionIn
       repository.events.publish(event)
     },
     async beforeTool(name, callId, revision, args) {
+      stream.flush()
       const event = repository.database.transaction(() => {
         assertSubagentTool(repository.database, input.sessionId, name)
         chargeSubagentBudget(repository.database, input.sessionId, 'tool')
@@ -91,6 +98,7 @@ export function runtimeCallbacks(repository: SessionRepository, input: SessionIn
       repository.events.publish(event)
     },
     async afterTool(callId, result, failed, outcome = failed ? 'failed' : 'completed') {
+      stream.flush()
       const event = repository.database.transaction(() => {
         repository.database.connection.prepare('UPDATE tool_operations SET state=?, result_json=?, error_json=?, updated_at=? WHERE id=?')
           .run(outcome, JSON.stringify(result), failed ? JSON.stringify(result) : null, Date.now(), `${input.turnId}:${callId}`)

@@ -10,8 +10,11 @@ import type { RuntimeOrigin } from '@eden/api'
 import type { RuntimeModel } from '@eden/runtime-pi'
 import { configuredExternalCommandSandbox } from '@eden/execution'
 import { webConfig, type WebConfig } from '../modules/web/index.ts'
+import { workspaceIdentity } from './workspace-identity.ts'
 
 export interface ServerConfig {
+  monWorkspaceRoot?: string
+  workspaceId?: string
   account?: import('../modules/accounts/index.ts').Account
   coreBaseUrl?: string | undefined
   defaultWorkspaceRoot?: string
@@ -38,10 +41,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
   const defaultPort = origin === 'mon' ? 40092 : 40093
   const port = z.coerce.number().int().min(0).max(65535).parse(env.EDEN_AGENT_PORT ?? defaultPort)
   const dataRoot = path.resolve(env.EDEN_AGENT_DATA_ROOT ?? path.join(cwd, 'Data', 'realms', origin))
-  const monConfig = monServiceConfig(origin, dataRoot, env)
+  const workspace = workspaceIdentity(env, cwd)
+  const monConfig = monServiceConfig(origin, dataRoot, env, workspace.monWorkspaceRoot)
   const token = capabilityToken(env)
   const allowedOrigins = (env.EDEN_AGENT_ALLOWED_ORIGINS ?? 'http://127.0.0.1:40091,http://localhost:40091,edenagent://app').split(',').map(value => value.trim()).filter(Boolean)
   return {
+    ...workspace,
     origin, host: '127.0.0.1', port, dataRoot, databasePath: path.join(dataRoot, 'eden-agent.db'), token,
     allowedOrigins, coreBaseUrl: origin === 'mon' ? monConfig.env.MON_CORE_BASE_URL ?? 'http://127.0.0.1:40011' : undefined, monIdentity: monServiceIdentity(origin, monConfig.env), selfAwakeScheduleFile: monConfig.scheduleStateFile, maxBlobBytes: z.coerce.number().int().min(1).max(1024 * 1024 * 1024).parse(env.EDEN_AGENT_MAX_BLOB_BYTES ?? 32 * 1024 * 1024),
     externalCommandSandbox: configuredExternalCommandSandbox(env, origin),

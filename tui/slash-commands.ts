@@ -1,5 +1,5 @@
 import { searchMenu } from './menu-search.ts'
-import type { ScreenMenuItem } from './terminal-frame.ts'
+import type { ScreenMenuItem } from './screen-state.ts'
 
 export interface SlashCommand extends ScreenMenuItem { argument?: string }
 

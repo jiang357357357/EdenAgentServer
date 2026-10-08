@@ -57,20 +57,21 @@ test('restart interrupts outstanding signals and holds future inputs behind an u
   } finally { await second.close(); database.close() }
 })
 
-test('unstarted queued input resumes from its persisted environment snapshot', async () => {
+test('unstarted queued input keeps its original environment while restart holds it for explicit review', async () => {
   const database = new EdenDatabase(':memory:', 'local')
   const repository = new SessionRepository(database, 'local')
   const session = repository.create('Pending')
   const inputs = new InputRepository(database, repository.events)
-  inputs.enqueue(session.id, 'Saved input', 'one', { environment: { timezone: 'UTC' }, participants: [] })
+  const queued = inputs.enqueue(session.id, 'Saved input', 'one', { environment: { timezone: 'UTC' }, participants: [] })
   repository.setMetadata(session.id, [], { timezone: 'Asia/Shanghai' })
   const model = await recordedModel([{ text: 'Recovered queued input' }])
   const sessions = new SessionService(repository, model.config)
   try {
     sessions.resumePending()
     await sessions.waitForIdle(session.id)
-    assert.equal(model.requests.length, 1)
-    assert.match(JSON.stringify(model.requests[0]), /UTC/)
-    assert.doesNotMatch(JSON.stringify(model.requests[0]), /Asia\/Shanghai/)
+    assert.equal(model.requests.length, 0)
+    const held = database.connection.prepare('SELECT state,metadata_json FROM inputs WHERE id=?').get(queued.inputId)!
+    assert.equal(held.state, 'held')
+    assert.equal(JSON.parse(String(held.metadata_json)).environment.timezone, 'UTC')
   } finally { await sessions.close(); await model.close(); database.close() }
 })

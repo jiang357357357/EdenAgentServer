@@ -5,6 +5,7 @@ import { recordedModel } from '@eden/runtime-pi/testing'
 import { SessionRepository, SessionService } from '../src/modules/sessions/index.ts'
 import { ModelService } from '../src/modules/models/index.ts'
 import { CompanionTurnCoordinator, CompanionSessionExtension, DirectorRunRepository } from '../src/modules/director/index.ts'
+import { accountKey, withAccount } from '../src/modules/accounts/index.ts'
 
 for (const kind of ['steer', 'follow_up'] as const) {
   test(`multi-actor ${kind} is consumed by the active actor and observed by the next actor`, async () => {
@@ -24,7 +25,9 @@ for (const kind of ['steer', 'follow_up'] as const) {
       async execute() { entered(); await blocked; return null } }]
     const extension = new CompanionSessionExtension(coordinator, models, tools)
     const sessions = new SessionService(repository, id => models.resolve(id), tools, undefined, extension)
-    const session = repository.create('Signals to actors', [{ assistantId: 1 }, { assistantId: 2 }])
+    const coreBaseUrl = 'http://127.0.0.1:1', userId = 'signals-test-account'
+    const session = withAccount({ coreBaseUrl, userId, key: accountKey(coreBaseUrl, userId) },
+      () => repository.create('Signals to actors', [{ assistantId: 1 }, { assistantId: 2 }]))
     models.bindActors(session.id, [first, second].map((model, index) => ({ assistantId: index + 1, characterId: index + 1,
       main: { model: model.config, entityId: index + 1, label: `Actor ${index + 1}` } })), first.config)
     try {

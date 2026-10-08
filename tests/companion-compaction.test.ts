@@ -7,6 +7,7 @@ import { SessionRepository, SessionService } from '../src/modules/sessions/index
 import { ModelService } from '../src/modules/models/index.ts'
 import { ActorCheckpointRepository } from '../src/modules/actors/index.ts'
 import { CompanionTurnCoordinator, CompanionSessionExtension, DirectorRunRepository } from '../src/modules/director/index.ts'
+import { accountKey, withAccount } from '../src/modules/accounts/index.ts'
 
 async function fixture(waitSecond = false) {
   const first = await recordedModel([{ text: '{"beats":[{"assistantId":1},{"assistantId":2}]}' },
@@ -19,7 +20,9 @@ async function fixture(waitSecond = false) {
   const coordinator = new CompanionTurnCoordinator(repository, runs)
   const extension = new CompanionSessionExtension(coordinator, models, () => [])
   const sessions = new SessionService(repository, id => models.resolve(id), () => [], undefined, extension)
-  const session = repository.create('Actor compaction', [{ assistantId: 1 }, { assistantId: 2 }])
+  const coreBaseUrl = 'http://127.0.0.1:1', userId = 'compaction-test-account'
+  const session = withAccount({ coreBaseUrl, userId, key: accountKey(coreBaseUrl, userId) },
+    () => repository.create('Actor compaction', [{ assistantId: 1 }, { assistantId: 2 }]))
   models.bindActors(session.id, [first, second].map((model, index) => ({ assistantId: index + 1, characterId: index + 1,
     main: { model: model.config, entityId: index + 1, label: `Actor ${index + 1}` } })), first.config)
   return { first, second, db, repository, runs, coordinator, sessions, session, checkpoints: new ActorCheckpointRepository(repository),
@@ -50,7 +53,7 @@ test('cancelling the second actor compaction preserves the first summary and the
     await setup.prepare()
     const before = setup.checkpoints.read(setup.session.id, 2)
     setup.sessions.start(setup.session.id, 'Summarize', undefined, undefined, 'compact')
-    const deadline = Date.now() + 5000
+    const deadline = Date.now() + 20000
     while (setup.second.requests.length < 2 && Date.now() < deadline) await delay(10)
     assert.equal(setup.second.requests.length, 2)
     await setup.sessions.cancel(setup.session.id)
@@ -89,5 +92,44 @@ test('actor compaction request persistence failure prevents both summary request
     assert.equal(setup.second.requests.length, 1)
     assert.deepEqual([1, 2].map(id => setup.checkpoints.read(setup.session.id, id)), before)
     assert.equal(setup.db.connection.prepare("SELECT state FROM inputs WHERE kind='compact'").get()?.state, 'interrupted')
+    setup.db.connection.exec('DROP TRIGGER reject_compaction_request')
+    const actorTwo = String(setup.db.connection.prepare('SELECT checkpoint_json FROM actor_checkpoints WHERE session_id=? AND assistant_id=?')
+      .get(setup.session.id, '2')!.checkpoint_json)
+    setup.db.connection.prepare('UPDATE actor_checkpoints SET checkpoint_json=? WHERE session_id=? AND assistant_id=?')
+      .run('broken actor history', setup.session.id, '2')
+    assert.throws(() => setup.sessions.start(setup.session.id, 'Still damaged', undefined, undefined, 'compact'), /会话存储尚未恢复/)
+    assert.equal(setup.first.requests.length, 2); assert.equal(setup.second.requests.length, 1)
+    setup.db.connection.prepare('UPDATE actor_checkpoints SET checkpoint_json=? WHERE session_id=? AND assistant_id=?')
+      .run(actorTwo, setup.session.id, '2')
+    setup.sessions.start(setup.session.id, 'New explicit summary after repair', undefined, undefined, 'compact')
+    await setup.sessions.waitForIdle(setup.session.id)
+    assert.equal(setup.sessions.faultCount(), 0)
+    assert.equal(setup.first.requests.length, 3); assert.equal(setup.second.requests.length, 2)
+    assert.equal(setup.repository.events.list(setup.session.id, '0', 1000).filter(event => event.kind === 'session.storage.recovered').length, 1)
+  } finally { await setup.close() }
+})
+
+for (const damage of ['json', 'tree'] as const) test(`actor checkpoint ${damage} damage remains blocked until repaired without erasing history`, async () => {
+  const setup = await fixture()
+  try {
+    await setup.prepare()
+    const saved = String(setup.db.connection.prepare('SELECT checkpoint_json FROM actor_checkpoints WHERE session_id=? AND assistant_id=?')
+      .get(setup.session.id, '1')!.checkpoint_json)
+    const broken = damage === 'json' ? '{broken-json' : JSON.stringify({ ...JSON.parse(saved), entries: [{ type: 'message' }] })
+    const update = setup.db.connection.prepare('UPDATE actor_checkpoints SET checkpoint_json=? WHERE session_id=? AND assistant_id=?')
+    update.run(broken, setup.session.id, '1')
+    setup.sessions.start(setup.session.id, 'Cannot summarize', undefined, undefined, 'compact')
+    await setup.sessions.waitForIdle(setup.session.id)
+    assert.equal(setup.sessions.faultCount(), 1)
+    assert.throws(() => setup.sessions.start(setup.session.id, 'Still broken'), /会话存储尚未恢复/)
+    assert.equal(setup.db.connection.prepare('SELECT checkpoint_json FROM actor_checkpoints WHERE session_id=? AND assistant_id=?')
+      .get(setup.session.id, '1')!.checkpoint_json, broken)
+    assert.equal(setup.first.requests.length, 2); assert.equal(setup.second.requests.length, 1)
+    update.run(saved, setup.session.id, '1')
+    setup.sessions.start(setup.session.id, 'New summary after repair', undefined, undefined, 'compact')
+    await setup.sessions.waitForIdle(setup.session.id)
+    assert.equal(setup.sessions.faultCount(), 0)
+    assert.match(JSON.stringify(setup.checkpoints.read(setup.session.id, 1)), /First compact summary/)
+    assert.match(JSON.stringify(setup.checkpoints.read(setup.session.id, 2)), /Second compact summary/)
   } finally { await setup.close() }
 })

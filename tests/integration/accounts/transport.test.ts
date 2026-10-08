@@ -192,8 +192,8 @@ test("production RPC and Blob HTTP isolate two verified accounts and retain owne
     ).error,
     null,
   )
-  const workspaceA = (await rpc(a.socket, "workspace.info")).result.path,
-    workspaceB = (await rpc(b.socket, "workspace.info")).result.path
+  const workspaceA = (await rpc(a.socket, "workspace.info", { sessionId: first })).result.path,
+    workspaceB = (await rpc(b.socket, "workspace.info", { sessionId: second })).result.path
   assert.notEqual(workspaceA, workspaceB)
   assert.ok(workspaceA)
   assert.ok(workspaceB)

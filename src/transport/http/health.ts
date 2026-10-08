@@ -4,7 +4,7 @@ import type { RuntimeOrigin } from '@eden/api'
 
 interface HealthChecks { model: boolean; sessionFaults: number; memoryExtraction: boolean; accounts?: boolean; jobs?: boolean; selfAwake?: boolean }
 
-export function healthHandler(origin: RuntimeOrigin, checks: () => HealthChecks): RequestListener {
+export function healthHandler(origin: RuntimeOrigin, checks: () => HealthChecks, workspaceId?: string): RequestListener {
   return (request, response) => {
     response.setHeader('content-type', 'application/json')
     response.setHeader('cache-control', 'no-store')
@@ -13,10 +13,12 @@ export function healthHandler(origin: RuntimeOrigin, checks: () => HealthChecks)
       return
     }
     const current = checks()
-    const ready = (origin === 'mon' || current.model) && !current.sessionFaults && current.memoryExtraction && current.accounts !== false && current.jobs !== false && current.selfAwake !== false
+    // A stopped session is reported for diagnosis; it must not make healthy peers
+    // appear offline or invite the supervisor to restart their shared host.
+    const ready = (origin === 'mon' || current.model) && current.memoryExtraction && current.accounts !== false && current.jobs !== false && current.selfAwake !== false
     const unavailable = request.url === '/readyz' && !ready
     response.writeHead(unavailable ? 503 : 200).end(JSON.stringify({
-      status: unavailable ? 'not_ready' : 'ok', runtimeOrigin: origin, serverVersion, checks: { database: true, ...current },
+      status: unavailable ? 'not_ready' : 'ok', runtimeOrigin: origin, serverVersion, workspaceId, checks: { database: true, ...current },
     }))
   }
 }

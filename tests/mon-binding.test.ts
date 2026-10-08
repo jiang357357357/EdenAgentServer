@@ -8,6 +8,7 @@ import { ModelService } from '../src/modules/models/index.ts'
 import { SessionRepository, SessionService } from '../src/modules/sessions/index.ts'
 import { modelRoutes } from '../src/transport/rpc/model.routes.ts'
 import { MonBindingService } from '../src/modules/mon/index.ts'
+import { accountKey, withAccount } from '../src/modules/accounts/index.ts'
 
 test('Mon catalogues bind distinct session models without returning or persisting their credentials', async () => {
   const firstModel = await recordedModel([{ text: 'First model' }])
@@ -39,6 +40,7 @@ test('Mon catalogues bind distinct session models without returning or persistin
   const routes = modelRoutes(models, sessions, mon)
   const params = { coreBaseUrl: `http://127.0.0.1:${(core.address() as AddressInfo).port}`, coreToken: 'test-core-token' }
   try {
+    await withAccount({ key: accountKey(params.coreBaseUrl, 'fixture-owner'), userId: 'fixture-owner', coreBaseUrl: params.coreBaseUrl }, async () => {
     const first = repository.create('First', [{ assistantId: 1 }])
     const second = repository.create('Second', [{ assistantId: 2 }])
     assert.throws(() => sessions.start(first.id, 'No binding'), /No model configured/)
@@ -92,6 +94,7 @@ test('Mon catalogues bind distinct session models without returning or persistin
     await assert.rejects(routes['model.catalog']!({ ...params, sessionId: third.id }) as Promise<unknown>, /disk failure/)
     assert.equal(models.read(third.id).available, false)
     assert.equal(new ModelService('mon').read(first.id).available, false)
+    })
   } finally {
     await mon.close(); await sessions.close(); database.close()
     await Promise.all([firstModel.close(), secondModel.close()])

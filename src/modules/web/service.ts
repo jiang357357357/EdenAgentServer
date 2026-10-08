@@ -1,13 +1,17 @@
 import type { JsonValue } from '@eden/api'
 import type { SearchProvider, WebConfig } from './config.ts'
 import { requestPublic } from './public-http.ts'
+import { mergeResults, normalizeResults, renderResults } from './search-results.ts'
+import type { SearchResult } from './search-results.ts'
+import { clean, collapse, decode, extractHtml, substantiveHtml, truncate } from './web-content.ts'
 import type { WebResourceRepository } from './resource-repository.ts'
+
+export { searchTextRelevant } from './search-results.ts'
 
 export interface SearchInput { queries: string[]; maxResults: number; domains: string[]; freshness?: 'day' | 'week' | 'month' | 'year' | undefined }
 export interface FetchInput { url?: string | undefined; refId?: string | undefined; maxChars: number }
 
 interface Resource { kind: 'search' | 'page'; url: string; title: string; body: string; createdAt: number }
-interface SearchResult { title: string; url: string; snippet: string; hostname: string; provider: string; publishedAt: string | null; score: number | null; refId?: string }
 interface TurnResearchState { searches: number; fetches: number; queries: Set<string>; updatedAt: number }
 
 const MAX_SEARCHES_PER_TURN = 2
@@ -286,90 +290,11 @@ function parseSogou(html: string): any[] {
   })
 }
 
-function normalizeResults(provider: string, query: string, raw: any[], maximum: number): SearchResult[] {
-  const terms = query.toLocaleLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean)
-  const candidates = raw.flatMap((value, index): Array<SearchResult & { relevance: number }> => {
-    const title = clean(String(value?.title ?? value?.name ?? ''))
-    const rawUrl = String(value?.url ?? value?.link ?? '')
-    if (!title || !rawUrl) return []
-    let url: URL
-    try { url = new URL(rawUrl) } catch { return [] }
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || blockedHost(url.hostname)) return []
-    url.hash = ''
-    const snippet = truncate(clean(String(value?.description ?? value?.snippet ?? value?.content ?? value?.text ?? '')), 1_200)
-    const lowerTitle = title.toLocaleLowerCase(), lowerSnippet = snippet.toLocaleLowerCase()
-    if (!searchTextRelevant(query, lowerTitle, lowerSnippet) && !(Number(value?.score ?? 0) > 0)) return []
-    const relevance = terms.reduce((score, term) => score + (lowerTitle.includes(term) ? 10 : lowerSnippet.includes(term) ? 2 : 0), 0) + Number(value?.score ?? 0) * 10 - index * 0.01
-    return [{ title, url: url.toString(), snippet, hostname: url.hostname, provider: String(value?.provider ?? provider),
-      publishedAt: value?.published_at ?? value?.publishedDate ?? value?.published_date ?? value?.date ?? null,
-      score: Number.isFinite(Number(value?.score)) ? Number(value.score) : null, relevance }]
-  }).sort((left, right) => right.relevance - left.relevance)
-  const urls = new Set<string>(), titles = new Set<string>(), hosts = new Map<string, number>(), results: SearchResult[] = []
-  for (const { relevance: _relevance, ...item } of candidates) {
-    const urlKey = item.url.replace(/\/$/, ''), titleKey = item.title.toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, '')
-    const hostCount = hosts.get(item.hostname) ?? 0
-    if (urls.has(urlKey) || (titleKey && titles.has(titleKey)) || hostCount >= 2) continue
-    urls.add(urlKey); if (titleKey) titles.add(titleKey); hosts.set(item.hostname, hostCount + 1); results.push(item)
-    if (results.length >= maximum) break
-  }
-  return results
-}
-
-export function searchTextRelevant(query: string, title: string, snippet: string): boolean {
-  const terms = [...new Set(query.toLocaleLowerCase().split(/[^\p{L}\p{N}]+/u).filter(term => term.length >= 2))]
-  if (!terms.length) return true
-  const lowerTitle = title.toLocaleLowerCase(), lowerSnippet = snippet.toLocaleLowerCase()
-  const titleHits = terms.filter(term => lowerTitle.includes(term)).length
-  const allHits = terms.filter(term => lowerTitle.includes(term) || lowerSnippet.includes(term)).length
-  return titleHits > 0 || allHits >= Math.min(2, terms.length)
-}
-
-function mergeResults(groups: SearchResult[][], maximum: number): SearchResult[] {
-  const urls = new Set<string>(), titles = new Set<string>(), hosts = new Map<string, number>(), results: SearchResult[] = []
-  const longest = Math.max(0, ...groups.map(group => group.length))
-  for (let index = 0; index < longest && results.length < maximum; index += 1) {
-    for (const group of groups) {
-      const item = group[index]
-      if (!item) continue
-      const urlKey = item.url.replace(/\/$/, ''), titleKey = item.title.toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, '')
-      const hostCount = hosts.get(item.hostname) ?? 0
-      if (urls.has(urlKey) || (titleKey && titles.has(titleKey)) || hostCount >= 2) continue
-      urls.add(urlKey); if (titleKey) titles.add(titleKey); hosts.set(item.hostname, hostCount + 1); results.push({ ...item })
-      if (results.length >= maximum) break
-    }
-  }
-  return results
-}
-
-function extractHtml(html: string): { title: string; content: string } {
-  const title = clean(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? '')
-  const safe = html.replace(/<(script|style|noscript|svg|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ')
-    .replace(/<br\s*\/?>|<\/(p|div|section|article|header|footer|h[1-6]|li|tr|ul|ol)\s*>/gi, '\n')
-  return { title, content: safe.replace(/<[^>]+>/g, ' ').split(/\r?\n/).map(clean).filter(Boolean).join('\n\n') }
-}
-
-function substantiveHtml(title: string, content: string): boolean {
-  const normalized = collapse(content)
-  const withoutTitle = title ? normalized.replace(collapse(title), '').trim() : normalized
-  return withoutTitle.length >= 160
-}
-
 function normalizeQuery(value: string): string {
   return value.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
 }
 
-function decode(value: string): string {
-  return value.replace(/&(#x?[0-9a-f]+|amp|lt|gt|quot|apos|#39|nbsp);/gi, (_all, entity: string) => {
-    if (entity[0] === '#') { const radix = entity[1]?.toLowerCase() === 'x' ? 16 : 10; return String.fromCodePoint(Number.parseInt(entity.slice(radix === 16 ? 2 : 1), radix)) }
-    return ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' } as Record<string, string>)[entity.toLowerCase()] ?? "'"
-  })
-}
-function clean(value: string) { return collapse(decode(value.replace(/<[^>]+>/g, ' '))) }
-function collapse(value: string) { return value.replace(/\s+/g, ' ').trim() }
-function truncate(value: string, length: number) { return value.length <= length ? value : `${value.slice(0, length)}…` }
-function blockedHost(host: string) { const value = host.toLowerCase().replace(/\.$/, ''); return value === 'localhost' || value.endsWith('.localhost') || value.endsWith('.local') }
 function errorMessage(error: unknown) { return error instanceof Error ? error.message : String(error) }
-function renderResults(results: SearchResult[]) { return results.map(item => `[${item.refId}] ${item.title}\n${item.url}${item.snippet ? `\n${item.snippet}` : ''}`).join('\n\n') }
 function json(value: unknown): JsonValue { return JSON.parse(JSON.stringify(value)) as JsonValue }
 
 function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {

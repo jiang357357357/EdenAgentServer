@@ -1,4 +1,4 @@
-import { createRuntime } from '@eden/runtime-pi'
+import { createIsolatedRuntime as createRuntime } from '@eden/runtime-pi'
 import type { RuntimeModel, RuntimeTool, EdenRuntime, RuntimeImage } from '@eden/runtime-pi'
 import { actorIdSchema, toJson } from '@eden/api'
 import type { DirectorPlan, JsonValue } from '@eden/api'
@@ -62,7 +62,10 @@ export class ActorExecutionService {
       const value = response && typeof response === 'object' && !Array.isArray(response) ? response : {}
       if (value.stopReason === 'error' || value.stopReason === 'aborted') throw new Error('Actor model response did not complete')
       return response
-    } finally { this.runtimes.delete(input.sessionId); signal.removeEventListener('abort', abort); await aborting }
+    } finally {
+      this.runtimes.delete(input.sessionId); signal.removeEventListener('abort', abort)
+      try { await aborting } finally { await runtime.dispose() }
+    }
   }
 
   async inject(sessionId: string, text: string, kind: 'steer' | 'follow_up'): Promise<boolean> {

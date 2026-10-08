@@ -11,7 +11,8 @@ export class WebResourceRepository {
     this.sessions.read(sessionId)
     const refId = `${kind}_${randomUUID()}`
     this.database.transaction(() => {
-      this.database.connection.prepare('INSERT INTO web_resources VALUES (?,?,?,?,?,?)')
+      this.database.connection.prepare(`INSERT INTO web_resources
+        (session_id,ref_id,kind,url,title,body,created_at) VALUES (?,?,?,?,?,?,?)`)
         .run(sessionId, refId, kind, url, title, body, Date.now())
       this.database.connection.prepare(`DELETE FROM web_resources WHERE session_id=? AND ref_id NOT IN (
         SELECT ref_id FROM web_resources WHERE session_id=? ORDER BY created_at DESC,ref_id DESC LIMIT 128)`).run(sessionId, sessionId)

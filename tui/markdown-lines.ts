@@ -2,7 +2,7 @@ import { cells, displayText } from './screen-text.ts'
 import { codeSpans } from './code-highlight.ts'
 import { inlineSpans } from './markdown-inline.ts'
 import { splitStyledLines, wrapStyled, type StyledSpan } from './styled-text.ts'
-import type { ColoredLine } from './terminal-frame.ts'
+import type { ColoredLine } from './screen-state.ts'
 
 function wrapped(result: ColoredLine[], prefix: string, body: readonly StyledSpan[], width: number,
   kind: ColoredLine['kind']): void {

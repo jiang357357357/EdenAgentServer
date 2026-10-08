@@ -6,12 +6,12 @@ export class RealtimeVoiceService {
   private readonly active = new Map<WebSocket, () => void>()
   private closed = false
   constructor(private readonly sessions: SessionRepository, private readonly config: VoiceConfigRepository,
-    private readonly monUrl: (sessionId: string) => string) {}
-  prepare(sessionId: string): (client: WebSocket) => void {
+    private readonly monUrl: (sessionId: string) => string | Promise<string>) {}
+  async prepare(sessionId: string): Promise<(client: WebSocket) => void> {
     if (this.closed || this.active.size >= 4) throw new Error('Transcription service unavailable or full')
     const session = this.sessions.read(sessionId)
     const config = session.runtimeOrigin === 'local' ? this.config.read().stt : undefined
-    const url = config ? new URL(config.serviceUrl) : new URL(this.monUrl(sessionId))
+    const url = config ? new URL(config.serviceUrl) : new URL(await this.monUrl(sessionId))
     if (config) { url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'; url.pathname = '/ws/asr/final' }
     return client => {
       if (this.closed || this.active.size >= 4) { client.close(1013, 'Transcription capacity reached'); return }

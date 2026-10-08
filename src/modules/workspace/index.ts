@@ -1,3 +1,6 @@
 export { WorkspaceService } from './workspace-service.ts'
+export type { WorkspaceSnapshot } from './workspace-service.ts'
 export { WorkspaceRepository } from './workspace-repository.ts'
 export { workspaceTools } from './workspace-tools.ts'
+export { readWorkspacePage } from './workspace-read-page.ts'
+export { writeWorkspaceFile } from './workspace-write.ts'

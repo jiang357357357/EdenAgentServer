@@ -46,8 +46,7 @@ function runningTokenFile(origin: RuntimeOrigin, port: number): string | undefin
   return undefined
 }
 
-export function parseConfig(args: string[], env: NodeJS.ProcessEnv = process.env): TuiConfig | undefined {
-  if (args.includes('--help') || args.includes('-h')) return undefined
+function commandOptions(args: string[]): Map<string, string> {
   const options = new Map<string, string>()
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index], value = args[index + 1]
@@ -56,16 +55,26 @@ export function parseConfig(args: string[], env: NodeJS.ProcessEnv = process.env
     }
     options.set(key, value)
   }
+  return options
+}
+
+function serverAddress(options: Map<string, string>, env: NodeJS.ProcessEnv): { origin: RuntimeOrigin; port: number } {
   const origin = options.get('--origin') ?? env.EDEN_AGENT_RUNTIME_ORIGIN ?? 'mon'
   if (origin !== 'mon' && origin !== 'local') throw new Error('--origin 必须是 mon 或 local')
   const port = Number(options.get('--port') ?? env.EDEN_AGENT_PORT ?? (origin === 'mon' ? 40092 : 40093))
   if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('--port 必须是 1–65535')
+  return { origin, port }
+}
+
+function serverTokenFile(options: Map<string, string>, env: NodeJS.ProcessEnv, origin: RuntimeOrigin, port: number): string {
   const cwd = process.cwd()
   const projectRoot = path.basename(cwd) === 'Server' ? path.dirname(cwd) : cwd
   const dataRoot = path.resolve(env.EDEN_AGENT_DATA_ROOT ?? path.join(projectRoot, 'Data', 'realms', origin))
-  const tokenFile = path.resolve(options.get('--token-file') ?? env[origin === 'mon' ? 'EDEN_AGENT_MON_TOKEN_FILE' : 'EDEN_AGENT_LOCAL_TOKEN_FILE']
+  return path.resolve(options.get('--token-file') ?? env[origin === 'mon' ? 'EDEN_AGENT_MON_TOKEN_FILE' : 'EDEN_AGENT_LOCAL_TOKEN_FILE']
     ?? runningTokenFile(origin, port) ?? path.join(dataRoot, 'capability.token'))
-  const coreTokenFile = options.get('--core-token-file') ?? env.EDEN_AGENT_CORE_TOKEN_FILE
+}
+
+function coreAddress(options: Map<string, string>, env: NodeJS.ProcessEnv): { coreUrl: string; authFile: string } {
   const coreUrl = options.get('--core-url') ?? env.MON_CORE_BASE_URL ?? 'http://127.0.0.1:40011'
   const parsedUrl = new URL(coreUrl)
   if (!['http:', 'https:'].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password) throw new Error('--core-url 必须是无内嵌凭据的 HTTP(S) 地址')
@@ -73,6 +82,16 @@ export function parseConfig(args: string[], env: NodeJS.ProcessEnv = process.env
     ? env.XDG_STATE_HOME : path.join(homedir(), '.local', 'state')
   const coreKey = createHash('sha256').update(parsedUrl.href.replace(/\/+$/, '')).digest('hex').slice(0, 16)
   const authFile = path.join(stateRoot, 'eden-agent', `tui-auth-${coreKey}.json`)
+  return { coreUrl, authFile }
+}
+
+export function parseConfig(args: string[], env: NodeJS.ProcessEnv = process.env): TuiConfig | undefined {
+  if (args.includes('--help') || args.includes('-h')) return undefined
+  const options = commandOptions(args)
+  const { origin, port } = serverAddress(options, env)
+  const tokenFile = serverTokenFile(options, env, origin, port)
+  const coreTokenFile = options.get('--core-token-file') ?? env.EDEN_AGENT_CORE_TOKEN_FILE
+  const { coreUrl, authFile } = coreAddress(options, env)
   const sessionId = options.get('--session')
   return { origin, port, tokenFile, coreUrl, authFile,
     ...(coreTokenFile ? { coreTokenFile: path.resolve(coreTokenFile) } : {}),

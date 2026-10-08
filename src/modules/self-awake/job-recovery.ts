@@ -7,10 +7,12 @@ import type { EdenDatabase } from '@eden/store'
 import type { JobRepository } from '../jobs/index.ts'
 import type { SessionService } from '../sessions/index.ts'
 import { SELF_AWAKE_RECOVERY_INSTRUCTION } from '../../model-prompts/self-awake.ts'
+import { SessionOwnership } from '../accounts/index.ts'
 
 const payloadSchema = z.object({
   prompt: z.string().optional(), trigger: jsonValue.optional(),
-  schemaVersion: z.literal('self-awake.v1').optional(), scheduler: z.literal('monos').optional(),
+  schemaVersion: z.enum(['self-awake.v1', 'self-awake.v2']).optional(), scheduler: z.literal('monos').optional(),
+  scheduleScope: z.enum(['legacy', 'session']).optional(),
   eventId: z.string().optional(), userId: z.string().optional(),
 }).strict()
 
@@ -27,7 +29,8 @@ export class SelfAwakeJobRecovery {
     if (session.status !== 'active' || session.participants.length > 1) throw new Error('Restore an active single-character self-awake session first')
     const author = session.participants[0] ?? {}, environment = session.environment
     if (run && !isDeepStrictEqual(JSON.parse(String(run.author_json)), author)) throw new Error('Original self-awake author differs from the current session')
-    const owner = recoveryOwner(db, id, environment, payload)
+    const ownerId = payload.scheduleScope === 'session' ? new SessionOwnership(this.database).account(job.sessionId)?.userId : undefined
+    const owner = recoveryOwner(db, id, environment, payload, ownerId)
     return { job, run: run ?? null, author, environment, owner: owner ? String(owner.user_id) : null }
 
   }
@@ -71,12 +74,13 @@ export class SelfAwakeJobRecovery {
   }
 }
 
-function recoveryOwner(db: import('node:sqlite').DatabaseSync, id: string, environment: JsonValue, payload: z.output<typeof payloadSchema>) {
+function recoveryOwner(db: import('node:sqlite').DatabaseSync, id: string, environment: JsonValue, payload: z.output<typeof payloadSchema>, sessionOwner?: string) {
 
   const owner = db.prepare('SELECT user_id FROM self_awake_submissions WHERE job_id=?').get(id)
   const env = environment as Record<string, JsonValue>
-  if (owner && env.selfAwakeUserId !== owner.user_id) throw new Error('Self-awake submission owner differs from the current environment')
-  if (payload.scheduler === 'monos' && (!owner || owner.user_id !== payload.userId || env.selfAwakeUserId !== payload.userId)) throw new Error('Restore the original external self-awake owner first')
+  const expected = payload.scheduleScope === 'session' ? sessionOwner : env.selfAwakeUserId
+  if (owner && expected !== owner.user_id) throw new Error('Self-awake submission owner differs from the current environment')
+  if (payload.scheduler === 'monos' && (!owner || owner.user_id !== payload.userId || expected !== payload.userId)) throw new Error('Restore the original external self-awake owner first')
   return owner
 
 }

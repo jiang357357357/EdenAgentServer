@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { toJson } from '@eden/api'
 import type { RuntimeTool } from '@eden/runtime-pi'
 import type { PermissionService } from '../permissions/index.ts'
-import type { WorkspaceService } from './workspace-service.ts'
+import type { WorkspaceService, WorkspaceSnapshot } from './workspace-service.ts'
 import { writeWorkspaceFile } from './workspace-write.ts'
 import { toolDescription } from '../../model-prompts/tool-descriptions.ts'
 
@@ -19,14 +19,16 @@ export function workspaceWriteTools(workspace: WorkspaceService, permissions: Pe
       parameters: toJson(z.toJSONSchema(write, { io: 'input' })) as Record<string, import('@eden/api').JsonValue>,
       async execute(raw, context) {
         const input = write.parse(raw)
+        const location = workspace.snapshot()
         const expectedSha256 = await workspace.writeSnapshot(scope, input.path)
-        return commit({ ...input, expectedSha256, createOnly: input.createOnly || expectedSha256 === null }, context)
+        return commit(location, { ...input, expectedSha256, createOnly: input.createOnly || expectedSha256 === null }, context)
       } },
     { name: 'edit_file', revision: 'eden.workspace.edit.v1', executionMode: 'sequential',
       description: toolDescription('edit_file'),
       parameters: toJson(z.toJSONSchema(edit, { io: 'input' })) as Record<string, import('@eden/api').JsonValue>,
       async execute(raw, context) {
         const input = edit.parse(raw)
+        const location = workspace.snapshot()
         const current = await workspace.read(input.path)
         if (current.binary || current.truncated || !current.sha256) throw new Error('Edit requires a UTF-8 file of at most 1 MiB')
         const first = current.content.indexOf(input.oldText)
@@ -34,15 +36,16 @@ export function workspaceWriteTools(workspace: WorkspaceService, permissions: Pe
           throw new Error('oldText must match exactly once; read the current file and narrow the edit')
         const content = current.content.slice(0, first) + input.newText + current.content.slice(first + input.oldText.length)
         if (Buffer.byteLength(content) > 1024 * 1024) throw new Error('Edited file exceeds 1 MiB')
-        return commit({ path: input.path, content, expectedSha256: current.sha256, createOnly: false }, context)
+        return commit(location, { path: input.path, content, expectedSha256: current.sha256, createOnly: false }, context)
       } },
   ]
 
-  async function commit(snapshot: { path: string; content: string; expectedSha256: string | null; createOnly: boolean },
+  async function commit(location: WorkspaceSnapshot, snapshot: { path: string; content: string; expectedSha256: string | null; createOnly: boolean },
     context: Parameters<RuntimeTool['execute']>[1]) {
-    const root = workspace.root()
+    workspace.assertSnapshot(location)
+    const root = location.root
     await permissions.request({ ...context, sessionId, turnId }, 'workspace.write', root, toJson(snapshot))
-    return workspace.mutate(root, context.signal, async () => {
+    return workspace.mutateFile(location, snapshot.path, context.signal, async () => {
       await writeWorkspaceFile(root, snapshot, context.signal)
       workspace.rememberWrite(scope, snapshot.path, snapshot.content)
       return { path: snapshot.path, bytes: Buffer.byteLength(snapshot.content) }

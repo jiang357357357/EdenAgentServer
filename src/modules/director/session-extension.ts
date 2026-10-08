@@ -32,6 +32,8 @@ export class CompanionSessionExtension implements SessionTurnExtension {
       director: modelDescriptor(director) } : undefined
   }
 
+  validateCheckpoints(sessionId: string): void { this.coordinator.validateCheckpoints(sessionId) }
+
   async execute(input: SessionInput, signal: AbortSignal): Promise<void> {
     const metadata = metadataSchema.parse(input.metadata)
     const actorModels = this.capture(input.sessionId, metadata.participants)

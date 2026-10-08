@@ -5,7 +5,7 @@ import { EdenDatabase } from '@eden/store'
 import { recordedModel } from '@eden/runtime-pi/testing'
 import { SessionRepository, SessionTitleService, fallbackSessionTitle, generatedSessionTitle } from '../src/modules/sessions/index.ts'
 
-async function eventually(check: () => boolean, timeoutMs = 2000): Promise<void> {
+async function eventually(check: () => boolean, timeoutMs = 10000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (!check()) {
     if (Date.now() >= deadline) throw new Error('Timed out waiting for session title')

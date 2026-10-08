@@ -26,8 +26,14 @@ import { assistantCatalog, assistantSummary, resolveAssistantTarget } from './as
 import { selectionTarget } from './selection-target.ts'
 import { commitMonModels } from './commit-models.ts'
 import { MonConnectionRepository } from './connection-repository.ts'
+import { issueEsp32Command } from './esp32-command.ts'
+import { MonClientFactory } from './client-factory.ts'
+import { monDestination } from './destination.ts'
+import type { MonServiceIdentity } from '@eden/integrations'
+import type { Account } from '../accounts/index.ts'
+import { resumeProjection } from './projection-recovery.ts'
 
-interface CatalogRequest { coreBaseUrl: string; coreToken: string; sessionId?: string | null | undefined }
+interface CatalogRequest { coreBaseUrl: string; coreToken: string; sessionId?: string | null | undefined; serviceCredential?: boolean }
 
 export class MonBindingService {
   private readonly controllers = new Set<AbortController>()
@@ -38,13 +44,16 @@ export class MonBindingService {
   private readonly sync: MonSyncWorker | undefined
   private readonly projection: MonSessionProjection
   private readonly operations: MonOperationRepository
-  constructor(private readonly models: ModelService, private readonly sessions: SessionService) {
+  private readonly clients: MonClientFactory
+  constructor(private readonly models: ModelService, private readonly sessions: SessionService, identity?: MonServiceIdentity, account?: Account) {
     sessions.repository.database.connection.prepare("UPDATE mon_contact_deliveries SET state='unknown',error='Host restarted before contact receipt confirmation' WHERE state='running'").run()
     new LegacyReplayRepository(sessions.repository).recover()
     this.projection = new MonSessionProjection(sessions.repository)
     this.operations = new MonOperationRepository(sessions.repository)
     this.connections = sessions.repository.origin === 'mon' ? new MonConnectionRepository(sessions.repository.database) : undefined
-    this.sync = this.connections ? new MonSyncWorker(sessions.repository, this.connections, this.projection) : undefined
+    this.clients = new MonClientFactory(sessions.repository, identity, account,
+      (id, base, previous, next) => this.models.monChildProfiles().renewCredential(id, base, previous, next))
+    this.sync = this.connections ? new MonSyncWorker(sessions.repository, this.connections, this.projection, (id, connection) => this.clients.create(id, connection)) : undefined
   }
 
   async catalog(params: CatalogRequest): Promise<JsonValue> {
@@ -97,6 +106,7 @@ export class MonBindingService {
 
   private async applySelection(params: CatalogRequest & { aiEntityId: string | number; target?: ModelSelectionTarget | undefined }, signal: AbortSignal): Promise<JsonValue> {
       signal.throwIfAborted()
+      await this.clients.validateConnection(params, signal, params.serviceCredential === true)
       await prepareLegacyIdentity(this.sessions.repository.database, params.sessionId ?? undefined, params.coreBaseUrl, params.coreToken, signal)
       const client = new MonClient(params.coreBaseUrl, params.coreToken)
       const participants = params.sessionId ? this.sessions.repository.read(params.sessionId).participants : []
@@ -132,10 +142,17 @@ export class MonBindingService {
   }
 
   private async load(params: CatalogRequest, signal: AbortSignal): Promise<JsonValue> {
+    await this.clients.validateConnection(params, signal, params.serviceCredential === true)
     const sessionId = params.sessionId ?? undefined
     const participants = sessionId ? this.sessions.repository.read(sessionId).participants : []
     const reconcileIdentity = await prepareLegacyIdentity(this.sessions.repository.database, sessionId, params.coreBaseUrl, params.coreToken, signal)
-    const saveConnection = () => { reconcileIdentity(); if (sessionId) this.connections!.saveInTransaction(sessionId, { coreBaseUrl: params.coreBaseUrl, coreToken: params.coreToken }) }
+    const saveConnection = () => {
+      reconcileIdentity()
+      if (sessionId) {
+        this.connections!.saveInTransaction(sessionId, { coreBaseUrl: params.coreBaseUrl, coreToken: params.coreToken })
+        this.clients.bindService(sessionId, params, params.serviceCredential === true)
+      }
+    }
     if (sessionId && participants.length > 1) {
       const result = await loadActorCatalog(new MonClient(params.coreBaseUrl, params.coreToken), participants, signal)
       signal.throwIfAborted()
@@ -195,34 +212,14 @@ export class MonBindingService {
   }
 
   async issueEsp32Command(sessionId: string, raw: JsonValue, signal: AbortSignal) {
-    let request = raw
-    const identityActions = new Set(['call.start', 'message.send', 'notification.show'])
-    if (raw && typeof raw === 'object' && !Array.isArray(raw) && typeof raw.action === 'string' && identityActions.has(raw.action)) {
-      const assistantId = Number(this.assistantId(sessionId))
-      if (!Number.isSafeInteger(assistantId) || assistantId <= 0) {
-        throw new Error('当前 Agent 会话没有可用于 ESP 联系设备的 Core 助手身份')
-      }
-      const argumentsValue = raw.arguments && typeof raw.arguments === 'object' && !Array.isArray(raw.arguments)
-        ? raw.arguments
-        : {}
-      request = toJson({ ...raw, arguments: { ...argumentsValue, assistant_id: assistantId } })
-    }
-    try {
-      return await this.assistantClient(sessionId).post('/api/agent/devices/esp32/commands/', request, signal)
-    } catch (error) {
-      if (!(error instanceof MonHttpError)) throw error
-      if (error.status === 404) throw new Error('ESP32 设备不存在或不属于当前用户')
-      if (error.status === 409) throw new Error('ESP32 设备当前离线，请先检查设备连接')
-      if (error.status === 400) throw new Error('ESP32 拒绝了参数、助手身份不可用或设备尚未声明该控制能力')
-      throw error
-    }
+    return issueEsp32Command(() => this.assistantClient(sessionId), raw, () => this.assistantId(sessionId), signal)
   }
 
   esp32CommandStatus(sessionId: string, commandId: string, signal: AbortSignal) {
     return this.assistantClient(sessionId).get(`/api/agent/devices/esp32/commands/${encodeURIComponent(commandId)}/`, signal)
   }
 
-  realtimeSttUrl(sessionId: string): string { return this.assistantClient(sessionId).realtimeSttUrl() }
+  realtimeSttUrl(sessionId: string) { return this.assistantClient(sessionId).freshRealtimeSttUrl() }
 
   async synthesizeSpeech(input: VoiceSynthesizeInput, signal: AbortSignal) {
     const client = this.assistantClient(input.sessionId)
@@ -231,7 +228,7 @@ export class MonBindingService {
     if (environment && typeof environment === 'object' && !Array.isArray(environment) && environment.sessionPurpose === 'self_awake') {
       throw new Error('Background sessions do not publish a conversational speech projection')
     }
-    await this.projection.ensure(client, input.sessionId, JSON.stringify(connection), signal)
+    await this.projection.ensure(client, input.sessionId, monDestination(connection), signal)
     return synthesizeMonSpeech(client, this.operations, input, signal)
   }
 
@@ -249,14 +246,14 @@ export class MonBindingService {
     this.sessions.repository.read(sessionId)
     const connection = this.connections?.read(sessionId)
     if (!connection) throw new Error('Refresh this session model catalogue to bind Mon credentials')
-    return new MonClient(connection.coreBaseUrl, connection.coreToken)
+    return this.clients.create(sessionId, connection)
   }
 
   async prepareHandoff(sessionId: string, assistantId: string | number, signal: AbortSignal) {
     if (this.closed) throw new Error('Mon integration is shutting down')
     const connection = this.connections?.read(sessionId)
     if (!connection) return undefined
-    const result = await loadMonCatalog(new MonClient(connection.coreBaseUrl, connection.coreToken), assistantId, signal)
+    const result = await loadMonCatalog(this.clients.create(sessionId, connection), assistantId, signal)
     if (!result.binding) throw new Error('Target assistant has no active model')
     return { binding: result.binding, visionBinding: result.visionBinding }
   }
@@ -271,11 +268,13 @@ export class MonBindingService {
   resolveLegacySync(raw: unknown) { return resolveLegacySync(this.sessions.repository, raw) }
 
   syncStatus(raw: unknown) { return toJson(new MonSyncStatus(this.sessions.repository).read(raw)) }
+  resumeSync(sessionId: string) { return resumeProjection(this.sessions.repository, this.connections!, sessionId) }
 
   startSync() { this.sync?.start() }
 
   async close(): Promise<void> {
     this.closed = true
+    this.clients.close()
     for (const controller of this.controllers) controller.abort()
     await Promise.allSettled([...this.tasks, this.sync?.close()])
   }

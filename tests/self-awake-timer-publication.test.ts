@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { EdenDatabase } from '@eden/store'
@@ -15,12 +15,16 @@ function fixture(context: test.TestContext) {
   context.after(() => { db.close(); rmSync(root, { recursive: true, force: true }) })
   const stateFile = path.join(root, 'state.json')
   writeFileSync(stateFile, JSON.stringify({ enabled: true, next_wake_at: null }))
+  writeFileSync(path.join(root, 'session-protocol.json'), JSON.stringify({ protocolVersion: 2, sessionScopes: true, expiresAt: Date.now() + 30000 }))
   const jobs = new JobRepository(db, true), sessions = new SessionRepository(db, 'mon')
   const session = sessions.create('wake'), repository = new SelfAwakeRepository(db, stateFile)
   const permissions = { async request() {} }
   const tool = selfAwakeTools(repository, jobs, permissions as never, null as never, session.id, 'turn').find(tool => tool.name === 'set_self_awake_timer')!
   const execute = (callId: string, afterMinutes: number) => tool.execute({ afterMinutes, reason: 'fixture' }, { callId, signal: new AbortController().signal })
-  return { root, db, jobs, repository, execute }
+  const scopeRoot = path.join(root, 'sessions', session.id)
+  mkdirSync(scopeRoot, { recursive: true })
+  const pending = () => Number(db.connection.prepare('SELECT count(*) AS n FROM self_awake_session_schedules WHERE published_revision<revision').get()?.n)
+  return { root: scopeRoot, parentRoot: root, session, db, jobs, repository, execute, pending }
 }
 
 test('timer tool replaces its durable plan and publishes the MonOs protocol without local execution', async context => {
@@ -38,7 +42,7 @@ test('timer tool replaces its durable plan and publishes the MonOs protocol with
   rmSync(path.join(f.root, 'schedule_requests'), { recursive: true })
   await f.execute('one', 10)
   assert.equal(f.jobs.list({ state: 'queued' })[0]!.id, queued[0]!.id)
-  assert.equal(f.db.connection.prepare('SELECT count(*) AS n FROM self_awake_timer_publications').get()?.n, 2)
+  assert.equal(f.pending(), 0)
 })
 
 test('publication failure retains one durable plan for recovery and does not report success', async context => {
@@ -46,11 +50,11 @@ test('publication failure retains one durable plan for recovery and does not rep
   writeFileSync(path.join(f.root, 'schedule_requests'), 'not a directory')
   await assert.rejects(f.execute('one', 10), /delivery pending/)
   assert.equal(f.jobs.list({ state: 'queued' }).length, 1)
-  assert.equal(f.db.connection.prepare('SELECT count(*) AS n FROM self_awake_timer_publications').get()?.n, 0)
+  assert.equal(f.pending(), 1)
   rmSync(path.join(f.root, 'schedule_requests'))
   f.repository.timerPublication.publish()
   assert.equal(f.repository.timerPublication.fault, undefined)
-  assert.equal(f.db.connection.prepare('SELECT count(*) AS n FROM self_awake_timer_publications').get()?.n, 1)
+  assert.equal(f.pending(), 0)
 })
 
 test('denied approval preserves the current plan and never publishes a replacement', async context => {
@@ -66,7 +70,7 @@ test('denied approval preserves the current plan and never publishes a replaceme
 
 test('actual timer result and published plan respect the persisted twenty-four-hour limit', async context => {
   const f = fixture(context), anchor = Date.now() - 11 * 3600000
-  writeFileSync(path.join(f.root, 'state.json'), JSON.stringify({ enabled: true, wake_anchor_at: new Date(anchor).toISOString() }))
+  writeFileSync(path.join(f.root, 'state.json'), JSON.stringify({ session_id: f.session.id, enabled: true, wake_anchor_at: new Date(anchor).toISOString() }))
   await f.execute('long', 1440)
   const first = f.jobs.list({ state: 'queued' })[0]!
   assert.equal(first.dueAt, anchor + 24 * 3600000)
@@ -74,13 +78,14 @@ test('actual timer result and published plan respect the persisted twenty-four-h
   const next = f.jobs.list({ state: 'queued' })[0]!
   assert.equal(next.dueAt, first.dueAt)
   assert.equal(f.jobs.read(first.id).state, 'cancelled')
-  const request = JSON.parse(readFileSync(path.join(f.root, 'schedule_requests', `${next.id}.json`), 'utf8'))
+  const revision = f.db.connection.prepare('SELECT revision FROM self_awake_session_schedules WHERE session_id=?').get(f.session.id)!.revision
+  const request = JSON.parse(readFileSync(path.join(f.root, 'schedule_requests', `${revision}.json`), 'utf8'))
   assert.equal(Date.parse(request.next_wake_at), first.dueAt)
 })
 
 test('explicit timer beyond twelve-hour fallback keeps the requested time', async context => {
   const f = fixture(context), anchor = Date.now()
-  writeFileSync(path.join(f.root, 'state.json'), JSON.stringify({ enabled: true, wake_anchor_at: new Date(anchor).toISOString() }))
+  writeFileSync(path.join(f.root, 'state.json'), JSON.stringify({ session_id: f.session.id, enabled: true, wake_anchor_at: new Date(anchor).toISOString() }))
   const receipt = await f.execute('next-morning', 16 * 60) as Record<string, unknown>
   assert.equal(receipt.adjusted, false)
   assert.equal(receipt.dueAt, Date.parse(String(receipt.requestedAt)))

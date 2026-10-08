@@ -36,6 +36,7 @@ export interface AcceptedInput {
 
 export interface SessionTurnExtension {
   snapshot(sessionId: string, participants: JsonValue[]): JsonValue | undefined
+  validateCheckpoints?(sessionId: string): void
   execute(input: SessionInput, signal: AbortSignal): Promise<void>
   inject?(sessionId: string, text: string, kind: 'steer' | 'follow_up'): Promise<boolean>
 }

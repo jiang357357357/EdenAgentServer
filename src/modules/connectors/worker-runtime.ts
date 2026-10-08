@@ -1,3 +1,4 @@
+import { logDiagnostic } from '../logging/index.ts'
 import type { Readable, Writable } from 'node:stream'
 import { connectorWorkerInitializeSchema, connectorWorkerReadySchema, connectorPublishedEventSchema, connectorWorkerStatusSchema, connectorWorkerHealthSchema, toJson } from '@eden/api'
 import type { JsonValue } from '@eden/api'
@@ -85,7 +86,7 @@ export class ConnectorWorkerRuntime {
   private failed(_error: Error) {
     if (this.stopped) return
     try { this.repository.runtimeState(this.id, this.generation, 'error', 'Connector worker stopped or violated its protocol') }
-    finally { void this.close().catch(() => { process.stderr.write('Connector worker termination failed\n') }) }
+    finally { void this.close().catch(error => { logDiagnostic({ event: 'connector.worker.termination_failed', message: '连接器工作进程终止失败。', connectorId: this.id, generation: this.generation, error }, 'error') }) }
   }
   close(): Promise<void> {
     this.closing ??= Promise.resolve().then(async () => {

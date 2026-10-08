@@ -37,4 +37,5 @@ test('cancelling synthesis aborts a real upstream HTTP request and stores no spe
   await rejected; await closed
   assert.deepEqual(repository.list(session.id), [])
   assert.equal(db.connection.prepare('SELECT COUNT(*) AS n FROM voice_audio_cache').get()!.n, 0)
+  assert.equal(db.connection.prepare('SELECT COUNT(*) AS n FROM voice_synthesis_failures').get()!.n, 0)
 })

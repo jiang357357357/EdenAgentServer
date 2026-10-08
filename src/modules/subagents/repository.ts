@@ -23,8 +23,9 @@ import { SubagentRequestReview } from './request-review.ts'
 import { assertSettledSubagentRequests } from './request-repository.ts'
 import type { EdenDatabase } from '@eden/store'
 import type { JobRepository } from '../jobs/index.ts'
+import { WorkspaceRepository } from '../workspace/index.ts'
 export class SubagentRepository {
-  constructor(private readonly database: EdenDatabase, private readonly jobs: JobRepository, private readonly workspace: () => string = () => '') { }
+  constructor(private readonly database: EdenDatabase, private readonly jobs: JobRepository, private readonly workspace: (sessionId?: string) => string = () => '') { }
   policy(sessionId: string) { return subagentPolicy(this.database, sessionId) }
   recoveryStatus(id: string) { return subagentRecoveryStatus(this.database, id) }
   modelRecovery(models: ModelService) { return new SubagentModelRecovery(this.database, models) }
@@ -37,12 +38,12 @@ export class SubagentRepository {
     return this.read(id)
   }
   restorePolicy(input: SubagentPolicyRecovery, skills: RoleSkillSnapshot[]) {
-    restoreSubagentPolicy(this.database, this.roles(), input, skills)
+    restoreSubagentPolicy(this.database, this.roles(String(this.raw(input.agentId).child_session_id)), input, skills)
     return this.read(input.agentId)
   }
   restoreWorkspace(id: string, root: string) { restoreSubagentWorkspace(this.database, id, root); return this.read(id) }
-  roles() { return new SubagentRoleRepository(this.database, this.workspace) }
-  roleImport() { return new SubagentRoleImport(this.database, this.roles()) }
+  roles(sessionId?: string) { return new SubagentRoleRepository(this.database, () => sessionId ? this.workspace(sessionId) : '') }
+  roleImport(sessionId?: string) { return new SubagentRoleImport(this.database, this.roles(sessionId), sessionId) }
   skillInstructions(id: string) {
     const row = this.database.connection.prepare('SELECT skills_json FROM subagent_role_snapshots WHERE agent_id=?').get(id)
     return row ? roleSkillPrompt(JSON.parse(String(row.skills_json)) as RoleSkillSnapshot[]) : ''
@@ -90,7 +91,7 @@ export class SubagentRepository {
       const depth = (parent?.depth ?? 0) + 1
       if (depth > 4) throw new Error('Subagent nesting budget reached')
       const id = randomUUID(), now = Date.now(), agentPath = `${parent?.path ?? '/root'}/${taskName}`
-      const definition = this.roles().read(role)
+      const definition = this.roles(parentSessionId).read(role)
       if (JSON.stringify(definition.skills) !== JSON.stringify(skillSnapshots.map(skill => skill.name))) throw new Error('Role skills changed before task creation')
       const requestedPolicy = rolePolicy(role, definition), inheritedPolicy = subagentPolicy(this.database, parentSessionId)
       const policy = inheritedPolicy ? narrowPolicy(inheritedPolicy, requestedPolicy) : requestedPolicy
@@ -99,7 +100,8 @@ export class SubagentRepository {
         depth,state,operation_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?,?)`).run(id, root, parentSessionId, childSessionId, parent?.id ?? null, agentPath, taskName, role, depth, key, now, now)
       if (actorId !== undefined) this.database.connection.prepare('UPDATE subagent_threads SET parent_actor_id=? WHERE id=?').run(String(actorId), id)
       this.database.connection.prepare('INSERT INTO subagent_policies VALUES(?,?,?)').run(id, JSON.stringify(policy), now)
-      this.database.connection.prepare('UPDATE subagent_threads SET workspace_root=? WHERE id=?').run(this.workspace(), id)
+      new WorkspaceRepository(this.database, childSessionId).inherit(parentSessionId)
+      this.database.connection.prepare('UPDATE subagent_threads SET workspace_root=? WHERE id=?').run(this.workspace(parentSessionId), id)
       this.database.connection.prepare('INSERT INTO subagent_role_snapshots VALUES(?,?,?,?)').run(id, JSON.stringify(definition), JSON.stringify(skillSnapshots), now)
       const parentDeadline = parent ? this.raw(parent.id).deadline_at : null
       const deadline = Math.min(now + Math.min(timeoutMs, definition.timeoutMs), parentDeadline == null ? Number.MAX_SAFE_INTEGER : Number(parentDeadline))

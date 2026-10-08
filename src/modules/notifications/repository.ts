@@ -38,7 +38,7 @@ export class DesktopReminderRepository {
 
   list(raw: unknown) {
     const input = desktopReminderListSchema.parse(raw)
-    return this.sessions.database.connection.prepare(`SELECT id FROM desktop_reminders WHERE ${accountFilter(this.sessions.database, 'session_id')} AND (? OR state='pending') ORDER BY created_at,id LIMIT ?`)
+    return this.sessions.database.connection.prepare(`SELECT id FROM desktop_reminders WHERE ${accountFilter(this.sessions.database, 'session_id')} AND (? OR state IN ('pending','displayed')) ORDER BY created_at,id LIMIT ?`)
       .all(Number(input.includeClosed), input.limit).map(row => this.read(String(row.id)))
   }
 

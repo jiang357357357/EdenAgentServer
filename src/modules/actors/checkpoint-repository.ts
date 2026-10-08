@@ -1,15 +1,27 @@
 import { actorIdSchema, runtimeCheckpointSchema } from '@eden/api'
 import type { RuntimeCheckpoint } from '@eden/api'
 import type { SessionRepository } from '../sessions/index.ts'
+import { RuntimePersistenceError, assertRuntimeCheckpoint } from '@eden/runtime-pi'
 
 export class ActorCheckpointRepository {
   constructor(private readonly sessions: SessionRepository) {}
 
   read(sessionId: string, assistantId: string | number): RuntimeCheckpoint | undefined {
     this.sessions.assertContextReady(sessionId)
-    const row = this.sessions.database.connection.prepare('SELECT checkpoint_json FROM actor_checkpoints WHERE session_id=? AND assistant_id=?')
-      .get(sessionId, String(actorIdSchema.parse(assistantId)))
-    return row ? runtimeCheckpointSchema.parse(JSON.parse(String(row.checkpoint_json))) : undefined
+    const id = String(actorIdSchema.parse(assistantId))
+    try {
+      const row = this.sessions.database.connection.prepare('SELECT checkpoint_json FROM actor_checkpoints WHERE session_id=? AND assistant_id=?')
+        .get(sessionId, id)
+      return row ? runtimeCheckpointSchema.parse(JSON.parse(String(row.checkpoint_json))) : undefined
+    } catch (error) { throw new RuntimePersistenceError('角色检查点读取失败', error) }
+  }
+
+  assertRecoverable(sessionId: string): void {
+    this.sessions.assertContextReady(sessionId)
+    try {
+      const rows = this.sessions.database.connection.prepare('SELECT checkpoint_json FROM actor_checkpoints WHERE session_id=?').all(sessionId)
+      for (const row of rows) assertRuntimeCheckpoint(runtimeCheckpointSchema.parse(JSON.parse(String(row.checkpoint_json))), sessionId)
+    } catch (error) { throw new RuntimePersistenceError('角色检查点恢复检查失败', error) }
   }
 
   save(sessionId: string, assistantId: string | number, turnId: string, snapshot: RuntimeCheckpoint): void {

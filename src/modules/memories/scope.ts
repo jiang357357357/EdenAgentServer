@@ -22,6 +22,8 @@ export class MemoryScopes {
   }
 
   optionalCurrent(sessionId: string, turnId: string, actorId?: string | number): MemoryScope | undefined {
+    // Group conversations must neither recall nor write the owner's private character memory.
+    if (this.database.connection.prepare('SELECT 1 FROM qq_group_sessions WHERE session_id=?').get(sessionId)) return undefined
     const row = this.database.connection.prepare(`SELECT inputs.metadata_json FROM inputs JOIN sessions ON sessions.id=inputs.session_id
       WHERE inputs.session_id=? AND inputs.turn_id=? AND inputs.state='running' AND sessions.status='active'`).get(sessionId, turnId)
     if (!row) throw new Error('Memory access requires an active input')

@@ -1,10 +1,21 @@
 import { accountFilter, currentAccount, SessionOwnership } from '../accounts/index.ts'
 import { randomUUID } from 'node:crypto'
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises'
 import type { EdenDatabase } from '@eden/store'
 import { modelContextUsage, runtimeCheckpointSchema, runtimeOriginSchema, sessionPurposeSchema, sessionSourceChannelSchema, toJson } from '@eden/api'
 import type { JsonValue, RuntimeCheckpoint, RuntimeOrigin, SessionPurpose, SessionSourceChannel } from '@eden/api'
 import type { SessionSummary } from './contracts.ts'
 import { SessionEvents } from './session-events.ts'
+import { latestMetadataEvent } from './session-metadata-query.ts'
+import { readReplyTimer } from './reply-timer-query.ts'
+import { sessionStorage } from './session-storage.ts'
+
+interface SessionMetadata {
+  participants: JsonValue[]
+  environment: JsonValue
+  metadataSeq: string
+  metadataUpdatedAt: number
+}
 
 export class SessionRepository {
   readonly events: SessionEvents
@@ -42,10 +53,9 @@ export class SessionRepository {
     const row = this.database.connection.prepare(`SELECT s.*,c.purpose,c.source_channel FROM sessions s
       JOIN session_classification c ON c.session_id=s.id WHERE s.id=? AND s.origin=? AND s.status!='deleted'`).get(id, this.origin)
     if (!row) throw new Error('Session not found')
-    const created = this.database.connection.prepare("SELECT payload_json FROM events WHERE session_id=? AND kind IN ('session.created','session.metadata.updated') ORDER BY seq DESC LIMIT 1").get(id)
-    const metadata: Record<string, unknown> = JSON.parse(String(created?.payload_json ?? '{}'))
-    const latestUsage = this.database.connection.prepare("SELECT payload_json FROM events WHERE session_id=? AND kind='model.response' AND json_type(payload_json,'$.usage.input') IN ('integer','real') AND json_extract(payload_json,'$.usage.input')>=0 AND json_type(payload_json,'$.usage.output') IN ('integer','real') AND json_extract(payload_json,'$.usage.output')>=0 ORDER BY seq DESC LIMIT 1").get(id)
-    const usage = latestUsage ? modelContextUsage(JSON.parse(String(latestUsage.payload_json))) : undefined
+    const metadata = this.metadata(id, Number(row.created_at))
+    const latestUsage = this.events.latestUsagePayload(id)
+    const usage = latestUsage ? modelContextUsage(latestUsage) : undefined
     const runningInput = this.database.connection.prepare("SELECT 1 FROM inputs WHERE session_id=? AND state IN ('queued','running') LIMIT 1").get(id)
     return {
       ...usage,
@@ -53,12 +63,61 @@ export class SessionRepository {
       status: row.status === 'closed' ? 'closed' : 'active', executionStatus: runningInput ? 'busy' : 'idle',
       runtimeOrigin: runtimeOriginSchema.parse(row.origin),
       purpose: sessionPurposeSchema.parse(row.purpose), sourceChannel: sessionSourceChannelSchema.parse(row.source_channel),
-      participants: Array.isArray(metadata.participants) ? metadata.participants.map(toJson) : [],
-      environment: toJson(metadata.environment ?? null), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at),
+      participants: metadata.participants, environment: metadata.environment,
+      createdAt: Number(row.created_at), updatedAt: Number(row.updated_at),
+    }
+  }
+
+  /** Synchronization needs the current roster/environment, not usage, titles or input queue state. */
+  readMetadata(id: string): SessionMetadata {
+    this.ownership.assert(id)
+    const row = this.database.connection.prepare("SELECT created_at FROM sessions WHERE id=? AND origin=? AND status!='deleted'").get(id, this.origin)
+    if (!row) throw new Error('Session not found')
+    return this.metadata(id, Number(row.created_at))
+  }
+
+  replyTimer(id: string) {
+    this.readMetadata(id)
+    return readReplyTimer(this.database, id)
+  }
+
+  private metadata(id: string, createdAt: number): SessionMetadata {
+    const latest = latestMetadataEvent(this.database, id, ['session.created', 'session.metadata.updated'])
+    const payload: Record<string, unknown> = JSON.parse(latest?.payloadJson ?? '{}')
+    return {
+      participants: Array.isArray(payload.participants) ? payload.participants.map(toJson) : [],
+      environment: toJson(payload.environment ?? null),
+      metadataSeq: String(latest?.seq ?? 0n), metadataUpdatedAt: latest?.createdAt ?? createdAt,
     }
   }
 
   list(limit = 100, includeClosed = false, includeBackground = true, purpose?: SessionPurpose, sourceChannel?: SessionSourceChannel): SessionSummary[] {
+    return this.listIds(limit, includeClosed, includeBackground, purpose, sourceChannel).map(id => this.read(id))
+  }
+
+  /** Snapshot ordered IDs, then recheck each summary's ownership while allowing other connections to run. */
+  async listAsync(limit = 100, includeClosed = false, includeBackground = true, purpose?: SessionPurpose,
+    sourceChannel?: SessionSourceChannel, signal?: AbortSignal): Promise<SessionSummary[]> {
+    await yieldToEventLoop(undefined, { signal })
+    const ids = this.listIds(limit, includeClosed, includeBackground, purpose, sourceChannel)
+    const sessions: SessionSummary[] = []
+    let count = 0, started = performance.now()
+    for (const id of ids) {
+      if (count >= 25 || performance.now() - started >= 8) {
+        await yieldToEventLoop(undefined, { signal })
+        count = 0; started = performance.now()
+      }
+      signal?.throwIfAborted()
+      // A deleted session or revoked owner rejects the entire read, never a partial authorized snapshot.
+      sessions.push(this.read(id))
+      count++
+    }
+    signal?.throwIfAborted()
+    return sessions
+  }
+
+  private listIds(limit: number, includeClosed: boolean, includeBackground: boolean,
+    purpose?: SessionPurpose, sourceChannel?: SessionSourceChannel): string[] {
     const defaultApp = !includeBackground && !purpose && !sourceChannel
     return this.database.connection.prepare(`SELECT s.id FROM sessions s JOIN session_classification c ON c.session_id=s.id
       WHERE ${accountFilter(this.database, 's.id')} AND s.origin=? AND s.status!='deleted' AND (? OR s.status='active')
@@ -66,10 +125,11 @@ export class SessionRepository {
       AND (?=0 OR (c.purpose='user_chat' AND c.source_channel='app'))
       ORDER BY s.updated_at DESC LIMIT ?`)
       .all(this.origin, Number(includeClosed), purpose ?? null, purpose ?? null, sourceChannel ?? null, sourceChannel ?? null,
-        Number(defaultApp), Math.min(limit, 1000)).map(row => this.read(String(row.id)))
+        Number(defaultApp), Math.min(limit, 1000)).map(row => String(row.id))
   }
 
   rename(id: string, title: string): SessionSummary {
+    this.readMetadata(id)
     this.updateTitle(id, title, 'user')
     return this.read(id)
   }
@@ -102,11 +162,10 @@ export class SessionRepository {
   }
 
   private titleSource(id: string, storedTitle = ''): string | undefined {
-    const latest = this.database.connection.prepare(`SELECT kind,payload_json FROM events WHERE session_id=?
-      AND kind IN ('session.title_updated','session.renamed') ORDER BY seq DESC LIMIT 1`).get(id)
+    const latest = latestMetadataEvent(this.database, id, ['session.title_updated', 'session.renamed'])
     if (latest) {
       if (latest.kind === 'session.renamed') return 'user'
-      const payload = JSON.parse(String(latest.payload_json)) as { titleSource?: unknown }
+      const payload = JSON.parse(latest.payloadJson) as { titleSource?: unknown }
       if (typeof payload.titleSource === 'string') return payload.titleSource
     }
     if (!storedTitle) {
@@ -141,8 +200,11 @@ export class SessionRepository {
 
   checkpoint(sessionId: string): RuntimeCheckpoint | undefined {
     this.assertContextReady(sessionId)
-    const row = this.database.connection.prepare('SELECT checkpoint_json FROM runtime_checkpoints WHERE session_id=?').get(sessionId)
-    return row ? runtimeCheckpointSchema.parse(JSON.parse(String(row.checkpoint_json))) : undefined
+    return sessionStorage('会话检查点读取失败', () => {
+      const row = this.database.connection.prepare('SELECT checkpoint_json FROM runtime_checkpoints WHERE session_id=?').get(sessionId)
+      const checkpoint = row ? runtimeCheckpointSchema.parse(JSON.parse(String(row.checkpoint_json))) : undefined
+      return checkpoint
+    })
   }
 
   assertContextReady(sessionId: string): void {
@@ -150,12 +212,12 @@ export class SessionRepository {
   }
 
   saveCheckpoint(snapshot: RuntimeCheckpoint, turnId: string): void {
-    const event = this.database.transaction(() => {
+    const event = sessionStorage('会话检查点提交失败', () => this.database.transaction(() => {
       this.database.connection.prepare(`INSERT INTO runtime_checkpoints VALUES (?, ?, ?)
         ON CONFLICT(session_id) DO UPDATE SET checkpoint_json=excluded.checkpoint_json, updated_at=excluded.updated_at`)
         .run(snapshot.sessionId, JSON.stringify(snapshot), Date.now())
       return this.events.insert(snapshot.sessionId, turnId, 'runtime.checkpoint', { entries: snapshot.entries.length })
-    })
+    }))
     this.events.publish(event)
   }
 }

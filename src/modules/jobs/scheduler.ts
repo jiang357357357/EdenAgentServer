@@ -1,3 +1,4 @@
+import { logDiagnostic } from '../logging/index.ts'
 import type { JobInfo } from '@eden/api'
 import type { JobRepository } from './repository.ts'
 
@@ -47,7 +48,7 @@ export class JobScheduler {
     } catch (error) {
       this.failure = error instanceof Error ? error.message : String(error)
       this.closed = true
-      process.stderr.write(`Job scheduler stopped: ${this.failure}\n`)
+      logDiagnostic({ event: 'job.scheduler.stopped', message: '任务调度器已停止。', error }, 'error')
     }
   }
 }

@@ -17,19 +17,41 @@ export class SelfAwakeBridgeRepository {
     if (row.request_hash !== hash) throw new Error('Idempotency key was used with a different request')
     return this.jobs.read(String(row.job_id))
   }
-  coalesce(user: string, key: string, hash: string) {
+  coalesce(user: string, key: string, hash: string, sessionId?: string) {
     return this.database.transaction(() => {
       const existing = this.existing(user, key, hash)
       if (existing) return existing
       const row = this.database.connection.prepare(`SELECT j.id FROM jobs j
         JOIN self_awake_submissions s ON s.job_id=j.id LEFT JOIN self_awake_runs r ON r.job_id=j.id
-        WHERE s.user_id=? AND j.kind='self_awake' AND
+        WHERE s.user_id=? AND j.kind='self_awake'
+          AND ((? IS NOT NULL AND j.session_id=?) OR (? IS NULL AND COALESCE(json_extract(j.payload_json,'$.scheduleScope'),'legacy')='legacy')) AND
           (j.state IN ('queued','running','dispatched','unknown') OR r.state IN ('running','awaiting_action','action_running','action_interrupted'))
-        ORDER BY j.created_at LIMIT 1`).get(user)
+        ORDER BY j.created_at LIMIT 1`).get(user, sessionId ?? null, sessionId ?? null, sessionId ?? null)
       if (!row) return undefined
       this.database.connection.prepare('INSERT INTO self_awake_submission_aliases(user_id,request_key,request_hash,job_id) VALUES(?,?,?,?)')
         .run(user, key, hash, row.id!)
       return this.jobs.read(String(row.id))
+    })
+  }
+  activate(user: string, key: string, hash: string, sessionId: string, jobId: string) {
+    return this.database.transaction(() => {
+      const existing = this.existing(user, key, hash)
+      if (existing) {
+        if (existing.sessionId !== sessionId || existing.id !== jobId) throw new Error('Self-awake request belongs to another session plan')
+        return existing
+      }
+      const job = this.jobs.read(jobId)
+      if (job.kind !== 'self_awake' || job.sessionId !== sessionId) throw new Error('Self-awake plan does not belong to the requested session')
+      if (job.state !== 'queued') throw new Error('Self-awake plan is no longer pending')
+      if (job.dueAt > Date.now() + 1000) throw new Error('Self-awake plan is not due')
+      const payload = job.payload && typeof job.payload === 'object' && !Array.isArray(job.payload) ? job.payload : {}
+      this.database.connection.prepare('UPDATE jobs SET payload_json=?,updated_at=? WHERE id=? AND state=\'queued\'')
+        .run(JSON.stringify({ ...payload, scheduler: 'monos', scheduleScope: 'session', userId: user }), Date.now(), jobId)
+      const owner = this.database.connection.prepare('SELECT user_id FROM self_awake_submissions WHERE job_id=?').get(jobId)
+      if (owner && owner.user_id !== user) throw new Error('Self-awake plan owner mismatch')
+      const table = owner ? 'self_awake_submission_aliases' : 'self_awake_submissions'
+      this.database.connection.prepare(`INSERT INTO ${table}(user_id,request_key,request_hash,job_id) VALUES(?,?,?,?)`).run(user, key, hash, jobId)
+      return this.jobs.read(jobId)
     })
   }
   submit(user: string, key: string, hash: string, input: JobSchedule) {
@@ -44,7 +66,8 @@ export class SelfAwakeBridgeRepository {
   status(user: string, id: string) {
     if (!this.database.connection.prepare('SELECT 1 FROM self_awake_submissions WHERE user_id=? AND job_id=?').get(user, id)) throw new Error('Self-awake job owner mismatch')
     const job = this.jobs.read(id)
-    const run = this.database.connection.prepare('SELECT id,state,decision_json,last_error,started_at,updated_at FROM self_awake_runs WHERE job_id=?').get(id)
+    const run = this.database.connection.prepare(`SELECT r.id,r.state,r.decision_json,r.last_error,a.started_at,r.updated_at
+      FROM self_awake_runs r LEFT JOIN self_awake_activations a ON a.run_id=r.id WHERE r.job_id=?`).get(id)
     const state = job.state === 'failed' ? 'failed' : String(run?.state ?? job.state)
     // MonOs polls only pending/running; exposing queued would finish the wake prematurely.
     const status = ['queued', 'preparing'].includes(state) ? 'pending'

@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { memoryKindSchema } from '@eden/api'
 import type { JsonValue } from '@eden/api'
-import { completeText } from '@eden/runtime-pi'
+import { completeTextIsolated as completeText } from '@eden/runtime-pi'
 import type { RuntimeModel } from '@eden/runtime-pi'
 import { memoryContent } from './content.ts'
 import { MEMORY_EXTRACTION_PROMPT } from '../../model-prompts/memory.ts'

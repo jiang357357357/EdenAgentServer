@@ -53,6 +53,8 @@ export class PermissionModeStore {
   }
 
   allowsQq(sessionId: string, capability: string): boolean {
+    const group = this.database.connection.prepare('SELECT allow_actions FROM qq_group_sessions WHERE session_id=?').get(sessionId)
+    if (group) return capability === 'qq.napcat.group.read' || (capability === 'qq.napcat.group.write' && group.allow_actions === 1)
     const row = this.database.connection.prepare('SELECT bot_qq,contact_qq FROM qq_channel_conversations WHERE session_id=?')
       .get(sessionId)
     if (!row) return false

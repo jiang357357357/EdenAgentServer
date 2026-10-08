@@ -47,15 +47,15 @@ function failureReason(error: unknown): { reason: string; errorName: string; err
   }
 }
 
-export function startupStage(origin: RuntimeOrigin, stage: string, accountDirectory?: string): string {
-  return JSON.stringify({
+export function startupStage(origin: RuntimeOrigin, stage: string, accountDirectory?: string) {
+  return {
     event: "server.startup",
     origin,
     stage,
     pid: process.pid,
     time: new Date().toISOString(),
     ...(accountDirectory ? { account: accountDirectory.slice(0, 12) } : {}),
-  })
+  }
 }
 
 export function accountStartupFailure(
@@ -63,8 +63,8 @@ export function accountStartupFailure(
   fallbackStage: AccountStartupStage | "account.resume",
   accountDirectory: string,
   error: unknown,
-): string {
-  return JSON.stringify({
+) {
+  return {
     event: "server.account.failure",
     origin,
     stage: error instanceof AccountStartupError ? error.stage : fallbackStage,
@@ -73,5 +73,5 @@ export function accountStartupFailure(
     time: new Date().toISOString(),
     retainedForRecovery: true,
     ...failureReason(error),
-  })
+  }
 }

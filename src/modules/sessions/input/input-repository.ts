@@ -4,6 +4,7 @@ import type { JsonValue } from '@eden/api'
 import type { EdenDatabase } from '@eden/store'
 import type { SessionInput, AcceptedInput } from '../contracts.ts'
 import { SessionEvents } from '../session-events.ts'
+import { sessionStorage } from '../session-storage.ts'
 
 export class InputRepository {
   constructor(private readonly database: EdenDatabase, private readonly events: SessionEvents) {}
@@ -61,7 +62,7 @@ export class InputRepository {
   }
 
   claim(sessionId: string): SessionInput | undefined {
-    const result = this.database.transaction(() => {
+    const result = sessionStorage('待执行输入读取失败', () => this.database.transaction(() => {
       const row = this.database.connection.prepare("SELECT * FROM inputs WHERE session_id=? AND state='queued' ORDER BY created_at, rowid LIMIT 1").get(sessionId)
       if (!row) return undefined
       const input: SessionInput = { id: String(row.id), sessionId, turnId: String(row.turn_id), text: String(row.text), state: 'running',
@@ -70,20 +71,59 @@ export class InputRepository {
       this.database.connection.prepare("UPDATE inputs SET state='running' WHERE id=?").run(input.id)
       this.database.connection.prepare('INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?)').run(input.turnId, sessionId, 'running', null, now, now)
       return { input, event: this.events.insert(sessionId, input.turnId, 'turn.started', { inputId: input.id }) }
-    })
+    }))
     if (result) this.events.publish(result.event)
     return result?.input
   }
 
   finish(input: SessionInput, error?: string): void {
     const state = error ? 'interrupted' : 'completed'
-    const event = this.database.transaction(() => {
+    const events = sessionStorage('会话结束状态提交失败', () => this.database.transaction(() => {
       this.database.connection.prepare('UPDATE inputs SET state=? WHERE id=?').run(state, input.id)
       this.database.connection.prepare('UPDATE turns SET state=?, error=?, updated_at=? WHERE id=?').run(state, error ?? null, Date.now(), input.turnId)
       this.database.connection.prepare('UPDATE sessions SET updated_at=? WHERE id=?').run(Date.now(), input.sessionId)
-      return this.events.insert(input.sessionId, input.turnId, error ? 'input.interrupted' : 'turn.completed', { inputId: input.id, reason: error ?? null })
-    })
-    this.events.publish(event)
+      let startedAt: number | undefined
+      if (!error) {
+        const boundary = this.database.connection.prepare(`SELECT created_at FROM events INDEXED BY events_session_turn_kind_seq
+          WHERE session_id=? AND turn_id=? AND kind='turn.started' ORDER BY seq LIMIT 1`)
+        boundary.setReadBigInts(true)
+        const row = boundary.get(input.sessionId, input.turnId)
+        const timestamp = row ? Number(row.created_at) : NaN
+        if (Number.isSafeInteger(timestamp) && timestamp >= 0) startedAt = timestamp
+      }
+      const recovery = error ? [...this.interruptOperations(input, error), ...this.holdQueuedEvents(input.sessionId, error)] : []
+      const event = this.events.insert(input.sessionId, input.turnId, error ? 'input.interrupted' : 'turn.completed', {
+        inputId: input.id, reason: error ?? null, ...(startedAt === undefined ? {} : { turnTiming: { startedAt } }),
+      })
+      return [...recovery, event]
+    }))
+    for (const event of events) this.events.publish(event)
+  }
+
+  holdQueued(sessionId: string, reason: string): void {
+    const events = sessionStorage('待执行输入暂停失败', () => this.database.transaction(() => this.holdQueuedEvents(sessionId, reason)))
+    for (const event of events) this.events.publish(event)
+  }
+
+  private holdQueuedEvents(sessionId: string, reason: string) {
+    const rows = this.database.connection.prepare("SELECT id,turn_id FROM inputs WHERE session_id=? AND state='queued'").all(sessionId)
+    this.database.connection.prepare("UPDATE inputs SET state='held' WHERE session_id=? AND state='queued'").run(sessionId)
+    return rows.map(row => this.events.insert(sessionId, String(row.turn_id), 'input.held', { inputId: String(row.id), reason }))
+  }
+
+  private interruptOperations(input: SessionInput, reason: string) {
+    const rows = this.database.connection.prepare("SELECT id FROM tool_operations WHERE session_id=? AND turn_id=? AND state='running'")
+      .all(input.sessionId, input.turnId)
+    this.database.connection.prepare("UPDATE tool_operations SET state='unknown',error_json=?,updated_at=? WHERE session_id=? AND turn_id=? AND state='running'")
+      .run(JSON.stringify({ error: reason }), Date.now(), input.sessionId, input.turnId)
+    return rows.map(row => this.events.insert(input.sessionId, input.turnId, 'operation.completed', {
+      callId: String(row.id).slice(input.turnId.length + 1), result: { error: reason }, failed: true, outcome: 'unknown',
+    }))
+  }
+
+  running(sessionId: string): SessionInput[] {
+    return this.database.connection.prepare("SELECT id,turn_id,text FROM inputs WHERE session_id=? AND state='running'").all(sessionId)
+      .map(row => ({ id: String(row.id), sessionId, turnId: String(row.turn_id), text: String(row.text), state: 'running' }))
   }
 
   recoverInterrupted(): number {
