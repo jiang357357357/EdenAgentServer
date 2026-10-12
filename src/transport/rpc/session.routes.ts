@@ -2,6 +2,7 @@ import { eventListSchema, sessionCreateSchema, sessionIdSchema, sessionListSchem
 import { sessionTitleSchema, sessionParticipantsSchema, messageListSchema, sessionCompactSchema, turnQueueSchema } from '@eden/api'
 import type { DurableEvent, JsonValue } from '@eden/api'
 import type { SessionService, SessionSummary } from '../../modules/sessions/index.ts'
+import { MessageDeletion } from '../../modules/sessions/index.ts'
 import { eventPayload } from './event-payload.ts'
 import { rpcMethods } from '@eden/api'
 import { contractHandler } from './contract-handler.ts'
@@ -71,6 +72,10 @@ export function sessionRoutes(service: SessionService, signal?: AbortSignal): Re
       repository.read(params.sessionId)
       const page = repository.events.messages(params.sessionId, params.before ?? undefined, params.limit)
       return { ...page, items: page.items.map(wireEvent) }
+    },
+    'message.delete': value => {
+      const { sessionId, messageId } = rpcMethods['message.delete'].params.parse(value)
+      return service.configureWhileIdle(sessionId, async () => new MessageDeletion(repository).remove(sessionId, messageId)).then(toJson)
     },
   }
   return { ...inputRecoveryRoutes(repository, service), ...Object.fromEntries(Object.entries(handlers).map(([method, handler]) => {

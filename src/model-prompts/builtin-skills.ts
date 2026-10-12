@@ -1,17 +1,12 @@
 import { SELF_AWAKE_DIARY_CLOCK } from './self-awake.ts'
+import { sharedWorkspaceUsage } from './shared-workspace.ts'
 
 /** Instruction content only: execution schemas and permissions belong to their tools. */
 export const BUILTIN_SKILL_GUIDES = [
   {
     name: 'eden-shared-library', description: '独立共享资料库：查询资料库及同步状态，读取、创建和编辑共享文件，不改变当前工作区。',
     tools: ['query_shared_workspace', 'read_shared_file', 'write_shared_file', 'edit_shared_file'], profiles: ['user_chat', 'self_awake', 'subagent'],
-    content: `# 共享资料库
-共享资料库有自己的本地目录选择，按当前伊甸园账号保存，与会话工作区分开。共享文件使用库内相对路径，不通过 read_file/write_file 操作，也不需要切换工作区。
-先用 query_shared_workspace 查询 action=status；action=spaces 查看已授权的资料库，action=files 查询所选共享目录绑定库的同步索引。用户在共享资料库页面独立选择目录、绑定和修改权限，智能体不能自行改变共享范围。
-读取使用 read_shared_file，可按字节 offset/limit 分页。索引记录存在不保证文件已经下载；以实际读取结果为准。
-创建或替换使用 write_shared_file，局部修改使用 edit_shared_file。宿主要求资料库编辑权限和写入审批，并在提交时检查文件版本及目录绑定。只有读取权限时不尝试修改；失败后读取最新内容，再决定是否重试。
-写入成功表示本地文件已修改，不代表对端收到；通过 query_shared_workspace 查询同步、暂停、离线或冲突情况。当前工作区和共享目录的同名文件是不同资源。
-工具接口可用时直接调用；尚未暴露时通过 list_tools 找到相应共享文件工具，再用 load_tools 加载。需要流程指导时读取本技能，不要求每轮重复加载。`,
+    content: sharedWorkspaceUsage,
   },
   {
     name: 'web-research', description: '搜索实时网页信息、读取公开网页正文，并在已读取页面中定位相关内容。',
@@ -44,18 +39,19 @@ export const BUILTIN_SKILL_GUIDES = [
     content: `# 工作区操作
 先确认当前已选择的工作区和任务范围，再阅读相关文件及项目说明。没有工作区时不要猜测路径或声称已访问项目。
 通过 read_file 理解现有内容，使用 write_file 修改必要部分，保留用户已有改动。命令操作使用 exec_command，并明确工作目录。
-先判断命令是否会覆盖文件、修改外部系统或产生其他副作用，遵循宿主审批结果。工具返回失败时查看原因，不能凭发出调用就报告成功。
+先判断命令是否会覆盖文件、修改外部系统或产生其他副作用。工具返回失败时查看原因，不能凭发出调用就报告成功。
 按任务需要验证最终结果，报告实际完成内容与尚未验证的部分。`,
   },
   {
     name: 'eden-contact', description: '主动找用户聊天、分享或邀请，选择 QQ、邮件或在线设备，并核实投递与回复。',
-    tools: ['list_contact_channels', 'read_recent_conversation', 'read_qq_messages', 'send_qq_message', 'send_external_email',
+    tools: ['list_contact_channels', 'read_recent_conversation', 'read_qq_messages', 'send_qq_message', 'send_qq_file', 'send_external_email',
       'list_esp32_devices', 'control_esp32_device', 'get_esp32_command_status'], profiles: ['user_chat', 'self_awake'],
     content: `# 主动联系
 想起共同话题、有发现想分享、想问近况或邀请用户一起做点事，都可以成为联系的理由，无需包装成任务汇报。结合当前角色自然开口，也可以暂时安静。
-需要接上聊天时，read_qq_messages 查看 QQ 最近十轮，read_recent_conversation 查看最新会话最近三轮。联系渠道用 list_contact_channels。发送邮件用 send_external_email；本机 sendmail/Exim 与已配置的外部邮件渠道是两回事。短聊优先 QQ，长信可用邮件，设备需先发现在线设备与声明能力，再选择消息卡片、短提示或合适的来电。
+需要接上聊天时，read_qq_messages 查看 QQ 最近十轮，read_recent_conversation 查看最新会话最近三轮。联系渠道用 list_contact_channels，邮件用 send_external_email。短聊优先 QQ，长信可用邮件，设备需先发现在线设备与声明能力，再选择消息卡片、短提示或合适的来电。
 一次选一个合适渠道；相同话题近期已发送且无新回复时留出空间，避免跨渠道追问。接受、送达、已读和回复是不同事实，结果未知先查询，明确失败后再判断是否换渠道。
-邮件与设备当前没有回复正文读取接口，保留未知；设备命令可查询执行/接听状态。行动遵循已有授权及用户的渠道与时段偏好，权限不足就记录原因。`,
+用户要求向自己的 QQ 发工作区文件时，使用 send_qq_file 的相对路径；App 会话也可使用，默认机器人与接收者由 Core 配置确定。不要改用要求公网 URL 的 upload_private_file，也不要猜测 bot_id、服务器文件路径或把文件内容塞进文字消息。
+邮件与设备当前没有回复正文读取接口，保留未知；设备命令可查询执行/接听状态。遵循用户的渠道与时段偏好。`,
   },
   {
     name: 'eden-self-awake', description: '写日记与设置唤醒时钟。',

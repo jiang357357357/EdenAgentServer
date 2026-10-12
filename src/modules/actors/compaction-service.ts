@@ -28,7 +28,7 @@ export class ActorCompactionService {
     }
     const guarded: RuntimeCallbacks = {
       checkpoint: snapshot => guard(() => callbacks.checkpoint(snapshot)),
-      event: (kind, payload) => guard(() => callbacks.event(kind, payload)),
+      event: (kind, payload, delivery) => guard(() => callbacks.event(kind, payload, delivery)),
       request: snapshot => guard(() => callbacks.request(snapshot)),
     }
     const runtime = createRuntime({ sessionId: input.sessionId, model, checkpoint, tools: [], systemPrompt: '', callbacks: guarded })

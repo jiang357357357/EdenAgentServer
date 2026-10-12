@@ -2,29 +2,29 @@ import { randomUUID } from 'node:crypto'
 import type { SchemaRpcMethodMap, SessionEvent, SessionSummary } from '@eden/api'
 import { presentEvent } from './event-view.ts'
 import { Terminal } from './terminal.ts'
-import { TuiRpcClient } from './rpc-client.ts'
+import { TuiRpcClient, TuiRpcError } from './rpc-client.ts'
 import { AuthFlow } from './auth-flow.ts'
 import { ModelFlow } from './model-flow.ts'
 import type { TuiConfig } from './config.ts'
 import { currentParticipant } from './core-participant.ts'
-import { showCommandHelp, showCommandMenu } from './command-menu.ts'
+import { sessionCommands } from './session-commands.ts'
+import { reference } from './session-reference.ts'
+import { capabilityToken } from './config.ts'
+import type { InputSubmission } from './input-drafts.ts'
+import { ReconnectLoop } from './reconnect-loop.ts'
+import { rememberOperation, storedTool, type ToolHistory } from './tool-view.ts'
+import { formatElapsed, participantLabel } from './status-view.ts'
 
 type Permission = SchemaRpcMethodMap['permission.list']['result'][number]
 type Question = SchemaRpcMethodMap['question.list']['result'][number]
 
-function reference<T extends { id: string }>(items: T[], value: string): T {
-  const index = Number(value)
-  const matches = /^\d+$/.test(value) ? [items[index - 1]].filter((item): item is T => Boolean(item))
-    : items.filter(item => item.id === value || item.id.startsWith(value))
-  if (matches.length !== 1) throw new Error('编号或 ID 不唯一；先查看列表')
-  return matches[0]!
-}
 
 export class TuiApp {
   private readonly rpc = new TuiRpcClient()
-  private readonly terminal = new Terminal(line => this.enqueue(line))
+  private readonly terminal = new Terminal((line, submission) => this.enqueue(line, submission))
   private readonly auth: AuthFlow
   private readonly models: ModelFlow
+  private readonly reconnect: ReconnectLoop
   private queue = Promise.resolve()
   private sessions: SessionSummary[] = []
   private permissions: Permission[] = []
@@ -35,15 +35,25 @@ export class TuiApp {
   private historyBefore: string | null = null
   private loading = false
   private readonly buffered: SessionEvent[] = []
-  private readonly tools = new Map<string, { name: string; args: string }>()
+  private readonly tools: ToolHistory = new Map()
   private closing = false
   private connecting = false
   private suppressDisconnect = false
   private connected = false
+  private connectionGeneration = 0
 
   constructor(private readonly config: TuiConfig, private readonly capability: string) {
-    this.auth = new AuthFlow(config, this.terminal, token => this.connectWithToken(token), () => this.disconnect())
+    this.auth = new AuthFlow(config, this.terminal, token => this.connectWithToken(token), reset => this.disconnect(reset))
     this.models = new ModelFlow(config, this.rpc, this.terminal, () => this.auth.token, () => this.current?.id)
+    this.reconnect = new ReconnectLoop({
+      attempt: async () => {
+        if (this.closing || this.terminal.isClosed || !this.auth.retryable) return false
+        await this.auth.retry()
+        return !this.connected && this.auth.retryable
+      },
+      progress: (attempt, limit) => this.terminal.print('连接', `正在重连 ${attempt}/${limit}；/reconnect-stop 停止`),
+      exhausted: () => this.terminal.print('连接', '自动重连次数已用完；输入 /retry 手动重试'),
+    })
     this.terminal.setWorld(config.origin)
     this.rpc.onEvent(event => this.onEvent(event))
     this.rpc.onClose(() => {
@@ -51,40 +61,57 @@ export class TuiApp {
       this.connected = false
       this.terminal.setConnected(false)
       this.auth.disconnected('Agent Server 连接已断开')
-      this.terminal.print('系统', '连接已断开；未确认的操作请查看历史，重启 TUI 后可继续')
+      this.terminal.print('系统', '连接已断开；正在尝试恢复会话。未确认的输入不会自动重发')
+      this.reconnect.start()
     })
   }
 
   async run(): Promise<void> {
     const done = this.terminal.start()
     try {
-      await this.auth.bootstrap()
+      await Promise.race([this.auth.bootstrap(), done])
+      if (this.terminal.isClosed) return
+      if (this.auth.retryable) this.reconnect.start()
       await done
     } finally {
       this.closing = true
+      this.reconnect.stop()
+      this.auth.cancel()
       this.rpc.close()
       this.terminal.close()
     }
   }
 
   private async connectWithToken(token?: string): Promise<void> {
+    const generation = ++this.connectionGeneration
+    const check = () => { if (generation !== this.connectionGeneration || this.terminal.isClosed) throw new Error('连接已取消') }
     this.connecting = true
     try {
-      await this.rpc.connect(this.config.origin, this.config.port, this.capability, token)
+      const capability = this.config.tokenFile ? capabilityToken(this.config) : this.capability
+      await this.rpc.connect(this.config.origin, this.config.port, capability, token)
+      check()
       this.connected = true
       this.terminal.setConnected(true)
       await this.listSessions(false)
+      check()
       const resume = this.current?.id ?? this.config.sessionId
       if (resume) await this.selectSession(resume)
       else this.showHome()
-    } finally { this.connecting = false }
+      check()
+    } finally { if (generation === this.connectionGeneration) this.connecting = false }
   }
 
-  private disconnect(): void {
+  private disconnect(reset = true): void {
+    this.connectionGeneration++
+    this.connecting = false
     this.suppressDisconnect = true
     try { this.rpc.close() }
     finally { this.suppressDisconnect = false }
     this.connected = false
+    this.terminal.setConnected(false)
+    if (!reset) return
+    this.reconnect.stop()
+    this.loading = false
     this.current = undefined
     this.sessions = []
     this.permissions = []
@@ -94,12 +121,14 @@ export class TuiApp {
     this.buffered.length = 0
     this.terminal.setSessions([])
     this.terminal.setPending(0, 0)
-    this.terminal.setConnected(false)
-    this.terminal.home()
+    this.terminal.clearAccount()
   }
 
-  private enqueue(line: string): void {
+  private enqueue(line: string, submission?: InputSubmission): void {
+    if (line === '/reconnect-stop') { this.stopReconnect(); return }
+    if (line === '/quit') { this.terminal.close(); this.reconnect.stop(); return }
     this.queue = this.queue.then(() => this.handle(line)).catch(error => {
+      if (submission) this.terminal.recoverSubmission(submission, !(error instanceof TuiRpcError && error.uncertain), this.current?.id)
       if (!this.auth.authenticated || !this.connected) this.auth.report(error)
       else this.terminal.print('错误', error instanceof Error ? error.message : String(error))
     })
@@ -115,13 +144,19 @@ export class TuiApp {
     const seq = BigInt(event.seq)
     if (seq <= this.cursor) return
     this.cursor = seq
+    this.terminal.observeTurn(event)
     if (event.eventType === 'turn.started') this.terminal.setBusy(true)
     if (event.eventType === 'turn.completed' || event.eventType === 'turn.failed' || event.eventType === 'input.interrupted') {
       this.terminal.setBusy(false)
       this.tools.clear()
     }
     const shown = presentEvent(event, false, this.tools)
-    if (shown) this.terminal.upsert(shown.key, shown.label, shown.text, shown.complete ?? true, shown.time)
+    if (shown) {
+      const elapsed = this.terminal.turnElapsedMs
+      const text = /^(turn\.(completed|failed)|input\.interrupted)$/.test(event.eventType) && elapsed !== undefined
+        ? `${shown.text} · 耗时 ${formatElapsed(elapsed)}` : shown.text
+      this.terminal.upsert(shown.key, shown.label, text, shown.complete ?? true, shown.time, shown.failed)
+    }
     if (live) this.pendingEvent(event.eventType)
   }
 
@@ -147,7 +182,10 @@ export class TuiApp {
   }
 
   private async selectSession(id: string): Promise<void> {
+    const generation = this.connectionGeneration
+    const check = () => { if (generation !== this.connectionGeneration) throw new Error('连接已取消') }
     const session = await this.rpc.request('session.read', { sessionId: id })
+    check()
     if (session.status !== 'active' || session.purpose !== 'user_chat' || session.sourceChannel !== 'app') {
       throw new Error('只能打开未关闭的应用聊天会话')
     }
@@ -159,32 +197,54 @@ export class TuiApp {
     this.tools.clear()
     this.terminal.clearTranscript()
     this.terminal.setSession(session.id, session.title || '未命名会话', session.executionStatus === 'busy', session.contextTokens)
+    this.terminal.setAgent(participantLabel(session.participants))
     this.terminal.setPending(0, 0)
     this.terminal.hidePanel()
     this.loading = true
     this.buffered.length = 0
     try {
-      const history = await this.rpc.request('message.list', { sessionId: id, limit: 40 })
-      this.historyBefore = history.hasMore ? history.nextCursor : null
-      this.terminal.setOlder(Boolean(this.historyBefore))
-      for (const event of history.items) {
-        const shown = presentEvent(event, true)
-        if (shown) this.terminal.upsert(shown.key, shown.label, shown.text, shown.complete ?? true, shown.time)
-        const seq = BigInt(event.seq)
-        if (seq > this.cursor) this.cursor = seq
-      }
+      const [history, timing, operations, workspace] = await Promise.all([
+        this.rpc.request('message.list', { sessionId: id, limit: 40 }),
+        this.rpc.request('session.timing.read', { sessionId: id }),
+        this.rpc.request('operation.list', { sessionId: id, limit: 500 }),
+        this.rpc.request('workspace.info', { sessionId: id }),
+      ])
+      check()
+      this.terminal.setTiming(timing)
+      this.terminal.setWorkspace(workspace)
+      for (const operation of operations) rememberOperation(operation, this.tools)
+      this.restoreHistory(history, operations)
       let more = true
       while (more) {
         const page = await this.rpc.request('event.list', { sessionId: id, afterSeq: this.cursor.toString(), limit: 500 })
+        check()
         for (const event of page.items) this.accept(event)
         more = page.hasMore && page.items.length > 0
       }
-      for (const event of this.buffered) this.accept(event)
       await this.refreshPending()
       await this.models.refresh(id).catch(error => this.terminal.print('系统', `模型目录读取失败：${error instanceof Error ? error.message : String(error)}`))
+      check()
+      for (const event of this.buffered) this.accept(event, true)
     } finally {
-      this.loading = false
-      this.buffered.length = 0
+      if (generation === this.connectionGeneration) { this.loading = false; this.buffered.length = 0 }
+    }
+  }
+
+  private restoreHistory(history: SchemaRpcMethodMap['message.list']['result'], operations: SchemaRpcMethodMap['operation.list']['result']): void {
+    this.historyBefore = history.hasMore ? history.nextCursor : null
+    this.terminal.setOlder(Boolean(this.historyBefore))
+    const turns = new Set(history.items.map(event => event.turnId))
+    const entries = operations.filter(operation => operation.createdAt >= (history.items[0]?.createdAt ?? 0)
+      || turns.has(operation.turnId) || operation.state === 'running').map(storedTool)
+    for (const event of history.items) {
+      const shown = presentEvent(event, true)
+      if (shown) entries.push({ ...shown, key: shown.key!, complete: shown.complete ?? true,
+        time: shown.time ?? event.createdAt, failed: shown.failed ?? false })
+      const seq = BigInt(event.seq)
+      if (seq > this.cursor) this.cursor = seq
+    }
+    for (const shown of entries.sort((left, right) => left.time - right.time)) {
+      this.terminal.upsert(shown.key, shown.label, shown.text, shown.complete, shown.time, shown.failed)
     }
   }
 
@@ -348,10 +408,22 @@ export class TuiApp {
   }
 
   private async handleAccountCommand(line: string): Promise<boolean> {
-    if (line === '/login' || line === '/logout') { await this.auth.logout(); return true }
-    if (line === '/retry') { await this.auth.retry(); return true }
+    if (line === '/restore' && !this.answering) { this.terminal.restoreDraft(); return true }
+    if (line === '/reconnect-stop') { this.stopReconnect(); return true }
+    if (line === '/login' || line === '/logout') { this.reconnect.stop(); await this.auth.logout(); return true }
+    if (line === '/retry') { this.stopReconnect(false); await this.auth.retry(); return true }
     if (line === '/account') { this.terminal.showPanel('Core 账号', this.auth.accountLines()); return true }
     return false
+  }
+
+  private stopReconnect(notify = true): void {
+    this.reconnect.stop()
+    if (this.connecting) {
+      this.auth.cancel()
+      this.disconnect(false)
+      this.auth.disconnected('重连已取消')
+    }
+    if (notify) this.terminal.print('连接', '自动重连已停止；输入 /retry 手动重试')
   }
 
   private async submitMessage(text: string): Promise<void> {
@@ -364,68 +436,21 @@ export class TuiApp {
     this.terminal.print('系统', `输入已接受：${result.state}`)
   }
 
-  private readonly commands: Record<string, (argument: string) => void | Promise<unknown>> = {
-    '/help': (argument: string) => { showCommandHelp(this.terminal) },
-    '/menu': (argument: string) => { showCommandMenu(this.terminal) },
-    '/sessions': async (argument: string) => { await this.listSessions() },
-    '/models': async (argument: string) => { await this.models.showMenu(this.current?.id, true) },
-    '/model-preview': (argument: string) => { this.models.preview(argument) },
-    '/model-confirm': async (argument: string) => { await this.models.select(argument) },
-    '/home': (argument: string) => { this.showHome() },
-    '/timeline': (argument: string) => { this.terminal.showTimeline() },
-    '/jump': (argument: string) => { this.terminal.jumpTo(argument) },
-    '/sidebar': (argument: string) => { this.terminal.toggleSidebar() },
-    '/details': (argument: string) => { this.terminal.toggleDetails() },
-    '/timestamps': (argument: string) => { this.terminal.toggleTimestamps() },
-    '/status': async (argument: string) => { const current = await this.rpc.request('session.read', { sessionId: this.session().id })
-        await this.refreshPending()
-        this.current = current
-        this.terminal.setSession(current.id, current.title, current.executionStatus === 'busy', current.contextTokens)
-        this.terminal.showPanel('会话状态', [
-          `标题：${current.title}`, `ID：${current.id}`, `世界：${current.runtimeOrigin}`,
-          `执行：${current.executionStatus}`, `上下文：${current.contextTokens?.toLocaleString() ?? '未知'} tokens`,
-          `待审批：${this.permissions.length} · 待回答：${this.questions.length}`,
-        ]) },
-    '/rename': async (argument: string) => { if (!argument) throw new Error('用法：/rename 新标题')
-        const updated = await this.rpc.request('session.rename', { sessionId: this.session().id, title: argument })
-        this.current = updated
-        this.terminal.setSession(updated.id, updated.title, updated.executionStatus === 'busy', updated.contextTokens)
-        await this.listSessions(false) },
-    '/refresh': async (argument: string) => { await this.listSessions(false); await this.refreshPending(); this.terminal.print('系统', '已刷新') },
-    '/older': async (argument: string) => { await this.olderMessages() },
-    '/use': async (argument: string) => { if (!argument) throw new Error('用法：/use 编号或 UUID')
-        const id = /^\d+$/.test(argument) ? this.sessions[Number(argument) - 1]?.id : argument
-        if (!id) throw new Error('会话编号无效；先输入 /sessions')
-        await this.selectSession(id) },
-    '/new': async (argument: string) => { if (argument) await this.createSession(argument); else this.showHome() },
-    '/stop': async (argument: string) => { const result = await this.rpc.request('turn.cancel', { sessionId: this.session().id })
-        this.terminal.print('系统', result.cancellationRequested ? '已请求停止' : '当前没有运行中的回合') },
-    '/steer': async (argument: string) => { await this.followInput('/steer', argument) },
-    '/followup': async (argument: string) => { await this.followInput('/followup', argument) },
-    '/permissions': async (argument: string) => { await this.listPermissions() },
-    '/permission-detail': async (argument: string) => { await this.listPermissions(false)
-        const item = reference(this.permissions, argument)
-        this.terminal.showPanel(`审批详情 · ${item.capability}`, [
-          `资源：${item.resource}`, `详情：${JSON.stringify(item.details)}`, `请求：${JSON.stringify(item.request)}`,
-          'Esc 关闭；输入 /permissions 返回审批选项',
-        ]) },
-    '/confirm-always': async (argument: string) => { await this.listPermissions(false)
-        const item = reference(this.permissions, argument)
-        this.terminal.showMenu('确认总是允许', [
-          { label: '取消', command: `/permission ${item.id}` },
-          { label: '确认总是允许', command: `/always ${item.id}` },
-        ], [`能力：${item.capability}`, `资源：${item.resource}`]) },
-    '/permission': async (argument: string) => { if (!argument) throw new Error('用法：/permission 编号或 ID')
-        await this.listPermissions(false)
-        this.showPermission(reference(this.permissions, argument)) },
-    '/allow': async (argument: string) => { await this.resolvePermission('/allow', argument) },
-    '/always': async (argument: string) => { await this.resolvePermission('/always', argument) },
-    '/deny': async (argument: string) => { await this.resolvePermission('/deny', argument) },
-    '/questions': async (argument: string) => { await this.listQuestions() },
-    '/answer': async (argument: string) => { if (!argument) throw new Error('用法：/answer 编号或 ID')
-        await this.listQuestions(false)
-        this.answering = { request: reference(this.questions, argument), index: 0, answers: [] }
-        this.showQuestion() },
+  private get commands(): Record<string, (argument: string) => void | Promise<unknown>> {
+    const app = this
+    return sessionCommands({
+      rpc: this.rpc, terminal: this.terminal, models: this.models,
+      get current() { return app.current }, set current(value) { app.current = value },
+      get sessions() { return app.sessions }, get permissions() { return app.permissions },
+      get questions() { return app.questions },
+      session: () => this.session(), listSessions: show => this.listSessions(show),
+      showHome: () => this.showHome(), createSession: title => this.createSession(title),
+      selectSession: id => this.selectSession(id), olderMessages: () => this.olderMessages(),
+      refreshPending: () => this.refreshPending(), listPermissions: show => this.listPermissions(show),
+      showPermission: item => this.showPermission(item), resolvePermission: (command, arg) => this.resolvePermission(command, arg),
+      listQuestions: show => this.listQuestions(show), followInput: (command, arg) => this.followInput(command, arg),
+      beginAnswer: request => { this.answering = { request, index: 0, answers: [] }; this.showQuestion() },
+    })
   }
 
   private async followInput(command: string, argument: string): Promise<void> {

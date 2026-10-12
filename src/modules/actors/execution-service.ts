@@ -49,7 +49,7 @@ export class ActorExecutionService {
       systemPrompt: context.prompt + memory,
       contextSources: toJson([...context.sources, { kind: 'memory', title: '召回记忆', content: memory }]) as JsonValue[],
       toolCallPrefix: `${plan.planID}:${beatIndex}:`, ...(checkpoint ? { checkpoint } : {}),
-      callbacks: { ...callbacks, event: async (kind, payload) => callbacks.event(kind, actorMessage(payload, request.participant, plan, beatIndex)) },
+      callbacks: { ...callbacks, event: async (kind, payload, delivery) => callbacks.event(kind, actorMessage(payload, request.participant, plan, beatIndex), delivery) },
     })
     this.runtimes.set(input.sessionId, runtime)
     let aborting: Promise<void> | undefined

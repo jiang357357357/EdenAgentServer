@@ -17,12 +17,15 @@ export class AuthFlow {
   private stage: Stage = 'connecting'
   private username = ''
   private notice = ''
+  private generation = 0
 
   constructor(private readonly config: TuiConfig, private readonly terminal: Terminal,
-    private readonly connect: (token?: string) => Promise<void>, private readonly disconnect: () => void) {}
+    private readonly connect: (token?: string) => Promise<void>, private readonly disconnect: (reset?: boolean) => void) {}
 
   get token(): string | undefined { return this.credential?.token }
   get authenticated(): boolean { return this.stage === 'authenticated' || this.stage === 'local' }
+  get retryable(): boolean { return this.stage === 'server_error' }
+  cancel(): void { this.generation++ }
 
   async bootstrap(): Promise<void> {
     this.terminal.home()
@@ -36,35 +39,45 @@ export class AuthFlow {
   }
 
   private async activate(candidate: CoreCredential | undefined, verify: boolean): Promise<void> {
+    const generation = ++this.generation
     this.stage = 'connecting'
     this.terminal.setAuth('connecting', label(candidate), verify ? '正在验证已保存的 Core 登录' : '正在连接 Agent Server')
-    let credential = candidate
-    if (credential && verify) {
-      try { credential = await verifyCredential(this.config, credential) }
-      catch (error) {
-        if (error instanceof CoreAuthExpired) {
-          if (credential.source === 'stored') await clearCredential(this.config).catch(() => {})
-          this.credential = undefined
-          this.startLogin(message(error))
-          return
-        }
-        this.credential = credential
-        this.serverError(message(error))
-        return
-      }
-    }
+    const credential = await this.verifiedCandidate(candidate, verify, generation)
+    if (credential === false || generation !== this.generation || this.terminal.isClosed) return
     this.credential = credential
     this.terminal.setInputMode('normal')
-    this.terminal.setAuth(credential ? 'authenticated' : 'local', label(credential), this.notice)
+    this.terminal.setAuth('connecting', label(credential), '正在连接 Agent Server')
     try {
       await this.connect(credential?.token)
+      if (generation !== this.generation || this.terminal.isClosed) return
       this.stage = credential ? 'authenticated' : 'local'
       this.terminal.setAuth(this.stage, label(credential), this.notice)
       this.notice = ''
     } catch (error) {
-      this.disconnect()
+      if (generation !== this.generation || this.terminal.isClosed) return
+      this.disconnect(false)
       this.serverError(message(error))
     }
+  }
+
+  private async verifiedCandidate(credential: CoreCredential | undefined, verify: boolean, generation: number): Promise<CoreCredential | undefined | false> {
+    if (credential && verify) {
+      try { return await verifyCredential(this.config, credential) }
+      catch (error) {
+        if (generation !== this.generation || this.terminal.isClosed) return false
+        if (error instanceof CoreAuthExpired) {
+          if (credential.source === 'stored') await clearCredential(this.config).catch(() => {})
+          if (generation !== this.generation || this.terminal.isClosed) return false
+          this.credential = undefined
+          this.startLogin(message(error))
+          return false
+        }
+        this.credential = credential
+        this.serverError(message(error))
+        return false
+      }
+    }
+    return credential
   }
 
   private serverError(reason: string): void {
@@ -76,6 +89,7 @@ export class AuthFlow {
   disconnected(reason: string): void { this.serverError(reason) }
 
   startLogin(reason = ''): void {
+    this.cancel()
     if (this.config.origin !== 'mon') throw new Error('尘世无需 Core 登录')
     this.disconnect()
     this.credential = undefined
@@ -123,6 +137,7 @@ export class AuthFlow {
 
   async logout(): Promise<void> {
     if (this.config.origin !== 'mon') throw new Error('尘世无需 Core 退出登录')
+    this.cancel()
     const token = this.credential?.token
     const external = this.credential?.source === 'external'
     this.disconnect()

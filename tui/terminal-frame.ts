@@ -2,6 +2,7 @@ import { cells, clip, fit, graphemes, wrap } from './screen-text.ts'
 import { renderHomeFrame } from './home-frame.ts'
 import { panelLines } from './panel-frame.ts'
 import { style } from './terminal-style.ts'
+import { activityLine, identityLine, workspaceLine } from './status-view.ts'
 import type { ColoredLine, Frame, ScreenState } from './screen-state.ts'
 export type { ColoredLine, Frame, ScreenEntry, ScreenSession, ScreenMenuItem, ScreenPanel, ScreenSuggestions, ScreenState } from './screen-state.ts'
 export { transcriptLines } from './transcript-view.ts'
@@ -44,7 +45,7 @@ function conversationLayout(state: ScreenState, transcript: ColoredLine[]): Conv
   const mainWidth = contentWidth(width, state.sidebarVisible)
   const startColumn = Math.max(0, Math.floor((mainArea - mainWidth) / 2))
   const editorRows = height < 16 ? 1 : 3
-  const available = height - 5 - editorRows
+  const available = height - 6 - editorRows
   const panelHeight = state.panel ? Math.min(12, Math.max(2, Math.floor(available / 2))) : 0
   const bodyHeight = Math.max(2, available - panelHeight)
   const maxScroll = Math.max(0, transcript.length - bodyHeight)
@@ -91,11 +92,8 @@ function conversationBody(rows: string[], state: ScreenState, transcript: Colore
 
 function statusRows(rows: string[], state: ScreenState, layout: ConversationLayout, main: MainRow): void {
   const { width, offset } = layout
-  const warnings = [!state.connected ? '● 已断开' : state.busy ? '● 正在处理' : '',
-    state.modelAvailable === false ? '◇ 未选择模型 · /models' : '',
-    state.permissions ? `审批 ${state.permissions}` : '', state.questions ? `提问 ${state.questions}` : '',
-    offset ? `上移 ${offset} 行` : ''].filter(Boolean).join('  ·  ')
-  rows.push(main({ text: warnings, kind: warnings ? 'warning' : 'muted' }))
+  const warnings = !state.connected || state.permissions || state.questions
+  rows.push(main({ text: activityLine({ ...state, scroll: offset }, layout.mainWidth), kind: warnings ? 'warning' : 'muted' }))
   rows.push(fit('', width))
 }
 
@@ -121,12 +119,7 @@ function editorRows(rows: string[], state: ScreenState, layout: ConversationLayo
 }
 
 function footerRow(state: ScreenState, mainWidth: number): ColoredLine {
-  const model = state.modelAvailable === false ? state.agentLabel || state.origin.toUpperCase()
-    : state.modelLabel || state.agentLabel || state.origin.toUpperCase()
-  const shortcuts = mainWidth >= 58 ? '/ 命令 · Ctrl+P 搜索 · Ctrl+S 会话' : '/ 命令 · Ctrl+P 搜索'
-  const modelName = clip(model, Math.max(1, mainWidth - cells(shortcuts) - 2))
-  const footer = `${modelName}${' '.repeat(Math.max(2, mainWidth - cells(modelName) - cells(shortcuts)))}${shortcuts}`
-  return { text: footer, kind: 'muted' }
+  return { text: identityLine(state, mainWidth), kind: 'muted' }
 }
 
 function slashRows(rows: string[], state: ScreenState, bodyHeight: number, editorStartRow: number, main: MainRow): void {
@@ -161,6 +154,7 @@ export function renderFrame(state: ScreenState, transcript: ColoredLine[], color
   statusRows(rows, state, layout, main)
   const { cursorRow, cursorColumn, editorStartRow } = editorRows(rows, state, layout, full, color)
   rows.push(main(footerRow(state, mainWidth)))
+  rows.push(main({ text: workspaceLine(state, mainWidth), kind: 'muted' }))
   slashRows(rows, state, layout.bodyHeight, editorStartRow, main)
   return { lines: rows.slice(0, height), cursorRow, cursorColumn, transcriptHeight: layout.bodyHeight }
 }

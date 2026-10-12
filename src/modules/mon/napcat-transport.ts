@@ -40,7 +40,7 @@ function headers(target: NapcatTarget, body: string): Record<string, string> {
     'X-Mon-Service-Signature': signature, 'X-Mon-Subject-User-ID': identity.userId }
 }
 
-async function responseJson(response: Response): Promise<unknown> {
+export async function readNapcatResponse(response: Response): Promise<unknown> {
   if (Number(response.headers.get('content-length')) > maxResponseBytes) throw new Error('QQ response exceeds size limit')
   const reader = response.body?.getReader()
   if (!reader) throw new Error('QQ response is empty')
@@ -70,7 +70,7 @@ export async function sendNapcatRequest(target: NapcatTarget, input: NapcatReque
     const response = await fetcher(url, { method: 'POST', headers: requestHeaders, body,
       signal: requestSignal, redirect: 'error' })
     const envelope = z.object({ data: resultSchema.optional(), message: z.string().optional(), error: z.string().optional(),
-      code: z.string().optional() }).parse(await responseJson(response))
+      code: z.string().optional() }).parse(await readNapcatResponse(response))
     if (envelope.data && envelope.data.request_id === input.request_id && envelope.data.action === input.action)
       return envelope.data
     if (response.status >= 400 && response.status < 500)

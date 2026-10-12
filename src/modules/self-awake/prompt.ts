@@ -1,6 +1,7 @@
 import { modelParticipant } from '@eden/api'
 import type { JsonValue, JobInfo } from '@eden/api'
 import { selfAwakeInstruction } from '../../model-prompts/self-awake.ts'
+import { modelEnvironmentContext } from '../../model-prompts/environment.ts'
 
 export function selfAwakeRequest(job: JobInfo, author: JsonValue, environment: JsonValue) {
   const payload = job.payload && typeof job.payload === 'object' && !Array.isArray(job.payload) ? job.payload : {}
@@ -19,7 +20,8 @@ export function selfAwakePromptContext(request: JsonValue) {
   const schedule = object(value.wakeSchedule)
   const scheduled = trigger.type === 'scheduled'
   return { current_time: value.current_time ?? null, trigger: scheduled ? activation : trigger,
-    environment: value.environment ?? null, recent_conversation: value.recent_conversation ?? [], wakeSchedule: schedule ? { status: schedule.status ?? null, nextWakeAt: schedule.nextWakeAt ?? null, source: schedule.source ?? 'unknown' } : null }
+    environment: modelEnvironmentContext(value.environment), recent_conversation: value.recent_conversation ?? [], wakeSchedule: schedule ? { status: schedule.status ?? null, nextWakeAt: schedule.nextWakeAt ?? null, source: schedule.source ?? 'unknown',
+      ...(schedule.status === 'unavailable' ? { reason: schedule.reason ?? '自醒调度不可用' } : {}) } : null }
 }
 
 export function selfAwakePrompt(request: JsonValue): string {

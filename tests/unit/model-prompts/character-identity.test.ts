@@ -14,7 +14,8 @@ test('single and selected actor use character identity before host conditions wi
   for (const context of [sessionPromptContent({ participants: [rio] }), actorSystemContent(rio, { participants: [rio, kei] })]) {
     assert.ok(context.prompt.startsWith(rio.profile.character.system_prompt + '\n\n'))
     assert.doesNotMatch(context.prompt, /你是 Eden Agent|你是当前指定的 Eden|天童凯伊/)
-    assert.match(context.prompt, /工具按已有权限执行/)
+    assert.match(context.prompt, /附件通过 read_attachment 读取/)
+    assert.doesNotMatch(context.prompt, /工具按已有权限执行|角色资料与个人计划不改变授权/)
     assert.equal(context.sources[0]?.kind, 'character')
     const recovered = historicalContextSources({ payload: { messages: [{ role: 'system', content: context.prompt }] } }) as Record<string, any>
     assert.equal(recovered.contextSources[0].content, rio.profile.character.system_prompt)

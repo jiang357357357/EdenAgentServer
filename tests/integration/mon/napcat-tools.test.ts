@@ -151,7 +151,9 @@ test('events expose returned request flags through approved filters', async t =>
   const items = [{ event: { post_type: 'request', request_type: 'group', flag: 'known-flag', sub_type: 'add' } }]
   const f = fixture(true, call => receipt(call, { items, next_cursor: null, retention_seconds: 86400, max_events: 500 }))
   t.after(() => f.close()); f.allow()
-  const result = await f.tool('list_qq_events').execute({ event_type: 'request', limit: 20, cursor: 'earlier' }, f.context)
+  const previous = f.client.modelReceipt(f.client.target(f.session.id), { request_id: 'cursor-fixture', action: '__events__',
+    status: 'success', result: { next_cursor: 'earlier' } }) as { model_view: { result: { next_cursor: string } } }
+  const result = await f.tool('list_qq_events').execute({ event_type: 'request', limit: 20, cursor: previous.model_view.result.next_cursor }, f.context)
   assert.deepEqual(f.sent[0]!.body.params, { type: 'request', limit: 20, cursor: 'earlier' })
   assert.deepEqual((result as { result: { items: unknown } }).result.items, items)
 })
@@ -172,7 +174,6 @@ test('lost or mismatched write receipt stays unknown and sends only once', async
 
 test('App calls use only session Core credentials and explicit bot database ID', async t => {
   const f = fixture(false); t.after(() => f.close()); f.allow()
-  await assert.rejects(f.tool('list_qq_capabilities').execute({}, f.context), /bot_id/)
   await f.tool('read_qq_action').execute({ bot_id: '42', action: 'get_group_list', params: {} }, f.context)
   const call = f.sent[1]!
   assert.equal(call.url, 'https://user-core.example/api/devices/qq_bot/42/actions/execute/')

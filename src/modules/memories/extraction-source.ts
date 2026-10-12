@@ -19,7 +19,12 @@ function identity(metadata: Record<string, unknown>, actorId?: string | number) 
 }
 
 function assistantReply(database: EdenDatabase, sessionId: string, turnId: string, owner: { actorId: string; multi: boolean }): string {
-  const messages = database.connection.prepare("SELECT payload_json FROM events WHERE session_id=? AND turn_id=? AND kind='agent.message_end' ORDER BY seq DESC")
+  const messages = database.connection.prepare(`SELECT payload_json FROM events candidate WHERE session_id=? AND turn_id=?
+    AND kind='agent.message_end' AND NOT EXISTS (SELECT 1 FROM events removed
+      WHERE removed.session_id=candidate.session_id AND removed.kind='message.deleted'
+      AND json_extract(removed.payload_json,'$.messageId')=
+      COALESCE(json_extract(candidate.payload_json,'$.messageId'),json_extract(candidate.payload_json,'$.messageID'),candidate.id))
+    ORDER BY seq DESC`)
     .iterate(sessionId, turnId)
   let assistantText = ''
   for (const event of messages) {

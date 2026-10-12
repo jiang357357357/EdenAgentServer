@@ -26,6 +26,18 @@ function fixture(t: TestContext) {
   return { database, repository, session, input, events, callbacks }
 }
 
+test('already coalesced child batches commit immediately without a second sampling window or payload metadata', async t => {
+  const f = fixture(t), callbacks = f.callbacks()
+  await callbacks.event('message_start', { message: { role: 'assistant', content: [] } })
+  await callbacks.event('message_update', update('a'), { coalesced: true })
+  await callbacks.event('message_update', update('abc', 'bc'), { coalesced: true })
+  const updates = f.events.filter(event => event.kind === 'agent.message_update')
+  assert.equal(updates.length, 2, 'Even at a fixed zero clock the second batch is durable before ACK')
+  assert.equal((updates[1]!.payload as Record<string, JsonValue>).coalesced, undefined)
+  assert.deepEqual((updates[1]!.payload as Record<string, JsonValue>).message, update('abc').message)
+  assert.deepEqual(f.repository.events.list(f.session.id, '1'), f.events)
+})
+
 test('6000 fast SDK deltas use bounded durable writes, yield to I/O and preserve final output and contiguous history', async t => {
   const f = fixture(t), callbacks = f.callbacks()
   let transactions = 0, yielded = false

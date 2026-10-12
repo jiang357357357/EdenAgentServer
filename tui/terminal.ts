@@ -9,8 +9,11 @@ import { contentWidth, renderFrame, transcriptLines } from './terminal-frame.ts'
 import type { ColoredLine, ScreenEntry, ScreenMenuItem, ScreenPanel, ScreenSession, ScreenState } from './screen-state.ts'
 
 import { commandKey, editInput, isEnter, isPage, isText, isVertical, restrictedKey, type KeyPress } from './terminal-input.ts'
+import { InputDrafts, type InputSubmission } from './input-drafts.ts'
+import { ReplyClock } from './reply-clock.ts'
+import type { ReplyTimerSnapshot, SessionEvent } from '@eden/api'
 /** Independent terminal view. Agent actions go through the supplied command callback. */
-export class Terminal {
+export class Terminal extends InputDrafts {
   private readonly entries: ScreenEntry[] = []
   private readonly sessions: ScreenSession[] = []
   private panelState: ScreenPanel | undefined
@@ -29,8 +32,7 @@ export class Terminal {
   private authStage: NonNullable<ScreenState['authStage']> = 'local'
   private accountLabel = ''
   private authMessage = ''
-  private inputMode: 'normal' | 'username' | 'password' = 'normal'
-  private readonly location = (() => {
+  private readonly launchLocation = (() => {
     const cwd = process.cwd()
     const project = path.basename(cwd) === 'Server' ? path.dirname(cwd) : cwd
     const name = project.startsWith(`${homedir()}${path.sep}`) ? `~${project.slice(homedir().length)}` : project
@@ -39,21 +41,17 @@ export class Terminal {
       return displayText(`${name}${head.startsWith('ref: refs/heads/') ? `:${head.slice(16)}` : ''}`)
     } catch { return displayText(name) }
   })()
+  private location = '工作区未读取'
   private showToolDetails = false
   private showTimestamps = false
   private permissions = 0
   private questions = 0
   private scroll = 0
-  private input = ''
-  private cursor = 0
   private slashSelected = 0
   private slashDismissed = false
   private inputLabel = '消息>'
-  private savedDraft = ''
-  private history: string[] = []
-  private readonly drafts = new Map<string, { input: string; cursor: number; history: string[] }>()
-  private historyIndex = -1
-  private historyDraft = ''
+  private readonly clock = new ReplyClock()
+  private clockTimer: ReturnType<typeof setInterval> | undefined
   private pasting = false
   private paste = ''
   private started = false
@@ -68,7 +66,8 @@ export class Terminal {
   private readonly done: Promise<void>
   private finish!: () => void
 
-  constructor(private readonly onLine: (line: string) => void) {
+  constructor(private readonly onLine: (line: string, submission?: InputSubmission) => void) {
+    super()
     this.done = new Promise(resolve => { this.finish = resolve })
   }
 
@@ -93,7 +92,25 @@ export class Terminal {
   }
 
   setWorld(origin: string): void { this.origin = origin; this.requestRender() }
-  setConnected(connected: boolean): void { this.connected = connected; this.requestRender() }
+  setConnected(connected: boolean): void {
+    this.connected = connected; this.clock.connection(connected); this.updateClockTimer(); this.requestRender()
+  }
+  get isClosed(): boolean { return this.closed }
+  get turnElapsedMs(): number | undefined { return this.clock.read().elapsedMs }
+  setWorkspace(info: { path: string; status: string }): void {
+    this.location = info.status === 'unselected' ? '未选择工作区' : info.path || '工作区未知'
+    if (info.status !== 'ready' && info.status !== 'unselected') this.location += ` (${info.status})`
+    this.requestRender()
+  }
+  setTiming(snapshot: ReplyTimerSnapshot): void { this.clock.restore(snapshot); this.updateClockTimer(); this.requestRender() }
+  observeTurn(event: SessionEvent): void { this.clock.observe(event); this.updateClockTimer(); this.requestRender() }
+  recoverSubmission(submission: InputSubmission, automatic: boolean, target?: string): void {
+    const restored = this.recoverInput(submission, automatic && !this.inputLabel.startsWith('回答'), target)
+    if (restored === undefined) return
+    this.print('系统', restored ? '发送失败，输入已恢复；请检查原因后再发送' : '输入已保留；查看历史确认执行结果后，可用 /restore 恢复')
+  }
+  restoreDraft(): void { this.restoreFailedInput(); this.requestRender() }
+  clearAccount(): void { this.clearInputDrafts(); this.clock.reset(); this.location = '工作区未读取'; this.updateClockTimer(); this.home() }
   setBusy(busy: boolean): void { this.busy = busy; this.requestRender() }
   setOlder(older: boolean): void { this.older = older; this.transcriptDirty = true; this.requestRender() }
   setPending(permissions: number, questions: number): void {
@@ -105,13 +122,10 @@ export class Terminal {
   }
   setSession(id: string, title: string, busy: boolean, contextTokens?: number | null): void {
     if (this.sessionId !== id) {
-      if (this.sessionId) this.drafts.set(this.sessionId, { input: this.input, cursor: this.cursor, history: this.history })
-      const draft = this.drafts.get(id)
-      this.input = draft?.input ?? ''
-      this.cursor = draft?.cursor ?? 0
-      this.history = draft?.history ?? []
-      this.historyIndex = -1
+      this.selectDraft(id)
+      this.clock.reset(); this.updateClockTimer()
       this.modelLabel = ''
+      this.location = '工作区未读取'
     }
     this.sessionId = id; this.title = displayText(title); this.busy = busy; this.contextTokens = contextTokens; this.requestRender()
   }
@@ -121,6 +135,7 @@ export class Terminal {
   setDraft(value: string): void {
     if (this.input) return
     this.input = value; this.cursor = graphemes(value).length; this.requestRender()
+    this.inputEdited()
   }
   setAgent(label: string): void { this.agentLabel = displayText(label); this.requestRender() }
   setAuth(stage: NonNullable<ScreenState['authStage']>, account = '', message = ''): void {
@@ -128,16 +143,19 @@ export class Terminal {
     this.requestRender()
   }
   setInputMode(mode: 'normal' | 'username' | 'password'): void {
-    this.inputMode = mode; this.input = ''; this.cursor = 0
+    if (mode === 'normal' && this.inputMode === 'normal') return
+    this.changeInputMode(mode)
     this.slashDismissed = false; this.slashSelected = 0
     this.inputLabel = mode === 'username' ? 'Core 用户名>' : mode === 'password' ? 'Core 密码>' : '消息>'
     this.requestRender()
   }
   home(): void {
-    if (this.sessionId) this.drafts.set(this.sessionId, { input: this.input, cursor: this.cursor, history: this.history })
+    this.selectDraft(undefined)
+    this.clock.reset(); this.updateClockTimer()
     this.sessionId = undefined; this.title = ''; this.contextTokens = undefined
+    this.location = `启动目录 ${this.launchLocation}`
     this.modelLabel = ''; this.agentLabel = ''; this.busy = false; this.older = false
-    this.entries.length = 0; this.scroll = 0; this.input = ''; this.cursor = 0; this.history = []
+    this.entries.length = 0; this.scroll = 0
     this.historyIndex = -1; this.inputLabel = '消息>'; this.panelState = undefined
     this.slashDismissed = false; this.slashSelected = 0
     this.transcriptDirty = true; this.requestRender()
@@ -147,10 +165,10 @@ export class Terminal {
     this.entries.length = 0; this.scroll = 0; this.transcriptDirty = true; this.requestRender()
   }
   print(label: string, value: unknown): void { this.upsert(undefined, label, value) }
-  upsert(key: string | undefined, label: string, value: unknown, complete = true, time?: number): void {
+  upsert(key: string | undefined, label: string, value: unknown, complete = true, time?: number, failed = false): void {
     const previousLength = this.scroll ? this.projectedLength() : 0
     const entry: ScreenEntry = { ...(key ? { key } : {}), label: displayText(label), text: displayText(value),
-      complete, ...(time === undefined ? {} : { time }) }
+      complete, failed, ...(time === undefined ? {} : { time }) }
     const index = key ? this.entries.findIndex(item => item.key === key) : -1
     if (index < 0) this.entries.push(entry)
     else this.entries[index] = entry
@@ -246,6 +264,7 @@ export class Terminal {
     if (this.closed) return
     this.closed = true
     if (this.timer) clearTimeout(this.timer)
+    if (this.clockTimer) clearInterval(this.clockTimer)
     this.restore()
     this.finish()
   }
@@ -276,6 +295,12 @@ export class Terminal {
     this.timer = setTimeout(() => { this.timer = undefined; this.renderNow() }, 16)
   }
 
+  private updateClockTimer(): void {
+    const animate = this.started && this.connected && this.clock.running
+    if (animate && !this.clockTimer) this.clockTimer = setInterval(() => this.requestRender(), 1000)
+    if (!animate && this.clockTimer) { clearInterval(this.clockTimer); this.clockTimer = undefined }
+  }
+
   private renderNow(): void {
     if (!this.started) return
     const width = process.stdout.columns || 80
@@ -288,20 +313,7 @@ export class Terminal {
       this.transcriptDirty = false
     }
     const slash = this.activeSlash()
-    const state: ScreenState = { width, height, origin: this.origin, connected: this.connected, busy: this.busy,
-      title: this.title, ...(this.sessionId ? { sessionId: this.sessionId } : {}), sessions: this.sessions,
-      entries: this.entries, scroll: this.scroll, older: this.older, permissions: this.permissions,
-      questions: this.questions, input: this.inputMode === 'password' ? '•'.repeat(graphemes(this.input).length) : this.input,
-      inputCursor: this.cursor, inputLabel: this.inputLabel,
-      sidebarVisible: this.sidebarVisible,
-      ...(this.contextTokens === undefined ? {} : { contextTokens: this.contextTokens }),
-      ...(this.modelLabel ? { modelLabel: this.modelLabel, modelAvailable: this.modelAvailable } : {}),
-      ...(this.agentLabel ? { agentLabel: this.agentLabel } : {}), location: this.location,
-      authStage: this.authStage,
-      ...(this.accountLabel ? { accountLabel: this.accountLabel } : {}),
-      ...(this.authMessage ? { authMessage: this.authMessage } : {}),
-      ...(this.panelState ? { panel: this.panelState } : {}),
-      ...(slash.length ? { slashSuggestions: { items: slash, selected: this.slashSelected } } : {}) }
+    const state = this.screenState(width, height, slash)
     const frame = renderFrame(state, this.transcript, !process.env.NO_COLOR)
     this.viewportHeight = frame.transcriptHeight
     let output = '\x1b[?2026h'
@@ -313,29 +325,37 @@ export class Terminal {
     process.stdout.write(output)
   }
 
+  private screenState(width: number, height: number, slash: ScreenMenuItem[]): ScreenState {
+    const timing = this.clock.read()
+    return { width, height, origin: this.origin, connected: this.connected, busy: this.busy,
+      title: this.title, ...(this.sessionId ? { sessionId: this.sessionId } : {}), sessions: this.sessions,
+      entries: this.entries, scroll: this.scroll, older: this.older, permissions: this.permissions,
+      questions: this.questions, input: this.inputMode === 'password' ? '•'.repeat(graphemes(this.input).length) : this.input,
+      inputCursor: this.cursor, inputLabel: this.inputLabel,
+      sidebarVisible: this.sidebarVisible,
+      turnPhase: timing.phase, ...(timing.elapsedMs === undefined ? {} : { turnElapsedMs: timing.elapsedMs }),
+      ...(this.contextTokens === undefined ? {} : { contextTokens: this.contextTokens }),
+      ...(this.modelLabel ? { modelLabel: this.modelLabel, modelAvailable: this.modelAvailable } : {}),
+      ...(this.agentLabel ? { agentLabel: this.agentLabel } : {}), location: this.location,
+      authStage: this.authStage,
+      ...(this.accountLabel ? { accountLabel: this.accountLabel } : {}),
+      ...(this.authMessage ? { authMessage: this.authMessage } : {}),
+      ...(this.panelState ? { panel: this.panelState } : {}),
+      ...(slash.length ? { slashSuggestions: { items: slash, selected: this.slashSelected } } : {}) }
+  }
+
   private insert(value: string): void {
-    const clean = this.inputMode === 'password'
-      ? value.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').slice(0, Math.max(0, 4096 - this.input.length)) : displayText(value)
-    if (!clean) return
+    if (!this.insertInput(value)) return
     if (this.panelState && !this.panelState.items) this.hidePanel()
-    const points = graphemes(this.input)
-    points.splice(this.cursor, 0, ...graphemes(clean))
-    this.input = points.join('')
-    this.cursor += graphemes(clean).length
     this.slashDismissed = false; this.slashSelected = 0
     this.requestRender()
   }
 
   private submit(): void {
-    const value = this.inputMode === 'password' ? this.input : this.input.trim()
-    if (!value && this.inputMode === 'normal') return
-    this.input = ''; this.cursor = 0; this.historyIndex = -1
+    const input = this.takeInput(this.inputLabel.startsWith('回答'))
+    if (!input) return
     this.slashDismissed = false; this.slashSelected = 0
-    if (this.inputMode === 'normal' && !value.startsWith('/')) {
-      this.history.push(value)
-      if (this.history.length > 100) this.history.shift()
-    }
-    this.onLine(value)
+    this.onLine(input.value, input.submission)
     this.requestRender()
   }
 
@@ -436,9 +456,9 @@ export class Terminal {
     const edit = editInput(this.input, this.cursor, key)
     if (edit) {
       this.input = edit.input; this.cursor = edit.cursor
-      if (edit.changed) { this.slashDismissed = false; this.slashSelected = 0 }
+      if (edit.changed) { this.inputEdited(); this.slashDismissed = false; this.slashSelected = 0 }
     } else if (isVertical(key) && this.inputMode === 'normal') {
-      this.navigateHistory(key.name === 'up' ? -1 : 1); return
+      this.navigateHistory(key.name === 'up' ? -1 : 1); this.requestRender(); return
     } else if (isText(text, key)) this.insert(text)
     this.requestRender()
   }
@@ -460,14 +480,6 @@ export class Terminal {
     this.editorKey(text, key)
   }
 
-  private navigateHistory(direction: -1 | 1): void {
-    if (!this.history.length) return
-    if (this.historyIndex < 0) { this.historyDraft = this.input; this.historyIndex = this.history.length }
-    this.historyIndex = Math.max(0, Math.min(this.history.length, this.historyIndex + direction))
-    this.input = this.historyIndex === this.history.length ? this.historyDraft : this.history[this.historyIndex] ?? ''
-    this.cursor = graphemes(this.input).length
-    this.requestRender()
-  }
 }
 
 export { displayText } from './screen-text.ts'

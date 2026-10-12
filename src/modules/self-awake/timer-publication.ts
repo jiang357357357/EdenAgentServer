@@ -15,7 +15,7 @@ export class SelfAwakeTimerPublication {
   constructor(private readonly database: EdenDatabase, private readonly stateFile?: string, private readonly external = Boolean(stateFile)) {}
   get fault() { return this.error ?? this.activationErrors.values().next().value }
   assertAvailable(scoped = false): void {
-    if (this.external && !this.stateFile) throw new Error('MonOs timer delivery requires scheduleStateFile; local scheduling is disabled')
+    if (this.external && !this.stateFile) throw new Error('自醒调度未配置：Agent 未取得当前安装的 MonOs 状态文件路径，请检查服务绑定并重启 Agent')
     if (scoped && this.external && this.stateFile) assertScopedScheduler(this.stateFile)
   }
   start() {

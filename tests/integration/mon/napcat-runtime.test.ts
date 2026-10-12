@@ -90,7 +90,8 @@ test('signed group bridge creates a fresh bound runtime and separates operators 
   const address = core.address(); assert.ok(address && typeof address !== 'string')
   const database = new EdenDatabase(':memory:', 'mon')
   const identity = { coreBaseUrl: `http://127.0.0.1:${address.port}`, userId: '7', secret: 'test-group-secret' }
-  const services = createServices(database, { ...loadConfig({ EDEN_AGENT_DATA_ROOT: root }, root), origin: 'mon', monIdentity: identity })
+  const account = { key: accountKey(identity.coreBaseUrl, identity.userId), coreBaseUrl: identity.coreBaseUrl, userId: identity.userId }
+  const services = createServices(database, { ...loadConfig({ EDEN_AGENT_DATA_ROOT: root }, root), origin: 'mon', monIdentity: identity, account })
   t.after(async () => {
     await services.qqChannelBridge!.close(); await services.memoryExtractions.close()
     await Promise.all([services.sessions.close(), services.mon.close(), services.plugins.close(), services.companion.close()])

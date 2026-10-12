@@ -6,7 +6,7 @@ type TranscriptOptions = { details?: boolean; timestamps?: boolean }
 
 function toolLines(entry: ScreenEntry, width: number, time: string, detailsVisible = false): ColoredLine[] {
   const [summary, ...details] = entry.text.split('\n')
-  const lines: ColoredLine[] = [{ text: `  ${entry.complete === false ? '◌' : '◇'} ${summary}${time}`, kind: 'tool' }]
+  const lines: ColoredLine[] = [{ text: `  ${entry.failed ? '!' : entry.complete === false ? '◌' : '◇'} ${summary}${time}`, kind: entry.failed ? 'error' : 'tool' }]
   if (detailsVisible) for (const row of wrap(details.join('\n'), Math.max(1, width - 5))) {
     if (row) lines.push({ text: `      ${row}`, kind: 'code' })
   }

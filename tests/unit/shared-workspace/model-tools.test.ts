@@ -12,7 +12,8 @@ test('shared status reports a synced empty receiver honestly without requiring p
   assert.equal(f.workspace.forSession(f.a.id).root(), f.project)
   assert.equal(status.shared.available, true); assert.equal(status.shared.bound, true)
   assert.equal(status.shared.canPublish, false)
-  assert.match(status.guidance, /空库也可以已同步/)
+  assert.equal(status.shared.lastSync, 1)
+  assert.equal('guidance' in status, false)
   const files = await f.call('files')
   assert.deepEqual(files.files, []); assert.equal(files.total, 0)
   assert.equal(files.shared.lastSync, 1)
@@ -25,6 +26,7 @@ test('library queries paginate authorized metadata and strip credential-shaped e
   const page = await f.call('spaces', { limit: 1 })
   assert.equal(page.total, 2); assert.equal(page.nextOffset, 1)
   assert.equal(page.spaces[0].name, '项目资料')
+  assert.equal('guidance' in page, false)
   assert.equal((await f.call('spaces', { query: '另一个' })).spaces.length, 1)
   assert.doesNotMatch(JSON.stringify(page), /must-not-expose|fixture-private-token/)
   assert.ok(f.requests.every(request => request.startsWith('GET ')))
@@ -46,6 +48,7 @@ test('file queries use the independent shared directory across sessions and dist
   assert.equal(f.workspace.forSession(f.a.id).root(), f.project)
   assert.doesNotMatch(JSON.stringify(page), /其他会话秘密/)
   assert.equal(page.source, 'synchronized-file-index')
+  assert.equal('guidance' in page, false)
 })
 
 test('offline cached indexes remain readable and unbound states cannot expose an old index', async t => {
@@ -154,5 +157,6 @@ test('shared queries are discoverable by library keywords, exposed by default an
   for (const tool of tools) assert.equal(defaultTool(tool, 'user_chat', true), true)
   const allowed = rolePolicy('researcher').allowedTools
   for (const tool of tools) assert.ok(allowed?.includes(tool.name))
-  assert.match(tools[0]!.promptHint!, /read_shared_file/)
+  assert.match(tools[0]!.description, /read_shared_file/)
+  assert.equal(tools[0]!.promptHint, undefined)
 })

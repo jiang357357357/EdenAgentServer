@@ -9,17 +9,20 @@ import { startServer } from '../../../src/bootstrap/container.ts'
 
 test('real host reads the memory guide, approves a write, unloads instructions and retrieves the memory after restart', { timeout: 30000 }, async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-builtin-memory-live-'))
-  t.after(() => rm(root, { recursive: true, force: true }))
   const model = await recordedModel([
     { tool: 'load_skill', input: { name: 'eden-memory' } },
     { tool: 'remember_memory', input: { content: '临时测试角色偏好薄荷茶', kind: 'preference' } },
     { tool: 'unload_skill', input: { name: 'eden-memory' } }, { text: '已登记' },
     { tool: 'search_memories', input: { query: '薄荷茶' } }, { text: '重启后已找回记忆' },
   ])
-  t.after(() => model.close())
   const config = { ...loadConfig({ EDEN_AGENT_DATA_ROOT: root, EDEN_AGENT_PORT: '0' }), model: model.config }
   let server = await startServer(config)
-  t.after(() => server.close())
+  t.after(async () => {
+    try { await server.close() }
+    finally { await model.close(); await rm(root, { recursive: true, force: true }) }
+  })
+  // Background extraction has separate fixtures; these replies cover only memory tool execution.
+  await server.memoryExtractions.close()
   const session = server.sessions.repository.create('基础技能真实链路', [{ assistantId: 1, characterId: 7 }])
   let approvals = 0
   server.sessions.repository.events.subscribe(event => {
@@ -40,6 +43,7 @@ test('real host reads the memory guide, approves a write, unloads instructions a
   assert.match(JSON.stringify(model.requests[1]!.messages), /保存新记忆前检查是否已有相同记录/)
   await server.close()
   server = await startServer(config)
+  await server.memoryExtractions.close()
   server.sessions.start(session.id, '查询刚才的测试偏好，不再读取技能。')
   await server.sessions.waitForIdle(session.id)
   assert.equal(server.sessions.faultCount(), 0)

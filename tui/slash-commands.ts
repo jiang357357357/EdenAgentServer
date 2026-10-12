@@ -33,6 +33,8 @@ export const slashCommands: SlashCommand[] = [
   { command: '/login', label: '/login', detail: '切换 Core 账号' },
   { command: '/logout', label: '/logout', detail: '退出 Core 登录' },
   { command: '/retry', label: '/retry', detail: '重连 Agent Server' },
+  { command: '/restore', label: '/restore', detail: '恢复发送失败或未确认的输入' },
+  { command: '/reconnect-stop', label: '/reconnect-stop', detail: '停止自动重连' },
   { command: '/quit', label: '/quit', detail: '退出 Eden' },
 ]
 

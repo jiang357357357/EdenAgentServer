@@ -1,5 +1,6 @@
 import { replyLengthInstruction } from '../../model-prompts/reply-length.ts'
-import { modelEnvironment, modelParticipant, toJson } from '@eden/api'
+import { modelParticipant, toJson } from '@eden/api'
+import { modelEnvironmentContext } from '../../model-prompts/environment.ts'
 import type { DirectorPlan, JsonValue } from '@eden/api'
 import { inputAttachments } from '../attachments/index.ts'
 import { characterIdentity, identityPrompt } from '../../model-prompts/character-identity.ts'
@@ -11,7 +12,7 @@ export function actorSystemContent(rawParticipant: JsonValue, metadata?: JsonVal
   const participant = modelParticipant(rawParticipant)
   const snapshot = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}
   const rules = [ACTOR_SYSTEM_RULES, replyLengthInstruction(snapshot, rawParticipant)].filter(Boolean).join('\n')
-  const environment = modelEnvironment(snapshot.environment), attachments = inputAttachments(metadata)
+  const environment = modelEnvironmentContext(snapshot.environment), attachments = inputAttachments(metadata)
   const identity = characterIdentity(participant)
   return { prompt: identityPrompt(identity, rules, toJson({ participant, environment, attachments })), sources: [
     ...(identity ? [{ kind: 'character', title: '角色身份', content: identity }] : []),

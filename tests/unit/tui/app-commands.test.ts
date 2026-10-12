@@ -5,10 +5,11 @@ import type { Terminal } from '../../../tui/terminal.ts'
 import type { ScreenEntry, ScreenPanel } from '../../../tui/screen-state.ts'
 
 type Request = { method: string; params: Record<string, unknown> }
-type Session = { id: string; title: string; status: string; purpose: string; sourceChannel: string; executionStatus: string }
+type Session = { id: string; title: string; status: string; purpose: string; sourceChannel: string; executionStatus: string; participants: unknown[] }
 interface AppAccess {
   handle(line: string): Promise<void>
   connected: boolean
+  queue: Promise<void>
   current: Session | undefined
   sessions: Session[]
   terminal: Terminal
@@ -21,12 +22,14 @@ interface AppAccess {
 function harness() {
   const instance = new TuiApp({ origin: 'local', port: 1, tokenFile: '', coreUrl: 'http://127.0.0.1:1', authFile: '' }, 'test')
   const app = instance as unknown as AppAccess
-  const session: Session = { id: 'session-a', title: 'A', status: 'active', purpose: 'user_chat', sourceChannel: 'app', executionStatus: 'idle' }
+  const session: Session = { id: 'session-a', title: 'A', status: 'active', purpose: 'user_chat', sourceChannel: 'app', executionStatus: 'idle', participants: [] }
   const calls: Request[] = []
   const controls: string[] = []
   const responses: Record<string, unknown> = {
     'session.list': [session], 'session.read': session, 'session.create': session,
     'message.list': { items: [], hasMore: false }, 'event.list': { items: [], hasMore: false },
+    'session.timing.read': { turn: null, seq: '0', observedAt: 0 }, 'operation.list': [],
+    'workspace.info': { path: 'E:/fixture', status: 'ready' },
     'permission.list': [], 'question.list': [],
     'turn.start': { state: 'accepted' }, 'turn.steer': { state: 'accepted' },
     'turn.follow_up': { state: 'queued' }, 'turn.cancel': { cancellationRequested: true },
@@ -97,6 +100,19 @@ test('missing model or model lookup failure restores the draft and never starts 
   await assert.rejects(app.handle('//escaped'), /model unavailable/)
   assert.equal(view.input, '/escaped')
   assert.deepEqual(calls, [])
+})
+
+test('a rejected turn start is recovered by the actual editor submission path', async () => {
+  const { app, view, calls } = harness()
+  app.terminal.setSession('session-a', 'A', false)
+  app.rpc.request = async (method, params) => { calls.push({ method, params }); throw new Error('quota exceeded') }
+  const editor = app.terminal as unknown as { keypress(text?: string, key?: { name: string }): void }
+  editor.keypress('完整消息'); editor.keypress(undefined, { name: 'return' })
+  await app.queue
+  assert.equal(view.input, '完整消息')
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0]?.method, 'turn.start')
+  assert.ok(view.entries.some(entry => entry.text === 'quota exceeded'))
 })
 
 test('sending from home creates and selects an app chat before starting a turn', async () => {

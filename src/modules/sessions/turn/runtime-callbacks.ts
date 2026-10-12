@@ -3,7 +3,7 @@ import { requestContext } from './request-context.ts'
 import { randomUUID } from 'node:crypto'
 import { RuntimePersistenceError, type RuntimeCallbacks } from '@eden/runtime-pi'
 import { toJson } from '@eden/api'
-import type { JsonValue } from '@eden/api'
+import type { JsonValue, RuntimeCheckpoint } from '@eden/api'
 import type { SessionInput } from '../contracts.ts'
 import type { SessionRepository } from '../session-repository.ts'
 import { SignalRepository } from '../input/signal-repository.ts'
@@ -29,8 +29,19 @@ function messageRole(value: Record<string, JsonValue>) {
   return message && typeof message === 'object' && !Array.isArray(message) ? message.role : undefined
 }
 
+function checkpointEntryId(snapshot: RuntimeCheckpoint): string | undefined {
+  const entry = snapshot.entries.at(-1)
+  return entry && typeof entry === 'object' && !Array.isArray(entry) && entry.type === 'message'
+    && typeof entry.id === 'string' ? entry.id : undefined
+}
+
+function associateContextEntry(kind: string, value: Record<string, JsonValue>, entryId?: string): void {
+  if (kind === 'message_end' && messageRole(value) === 'assistant' && entryId) value.contextEntryId = entryId
+}
+
 export function runtimeCallbacks(repository: SessionRepository, input: SessionInput, scope: RuntimeCallbackScope = {}): RuntimeCallbacks {
   let messageId: string | undefined
+  let contextEntryId: string | undefined
   let initialUserEnded = false
   const contexts = new Map<string, Record<string, JsonValue>>()
   const signals = new SignalRepository(repository.database, repository.events)
@@ -45,17 +56,19 @@ export function runtimeCallbacks(repository: SessionRepository, input: SessionIn
       try {
         if (scope.checkpoint) await scope.checkpoint(snapshot)
         else repository.saveCheckpoint(snapshot, input.turnId)
+        contextEntryId = checkpointEntryId(snapshot)
       } catch (error) { throw new RuntimePersistenceError('会话检查点提交失败', error) }
     },
-    async event(kind, payload) {
+    async event(kind, payload, delivery) {
       if (kind !== 'message_update') stream.flush()
       const consumed = kind === 'message_end' && signals.consume(input.sessionId, input.turnId, payload)
       const value: Record<string, JsonValue> = typeof payload === 'object' && payload !== null && !Array.isArray(payload) ? { ...payload } : { value: payload }
       if (kind === 'message_start') messageId = randomUUID()
       if (kind.startsWith('message_') && messageId) value.messageId = messageId
+      associateContextEntry(kind, value, contextEntryId)
       const namespace = messageNamespace(kind, value, scope, consumed)
       const projected = namespace === 'agent' && !initialUserEnded && !consumed && kind.startsWith('message_') ? attachmentMessage(value, input.metadata) : value
-      await stream.event(`${namespace}.${kind}`, projected)
+      await stream.event(`${namespace}.${kind}`, projected, delivery?.coalesced === true)
       if (kind === 'message_end' && messageRole(value) === 'user') initialUserEnded = true
     },
     async request(snapshot) {

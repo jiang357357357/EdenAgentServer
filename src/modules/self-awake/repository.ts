@@ -139,10 +139,20 @@ export class SelfAwakeRepository {
   wakeSchedule(sessionId?: string) {
     if (sessionId) new SessionOwnership(this.database).assert(sessionId)
     const next = this.database.connection.prepare(`SELECT due_at,payload_json FROM jobs WHERE ${accountFilter(this.database, "session_id")} AND (? IS NULL OR session_id=?) AND kind='self_awake' AND state='queued' ORDER BY due_at LIMIT 1`).get(sessionId ?? null, sessionId ?? null)
-    const external = readExternalSchedule(this.scheduleStateFile, sessionId)
+    const external = this.externalScheduler ? this.externalSchedule(sessionId) : null
     const local = next ? { status: 'scheduled', source: 'tool', nextWakeAt: new Date(Number(next.due_at)).toISOString(), reason: String(object(JSON.parse(String(next.payload_json))).prompt ?? '') } : null
     const ownsSchedule = Boolean(sessionId) || !currentAccount() || Boolean(this.database.connection.prepare(`SELECT 1 FROM self_awake_submissions s JOIN jobs j ON j.id=s.job_id WHERE ${accountFilter(this.database, 'j.session_id')} LIMIT 1`).get())
-    return this.externalScheduler ? (ownsSchedule ? external : null) : local
+    return this.externalScheduler ? (ownsSchedule || external?.status === 'unavailable' ? external : null) : local
+  }
+
+  private externalSchedule(sessionId?: string) {
+    try {
+      this.timerPublication.assertAvailable()
+      return readExternalSchedule(this.scheduleStateFile, sessionId)
+    } catch (error) {
+      return { status: 'unavailable' as const, nextWakeAt: null,
+        reason: error instanceof Error ? error.message : '无法读取当前安装的自醒调度状态' }
+    }
   }
 
   inputFailure(sessionId: string, inputId: string, state: string): string {

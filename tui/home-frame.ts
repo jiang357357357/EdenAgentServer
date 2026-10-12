@@ -3,6 +3,7 @@ import { panelLines } from './panel-frame.ts'
 import { serverVersion } from '../src/version.ts'
 import { edenWordmarkHeight, edenWordmarkRow, edenWordmarkWidth } from './eden-wordmark.ts'
 import type { ColoredLine, Frame, ScreenState } from './screen-state.ts'
+import { identityLine } from './status-view.ts'
 
 function centered(value: string, width: number, color: boolean, tone = '148;148;148'): string {
   const start = Math.max(0, Math.floor((width - cells(value)) / 2))
@@ -79,9 +80,7 @@ function identityRow(rows: string[], state: ScreenState, layout: HomeLayout, col
   const editWidth = Math.max(1, panelWidth - 3)
   const login = state.authStage === 'username' || state.authStage === 'password'
   const pending = state.authStage === 'connecting' || state.authStage === 'server_error'
-  const agent = state.agentLabel || (state.origin === 'mon' ? '伊甸园' : '尘世')
-  const model = state.modelAvailable === false ? '未选择模型 · /models' : state.modelLabel || '模型待选择'
-  const modelInfo = login ? 'Mon Core 登录 · 密码不保存' : pending ? '等待连接' : `${agent}  ·  ${model}`
+  const modelInfo = login ? 'Mon Core 登录 · 密码不保存' : pending ? '等待连接' : identityLine(state, editWidth)
   const identity = clip(state.accountLabel || (state.connected ? '已连接' : '未连接'), Math.min(22, editWidth - 4))
   const left = clip(modelInfo, Math.max(1, editWidth - cells(identity) - 2))
   const detail = `${left}${' '.repeat(Math.max(2, editWidth - cells(left) - cells(identity)))}${identity}`

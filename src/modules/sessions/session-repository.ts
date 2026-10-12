@@ -9,6 +9,8 @@ import { SessionEvents } from './session-events.ts'
 import { latestMetadataEvent } from './session-metadata-query.ts'
 import { readReplyTimer } from './reply-timer-query.ts'
 import { sessionStorage } from './session-storage.ts'
+import { privateQqCheckpoint } from '../tool-results/index.ts'
+import { SessionContextDeletion } from './history/context-deletion.ts'
 
 interface SessionMetadata {
   participants: JsonValue[]
@@ -203,7 +205,7 @@ export class SessionRepository {
     return sessionStorage('会话检查点读取失败', () => {
       const row = this.database.connection.prepare('SELECT checkpoint_json FROM runtime_checkpoints WHERE session_id=?').get(sessionId)
       const checkpoint = row ? runtimeCheckpointSchema.parse(JSON.parse(String(row.checkpoint_json))) : undefined
-      return checkpoint
+      return checkpoint ? privateQqCheckpoint(new SessionContextDeletion(this.database).project(checkpoint)) : undefined
     })
   }
 
@@ -211,12 +213,18 @@ export class SessionRepository {
     this.read(sessionId)
   }
 
+  modelCheckpoint(snapshot: RuntimeCheckpoint, actorId?: string): RuntimeCheckpoint {
+    this.assertContextReady(snapshot.sessionId)
+    return new SessionContextDeletion(this.database).project(runtimeCheckpointSchema.parse(snapshot), actorId)
+  }
+
   saveCheckpoint(snapshot: RuntimeCheckpoint, turnId: string): void {
+    const checkpoint = this.modelCheckpoint(snapshot)
     const event = sessionStorage('会话检查点提交失败', () => this.database.transaction(() => {
       this.database.connection.prepare(`INSERT INTO runtime_checkpoints VALUES (?, ?, ?)
         ON CONFLICT(session_id) DO UPDATE SET checkpoint_json=excluded.checkpoint_json, updated_at=excluded.updated_at`)
-        .run(snapshot.sessionId, JSON.stringify(snapshot), Date.now())
-      return this.events.insert(snapshot.sessionId, turnId, 'runtime.checkpoint', { entries: snapshot.entries.length })
+        .run(checkpoint.sessionId, JSON.stringify(checkpoint), Date.now())
+      return this.events.insert(checkpoint.sessionId, turnId, 'runtime.checkpoint', { entries: checkpoint.entries.length })
     }))
     this.events.publish(event)
   }

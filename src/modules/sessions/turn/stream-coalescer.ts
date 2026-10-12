@@ -19,10 +19,11 @@ export class StreamCoalescer {
   constructor(private readonly append: (kind: string, payload: JsonValue) => void,
     private readonly now: () => number = () => performance.now()) {}
 
-  async event(kind: string, payload: JsonValue): Promise<void> {
+  async event(kind: string, payload: JsonValue, coalesced = false): Promise<void> {
     this.assertHealthy()
     const key = this.deltaKey(kind, payload)
-    if (!key || !object(payload)) {
+    // Child batches are already sampled and must commit now, including the final update before a stalled stream.
+    if (coalesced || !key || !object(payload)) {
       this.flush()
       this.write(kind, payload)
       this.streamKey = undefined

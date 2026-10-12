@@ -11,6 +11,7 @@ export function showCommandHelp(terminal: Terminal): void {
         '/home · /timeline · /status · /sidebar · /details · /timestamps',
         '/models 查看和选择当前会话模型',
         '/account 查看账号 · /login 切换账号 · /logout 退出登录 · /retry 重连',
+        '/restore 恢复保留的输入 · /reconnect-stop 停止自动重连；未确认消息不自动重发',
         '发送以 / 开头的文字请先输入 //',
       ])
 }
@@ -23,6 +24,8 @@ export function showCommandMenu(terminal: Terminal): void {
         { label: '切换 Core 账号', command: '/login' },
         { label: '退出 Core 登录', command: '/logout' },
         { label: '重连 Agent Server', command: '/retry' },
+        { label: '停止自动重连', command: '/reconnect-stop' },
+        { label: '恢复保留的输入', command: '/restore' },
         { label: '切换会话', detail: 'Ctrl+S', command: '/sessions' },
         { label: '新建会话', detail: 'Ctrl+N', command: '/new' },
         { label: '消息时间线', detail: 'Ctrl+T', command: '/timeline' },

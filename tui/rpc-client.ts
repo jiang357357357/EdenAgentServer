@@ -4,6 +4,10 @@ import type { RuntimeOrigin, SchemaRpcMethodMap, SessionEvent } from '@eden/api'
 
 type Pending = { resolve(value: unknown): void; reject(error: Error): void; parse(value: unknown): unknown; timer: ReturnType<typeof setTimeout> }
 
+export class TuiRpcError extends Error {
+  constructor(message: string, readonly uncertain = false) { super(message) }
+}
+
 /** The TUI has its own connection. It never opens a database or starts an Agent runtime. */
 export class TuiRpcClient {
   private socket: WebSocket | undefined
@@ -45,13 +49,13 @@ export class TuiRpcClient {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (!this.pending.delete(id)) return
-        reject(new Error(`${String(method)} 超时；执行结果未确认，重试前请查看历史`))
+        reject(new TuiRpcError(`${String(method)} 超时；执行结果未确认，重试前请查看历史`, true))
       }, 120_000)
       this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, parse: value => contract.result.parse(value), timer })
       try { socket.send(JSON.stringify({ jsonrpc: '2.0', id, method, params: input })) }
       catch {
         clearTimeout(timer); this.pending.delete(id)
-        reject(new Error('RPC 发送失败；执行结果未确认'))
+        reject(new TuiRpcError('RPC 发送失败；执行结果未确认', true))
       }
     })
   }
@@ -80,7 +84,7 @@ export class TuiRpcClient {
         pending.reject(new Error(typeof error.message === 'string' ? error.message : 'RPC 请求失败'))
       } else {
         try { pending.resolve(pending.parse(message.result)) }
-        catch { pending.reject(new Error('RPC 响应与协议不一致')) }
+        catch { pending.reject(new TuiRpcError('RPC 响应与协议不一致；执行结果未确认', true)) }
       }
       return
     }
@@ -94,7 +98,7 @@ export class TuiRpcClient {
     this.socket = undefined
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer)
-      pending.reject(new Error('RPC 连接断开；未完成请求的结果不确定'))
+      pending.reject(new TuiRpcError('RPC 连接断开；未完成请求的结果不确定', true))
     }
     this.pending.clear()
     for (const listener of this.closed) listener()

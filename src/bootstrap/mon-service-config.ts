@@ -3,6 +3,7 @@ import path from 'node:path'
 import { parseEnv } from 'node:util'
 import { z } from 'zod'
 import { modelEndpointSchema } from '@eden/api'
+import { workspaceSchedulerStateFile } from './mon-scheduler-path.ts'
 
 const filePath = z.string().trim().min(1).max(4096)
 const configSchema = z.object({ deploymentRoot: filePath.optional(), authFile: filePath, coreBaseUrl: modelEndpointSchema,
@@ -36,7 +37,7 @@ export function monServiceConfig(origin: 'mon' | 'local', dataRoot: string, env:
   // do not combine them with a possibly stale mon-service.json binding.
   if (env.MON_SERVICE_SHARED_SECRET !== undefined || env.MON_SERVICE_USER_ID !== undefined) {
     validateIdentity(env, '环境变量')
-    const scheduleStateFile = environmentScheduleStateFile(env)
+    const scheduleStateFile = environmentScheduleStateFile(env) ?? workspaceSchedulerStateFile(workspaceRoot, env)
     return { env, ...(scheduleStateFile ? { scheduleStateFile } : {}) }
   }
   const filename = path.join(dataRoot, 'mon-service.json')
@@ -47,8 +48,12 @@ export function monServiceConfig(origin: 'mon' | 'local', dataRoot: string, env:
   const root = path.resolve(path.dirname(filename), config.deploymentRoot ?? '.')
   const authFile = path.resolve(root, config.authFile)
   readable(authFile, filename, 'authFile')
-  const scheduleStateFile = config.scheduleStateFile ? path.resolve(root, config.scheduleStateFile) : undefined
-  if (scheduleStateFile) readable(scheduleStateFile, filename, 'scheduleStateFile')
+  const explicitStateFile = config.scheduleStateFile ? path.resolve(root, config.scheduleStateFile) : undefined
+  if (explicitStateFile) readable(explicitStateFile, filename, 'scheduleStateFile')
+  // A realm bound to another deployment must not borrow this workspace's scheduler.
+  const workspaceAuth = workspaceRoot && path.resolve(workspaceRoot, 'Config', 'ENV', 'service-auth.env')
+  const sameWorkspace = workspaceAuth && path.relative(workspaceAuth, authFile) === ''
+  const scheduleStateFile = explicitStateFile ?? (sameWorkspace ? workspaceSchedulerStateFile(workspaceRoot, env) : undefined)
   return { env: identityEnvironment(authFile, config.coreBaseUrl, env),
     scheduleStateFile }
 }
@@ -60,7 +65,7 @@ function workspaceServiceConfig(workspaceRoot: string | undefined, env: NodeJS.P
     throw new Error('Mon 服务认证必须来自已锚定的当前工作区')
   const authFile = path.join(root, 'Config', 'ENV', 'service-auth.env')
   if (!existsSync(authFile)) return { env }
-  const scheduleStateFile = environmentScheduleStateFile(env)
+  const scheduleStateFile = environmentScheduleStateFile(env) ?? workspaceSchedulerStateFile(root, env)
   return { env: identityEnvironment(authFile, env.MON_CORE_BASE_URL ?? 'http://127.0.0.1:40011', env),
     ...(scheduleStateFile ? { scheduleStateFile } : {}) }
 }

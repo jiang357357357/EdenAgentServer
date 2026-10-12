@@ -42,10 +42,14 @@ test('memory extraction records the real bounded no-tools model request before t
 
 test('extraction persistence failure, empty source and pre-cancellation make no network request', async () => {
   const model = await recordedModel([{ text: '{"memories":[]}' }])
+  const persistenceFailure = new Error('capture disk failure')
   try {
     const request = { model: model.config, userText: 'User text', assistantText: 'Reply', signal: new AbortController().signal,
-      async record() { throw new Error('capture disk failure') } }
-    await assert.rejects(extractMemoryCandidates(request), /persistence failed/)
+      async record() { throw persistenceFailure } }
+    await assert.rejects(extractMemoryCandidates(request), error => {
+      assert.equal(error, persistenceFailure, 'the host must preserve the original persistence failure')
+      return true
+    })
     assert.equal(model.requests.length, 0)
     assert.deepEqual(await extractMemoryCandidates({ ...request, userText: ' ' }), [])
     const controller = new AbortController(); controller.abort(new Error('cancelled'))

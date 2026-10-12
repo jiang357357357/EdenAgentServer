@@ -9,11 +9,13 @@ import { startServer } from '../../../src/bootstrap/container.ts'
 
 test('real host uses a reduced default catalog while retaining deferred capabilities for discovery', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-capability-host-'))
-  t.after(() => rm(root, { recursive: true, force: true }))
   const model = await recordedModel([{ tool: 'list_tools', input: { query: 'manage_plugins' } }, { text: '找到插件开发能力' }])
-  t.after(() => model.close())
   const server = await startServer({ ...loadConfig({ EDEN_AGENT_DATA_ROOT: root, EDEN_AGENT_PORT: '0' }), model: model.config })
-  t.after(() => server.close())
+  t.after(async () => {
+    try { await server.close() }
+    finally { await model.close(); await rm(root, { recursive: true, force: true }) }
+  })
+  await server.memoryExtractions.close()
   const session = server.sessions.repository.create('工具发现')
   server.sessions.start(session.id, '查找插件开发能力')
   await server.sessions.waitForIdle(session.id)

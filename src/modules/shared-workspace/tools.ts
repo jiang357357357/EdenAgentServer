@@ -2,7 +2,6 @@ import { z } from 'zod'
 import { toJson } from '@eden/api'
 import type { RuntimeTool } from '@eden/runtime-pi'
 import { toolDescription } from '../../model-prompts/tool-descriptions.ts'
-import { sharedWorkspaceUsage } from '../../model-prompts/shared-workspace.ts'
 import type { SharedWorkspaceService } from './service.ts'
 import { SharedWorkspaceModelQuery } from './model-query.ts'
 
@@ -19,7 +18,7 @@ const querySchema = z.object({ action: z.enum(['status', 'spaces', 'files']),
 export function sharedWorkspaceTool(service: SharedWorkspaceService, sessionId: string): RuntimeTool {
   const query = new SharedWorkspaceModelQuery(service, sessionId)
   return { name: 'query_shared_workspace', revision: 'eden.shared-workspace.query.v2',
-    description: toolDescription('query_shared_workspace'), promptHint: sharedWorkspaceUsage,
+    description: toolDescription('query_shared_workspace'),
     parameters: toJson(z.toJSONSchema(querySchema, { io: 'input' })) as Record<string, import('@eden/api').JsonValue>,
     async execute(raw, context) {
       const input = querySchema.parse(raw)

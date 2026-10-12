@@ -1,6 +1,7 @@
 import type { JsonValue } from '@eden/api'
 import type { EdenDatabase } from '@eden/store'
 import { SessionOwnership } from '../../accounts/index.ts'
+import { messageNotDeletedSql } from './message-visibility.ts'
 
 /** Latest real chat for this account and character, with at most three exchanges. */
 export function recentSharedTopics(database: EdenDatabase, sessionId: string, author: JsonValue) {
@@ -30,8 +31,9 @@ export function recentSharedTopics(database: EdenDatabase, sessionId: string, au
     const participants = Array.isArray(metadata.participants) ? metadata.participants.map(object) : []
     const actor = participants.find(p => String(p.characterId ?? object(object(p.profile).character).id) === String(characterId))
     const actorId = actor?.assistantId ?? identity.assistantId ?? characterId
-    const events = database.connection.prepare(`SELECT payload_json FROM events WHERE session_id=? AND turn_id=?
+    const events = database.connection.prepare(`SELECT payload_json FROM events candidate WHERE session_id=? AND turn_id=?
       AND kind='agent.message_end' AND json_extract(payload_json,'$.message.role')='assistant'
+      AND ${messageNotDeletedSql}
       AND COALESCE(json_extract(payload_json,'$.message.stopReason'),'stop')='stop'
       AND (json_extract(payload_json,'$.actor.assistantID') IS NULL OR CAST(json_extract(payload_json,'$.actor.assistantID') AS TEXT)=?)
       ORDER BY seq DESC LIMIT 1`).get(row.session_id!, row.turn_id!, String(actorId))

@@ -125,7 +125,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
     attachmentTool(attachmentRepository, attachments, sessionId, turnId),
     ...(config.origin === 'mon' ? [sharedWorkspaceTool(sharedWorkspace, sessionId),
       ...sharedLibraryFileTools(sharedWorkspace, permissions, sessionId, turnId, actorId)] : []),
-    ...(config.origin === 'mon' ? [qqFileTool(repository, blobs, sessionWorkspace(sessionId), permissions, sessionId, turnId)] : []),
+    ...(config.origin === 'mon' ? [qqFileTool(repository, blobs, sessionWorkspace(sessionId), permissions, sessionId, turnId, mon)] : []),
     ...memoryTools(memories, memoryScopes, permissions, { sessionId, turnId, ...(actorId === undefined ? {} : { actorId }) }),
     ...webTools(web, permissions, sessionId, turnId),
     ...(config.origin === 'mon' ? [...contactTools(mon, permissions, sessionId, turnId),

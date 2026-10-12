@@ -7,6 +7,7 @@ import { EventReadCache } from './event-read-cache.ts'
 import { SessionModelHeads } from './session-model-heads.ts'
 import { projectionSequences, latestKindRecord } from './event-kind-queries.ts'
 import { withMessageTurnTiming } from './message-turn-timing.ts'
+import { messageNotDeletedSql } from './history/message-visibility.ts'
 import { setImmediate as yieldToEventLoop } from 'node:timers/promises'
 import { randomUUID } from 'node:crypto'
 import type { JsonValue, DurableEvent } from '@eden/api'
@@ -189,7 +190,10 @@ export class SessionEvents {
       if (!row) throw new Error('Message cursor not found in session')
       beforeSeq = BigInt(row.seq as bigint)
     }
-    const statement = this.database.connection.prepare("SELECT * FROM events WHERE session_id=? AND kind='agent.message_end' AND seq<? ORDER BY seq DESC LIMIT ?")
+    const statement = this.database.connection.prepare(`SELECT candidate.* FROM events AS candidate
+      WHERE candidate.session_id=? AND candidate.kind='agent.message_end' AND candidate.seq<?
+      AND ${messageNotDeletedSql}
+      ORDER BY candidate.seq DESC LIMIT ?`)
     statement.setReadBigInts(true)
     const rows = statement.all(sessionId, beforeSeq, Math.min(limit, 100) + 1)
     const hasMore = rows.length > limit

@@ -4,11 +4,16 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { capabilityFixture, fixtureTool } from './fixture.ts'
+import { migrations } from '@eden/store/testing'
 
 test('legacy skill tool bindings migrate to independent selections and survive instruction unloading', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-independent-tools-'))
-  t.after(() => rm(root, { recursive: true, force: true }))
   const filename = path.join(root, 'test.sqlite'), f = await capabilityFixture(filename)
+  let openFixture: Awaited<ReturnType<typeof capabilityFixture>> | undefined = f
+  t.after(async () => {
+    try { await openFixture?.close() }
+    finally { await rm(root, { recursive: true, force: true }) }
+  })
   f.setTools([fixtureTool()]); f.install('echo-skill', '使用回显工具。', ['special_action'])
   f.capabilities().loadSkill('echo-skill'); f.exposeEcho()
   const sessionId = f.session.id, db = f.database.connection
@@ -16,12 +21,12 @@ test('legacy skill tool bindings migrate to independent selections and survive i
   f.capabilities().loadTools(f.capabilities().discover({ query: 'special_action', offset: 0, limit: 20 }).tools)
   f.capabilities().unloadTools(['builtin:special_action'])
   db.prepare("DELETE FROM session_capability_selections WHERE kind='tool' AND key<>?").run('builtin:special_action')
-  const version = Number(db.prepare('PRAGMA user_version').get()!.user_version)
-  db.prepare('DELETE FROM schema_migrations WHERE version=?').run(version)
-  db.exec(`PRAGMA user_version=${version - 1}`)
+  // Replay the legacy exposure conversion (116), without rewinding unrelated later DDL migrations.
+  f.database.transaction(() => db.exec(migrations[115]!))
   await f.close()
+  openFixture = undefined
   const restored = await capabilityFixture(filename)
-  t.after(() => restored.close())
+  openFixture = restored
   const rows = restored.database.connection.prepare('SELECT kind,key,selection_json FROM session_capability_selections WHERE session_id=?').all(sessionId)
   const tools = rows.filter(row => row.kind === 'tool').map(row => JSON.parse(String(row.selection_json)))
   assert.deepEqual(tools.map(tool => tool.key).sort(), ['builtin:special_action', 'skill:echo-skill:echo_skill'])

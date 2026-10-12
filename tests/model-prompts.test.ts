@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { DirectorPlan } from '@eden/api'
+import { BUILTIN_SKILL_GUIDES } from '../src/model-prompts/builtin-skills.ts'
+import { CAPABILITY_DESCRIPTIONS, capabilityHint, toolDirectoryHint } from '../src/model-prompts/capabilities.ts'
 import { ACTOR_SYSTEM_RULES, actorTurnInstruction } from '../src/model-prompts/actors.ts'
 import { connectorEventContext } from '../src/model-prompts/connectors.ts'
 import { DIRECTOR_SYSTEM_PROMPT } from '../src/model-prompts/director.ts'
@@ -32,7 +34,8 @@ test('host-owned model prose is centralized and Chinese', () => {
     MEMORY_EXTRACTION_PROMPT, MEMORY_RECALL_HEADING, HANDOFF_CONTEXT_INSTRUCTION, dueMemoInstruction({ title: '标题', content: '内容' }),
     memoRedeliveryInstruction({ title: '标题' }), connectorEventContext('event-1'), pluginHookInstruction({ pluginId: 'p', revision: '1', hookId: 'h', eventId: 'e', event: 'changed', occurredAt: 1, skillName: 's', skillContent: '说明' }),
     selfAwakeInstruction({ reason: '测试' }), ...Object.values(SELF_AWAKE_INTERPRETATIONS), SELF_AWAKE_RECOVERY_INSTRUCTION,
-    skillCatalogHint([], false), ...Object.values(SUBAGENT_ROLE_TEXT).flatMap(role => [role.description, role.instructions]),
+    skillCatalogHint([], false), capabilityHint([], false), toolDirectoryHint([]), ...Object.values(CAPABILITY_DESCRIPTIONS),
+    ...BUILTIN_SKILL_GUIDES.map(skill => skill.content), ...Object.values(SUBAGENT_ROLE_TEXT).flatMap(role => [role.description, role.instructions]),
     subagentTaskInstruction({ role: 'worker', instructions: '完成任务。', skillInstructions: '', message: '开始。' }),
     ...toolNames.map(toolDescription), connectorCapabilityDescription('query'), connectorCapabilityDescription('execute'),
     mediaCaptureDescription('screen'), mediaCaptureDescription('camera'), memoryToolDescription('search_memories'), memoToolDescription('list_memos'),
@@ -41,6 +44,6 @@ test('host-owned model prose is centralized and Chinese', () => {
   for (const value of values) {
     assert.match(value, /[\u3400-\u9fff]/u)
     assert.doesNotMatch(value, /\b(?:You are|Use provided tools|Summarize the conversation|Return strict JSON)\b/u)
-    assert.doesNotMatch(value, /不能|不要|不得|禁止|不允许|只允许|必须|不授予|不执行|不保存|不加|不把/u)
+    assert.doesNotMatch(value, /工具按已有权限执行|角色资料与个人计划不改变授权|工具执行时按其权限流程处理|控制遵循现有授权和审批结果|此目录替代此前的技能目录|聚焦可跨会话使用的偏好、事实、决策和流程/u)
   }
 })

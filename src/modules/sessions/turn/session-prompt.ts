@@ -1,5 +1,6 @@
 import { replyLengthInstruction } from '../../../model-prompts/reply-length.ts'
-import { modelEnvironment, modelParticipant } from '@eden/api'
+import { modelParticipant } from '@eden/api'
+import { modelEnvironmentContext } from '../../../model-prompts/environment.ts'
 import type { JsonValue } from '@eden/api'
 import { characterIdentity, identityPrompt } from '../../../model-prompts/character-identity.ts'
 import { SESSION_SYSTEM_RULES, QQ_GROUP_RULES } from '../../../model-prompts/session.ts'
@@ -18,7 +19,7 @@ export function sessionPromptContent(metadata: JsonValue) {
   const preference = replyLengthInstruction(source, Array.isArray(raw.participants) && raw.participants.length === 1 ? raw.participants[0]! : null)
   const rules = [SESSION_SYSTEM_RULES, environmentSource.channelAudience === 'qq_group' ? QQ_GROUP_RULES : '', preference].filter(Boolean).join('\n')
   const { participants, environment: _environment, ...other } = context
-  const environment = modelEnvironment(context.environment)
+  const environment = modelEnvironmentContext(context.environment)
   const identity = Array.isArray(participants) && participants.length === 1 ? characterIdentity(participants[0]!) : ''
   return { prompt: identityPrompt(identity, rules, { ...context, environment }), sources: [
     ...(identity ? [{ kind: 'character', title: '角色身份', content: identity }] : []),

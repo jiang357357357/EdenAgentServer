@@ -6,6 +6,7 @@ import { resolveLegacySync } from './legacy-sync-review.ts'
 import { prepareLegacyIdentity } from './legacy-identity.ts'
 import { readOwnerQqHistory } from './contact-history.ts'
 import { deliverOwnerQq, ownerQqTarget } from './qq-contact.ts'
+import { deliverOwnerQqFile, type OwnerQqFile } from './qq-file-delivery.ts'
 import { deliverOwnerEmail } from './email-contact.ts'
 import { MonSyncStatus } from './sync-status.ts'
 import { MonSyncWorker } from './sync-worker.ts'
@@ -201,6 +202,14 @@ export class MonBindingService {
 
   contactOwnerByQq(sessionId: string, raw: unknown, signal: AbortSignal) {
     return deliverOwnerQq(this.sessions.repository.database, this.assistantClient(sessionId), sessionId, raw, signal)
+  }
+
+  ownerQqFileTarget(sessionId: string, signal: AbortSignal) {
+    return ownerQqTarget(this.assistantClient(sessionId), signal)
+  }
+
+  sendOwnerQqFile(sessionId: string, input: OwnerQqFile, signal: AbortSignal) {
+    return deliverOwnerQqFile(this.sessions.repository.database, this.assistantClient(sessionId), sessionId, input, signal)
   }
 
   contactOwnerByEmail(sessionId: string, raw: unknown, signal: AbortSignal) {

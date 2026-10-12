@@ -5,6 +5,7 @@ import type { JsonValue } from '@eden/api'
 import type { PermissionService } from '../permissions/index.ts'
 import type { MonBindingService } from './model-binding.ts'
 import { toolDescription } from '../../model-prompts/tool-descriptions.ts'
+import { qqModelResult } from '../tool-results/index.ts'
 const input = z.object({}).strict()
 export function contactTools(mon: MonBindingService, permissions: PermissionService, sessionId: string, turnId: string): RuntimeTool[] {
   return [{ name: 'list_contact_channels', revision: 'eden.mon.contacts.v1', executionMode: 'sequential',
@@ -27,7 +28,7 @@ export function contactTools(mon: MonBindingService, permissions: PermissionServ
     },
   }, {
     name: 'send_qq_message', revision: 'eden.mon.contacts.v1', executionMode: 'sequential',
-    description: toolDescription('send_qq_message'),
+    description: toolDescription('send_qq_message'), modelResult: qqModelResult,
     parameters: toJson(z.toJSONSchema(ownerQqMessageSchema, { io: 'input' })) as Record<string, JsonValue>,
     async execute(raw, context) {
       const message = ownerQqMessageSchema.parse(raw)
@@ -37,7 +38,7 @@ export function contactTools(mon: MonBindingService, permissions: PermissionServ
     },
   }, {
     name: 'read_qq_messages', revision: 'eden.mon.qq-history.v2', executionMode: 'sequential',
-    description: toolDescription('read_qq_messages'),
+    description: toolDescription('read_qq_messages'), modelResult: qqModelResult,
     parameters: toJson(z.toJSONSchema(contactHistorySchema, { io: 'input' })) as Record<string, JsonValue>,
     async execute(raw, context) {
       const query = contactHistorySchema.parse(raw)

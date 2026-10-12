@@ -1,6 +1,5 @@
 import { rpcMethods, toJson } from '@eden/api'
 import type { SharedWorkspaceService } from './service.ts'
-import { sharedWorkspaceUsage } from '../../model-prompts/shared-workspace.ts'
 
 export interface SharedBrowseQuery { query: string; offset: number; limit: number }
 export interface SharedFilesQuery extends SharedBrowseQuery { includeDeleted: boolean }
@@ -14,7 +13,7 @@ export class SharedWorkspaceModelQuery {
     const snapshot = this.service.directory(this.sessionId)
     const shared = await this.readStatus(this.service.forSession(this.sessionId), snapshot.path)
     signal.throwIfAborted(); this.service.assertDirectorySnapshot(snapshot, this.sessionId)
-    return toJson({ directory: snapshot, shared, guidance: sharedWorkspaceUsage })
+    return toJson({ directory: snapshot, shared })
   }
 
   async spaces(input: SharedBrowseQuery, signal: AbortSignal) {
@@ -26,7 +25,7 @@ export class SharedWorkspaceModelQuery {
     const matches = response.spaces.filter(space => space.name.toLowerCase().includes(input.query.toLowerCase()))
     const spaces = matches.slice(input.offset, input.offset + input.limit)
     return toJson({ sharedDirectory: snapshot.path, spaces, total: matches.length,
-      nextOffset: input.offset + spaces.length < matches.length ? input.offset + spaces.length : null, guidance: sharedWorkspaceUsage })
+      nextOffset: input.offset + spaces.length < matches.length ? input.offset + spaces.length : null })
   }
 
   async files(input: SharedFilesQuery, signal: AbortSignal) {
@@ -47,7 +46,7 @@ export class SharedWorkspaceModelQuery {
       .sort((a, b) => a.path.localeCompare(b.path) || a.fileId.localeCompare(b.fileId))
     const files = matches.slice(input.offset, input.offset + input.limit)
     return toJson({ sharedDirectory: snapshot.path, shared: current, source: 'synchronized-file-index', files, total: matches.length,
-      nextOffset: input.offset + files.length < matches.length ? input.offset + files.length : null, guidance: sharedWorkspaceUsage })
+      nextOffset: input.offset + files.length < matches.length ? input.offset + files.length : null })
   }
 
   private async readStatus(service: SharedWorkspaceService, root: string) {

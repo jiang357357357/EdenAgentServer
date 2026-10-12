@@ -70,14 +70,19 @@ test('generic forwarding must resolve to a loaded final target', async t => {
 
 test('manual selections survive database reopening and do not restore changed versions', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-capability-recovery-'))
-  t.after(() => rm(root, { recursive: true, force: true }))
   const filename = path.join(root, 'test.sqlite'), f = await capabilityFixture(filename)
+  let closeStore: (() => Promise<void> | void) | undefined = () => f.close()
+  t.after(async () => {
+    try { await closeStore?.() }
+    finally { await rm(root, { recursive: true, force: true }) }
+  })
   const sessionId = f.session.id, tool = fixtureTool()
   f.setTools([tool])
   f.capabilities().loadTools(f.capabilities().discover({ query: 'special_action', offset: 0, limit: 20 }).tools)
   await f.close()
+  closeStore = undefined
   const db = new EdenDatabase(filename, 'local'), sessions = new SessionRepository(db, 'local')
-  t.after(() => db.close())
+  closeStore = () => db.close()
   const scope = () => ({ sessionId, owner: '', workspaceRoot: '', profile: 'user_chat' })
   const restored = new SessionCapabilities(db, sessions.events, new SkillRepository(db), scope, () => [tool])
   assert.ok(restored.tools().some(item => item.name === tool.name))

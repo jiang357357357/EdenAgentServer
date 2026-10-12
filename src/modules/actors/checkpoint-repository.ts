@@ -2,6 +2,7 @@ import { actorIdSchema, runtimeCheckpointSchema } from '@eden/api'
 import type { RuntimeCheckpoint } from '@eden/api'
 import type { SessionRepository } from '../sessions/index.ts'
 import { RuntimePersistenceError, assertRuntimeCheckpoint } from '@eden/runtime-pi'
+import { privateQqCheckpoint } from '../tool-results/index.ts'
 
 export class ActorCheckpointRepository {
   constructor(private readonly sessions: SessionRepository) {}
@@ -12,23 +13,25 @@ export class ActorCheckpointRepository {
     try {
       const row = this.sessions.database.connection.prepare('SELECT checkpoint_json FROM actor_checkpoints WHERE session_id=? AND assistant_id=?')
         .get(sessionId, id)
-      return row ? runtimeCheckpointSchema.parse(JSON.parse(String(row.checkpoint_json))) : undefined
+      return row ? privateQqCheckpoint(this.sessions.modelCheckpoint(runtimeCheckpointSchema.parse(JSON.parse(String(row.checkpoint_json))), id)) : undefined
     } catch (error) { throw new RuntimePersistenceError('角色检查点读取失败', error) }
   }
 
   assertRecoverable(sessionId: string): void {
     this.sessions.assertContextReady(sessionId)
     try {
-      const rows = this.sessions.database.connection.prepare('SELECT checkpoint_json FROM actor_checkpoints WHERE session_id=?').all(sessionId)
-      for (const row of rows) assertRuntimeCheckpoint(runtimeCheckpointSchema.parse(JSON.parse(String(row.checkpoint_json))), sessionId)
+      const rows = this.sessions.database.connection.prepare('SELECT assistant_id,checkpoint_json FROM actor_checkpoints WHERE session_id=?').all(sessionId)
+      for (const row of rows) assertRuntimeCheckpoint(this.sessions.modelCheckpoint(
+        runtimeCheckpointSchema.parse(JSON.parse(String(row.checkpoint_json))), String(row.assistant_id)), sessionId)
     } catch (error) { throw new RuntimePersistenceError('角色检查点恢复检查失败', error) }
   }
 
   save(sessionId: string, assistantId: string | number, turnId: string, snapshot: RuntimeCheckpoint): void {
     this.sessions.read(sessionId)
     const id = String(actorIdSchema.parse(assistantId))
-    const checkpoint = runtimeCheckpointSchema.parse(snapshot)
-    if (checkpoint.sessionId !== sessionId) throw new Error('Actor checkpoint session mismatch')
+    const parsed = runtimeCheckpointSchema.parse(snapshot)
+    if (parsed.sessionId !== sessionId) throw new Error('Actor checkpoint session mismatch')
+    const checkpoint = this.sessions.modelCheckpoint(parsed, id)
     const event = this.sessions.database.transaction(() => {
       this.sessions.database.connection.prepare(`INSERT INTO actor_checkpoints VALUES (?, ?, ?, ?)
         ON CONFLICT(session_id, assistant_id) DO UPDATE SET checkpoint_json=excluded.checkpoint_json, updated_at=excluded.updated_at`)
