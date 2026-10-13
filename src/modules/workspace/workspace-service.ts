@@ -128,6 +128,17 @@ export class WorkspaceService {
     return info.path
   }
 
+  /** Search validates this persisted identity inside its deadline-controlled worker, without host filesystem I/O. */
+  searchLocation(): { root: string; expectedRoot: string } {
+    const selection = this.repository.selection()
+    if (!selection) throw new Error('Select a workspace first')
+    if (selection.kind === 'external') return { root: selection.path, expectedRoot: selection.path }
+    const resolution = this.repository.defaultResolution() ?? this.location.resolution
+    if (!this.defaultWorkspaceRoot || !resolution || resolution.configuredPath !== this.defaultWorkspaceRoot)
+      throw new Error('Default workspace location is not configured')
+    return { root: resolution.configuredPath, expectedRoot: resolution.canonicalPath }
+  }
+
   commandRoot(): string {
     return this.info().status === 'unselected' ? workspaceRoot(os.homedir(), []) : this.root()
   }

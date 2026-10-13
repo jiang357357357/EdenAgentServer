@@ -49,7 +49,7 @@ const descriptions = {
   read_shared_file: '读取独立共享资料库内的本地文件，path 为共享目录内相对路径，支持字节 offset/limit 分页；不读取当前工作区。索引存在不代表文件已下载。',
   write_shared_file: '在独立共享资料库内创建或替换 UTF-8 文件，path 为共享目录内相对路径，最大 1 MiB；需要资料库编辑权限及宿主审批，校验文件版本。只报告本地写入，后台同步结果另查；不改变当前工作区。',
   edit_shared_file: '按唯一匹配的 oldText 编辑独立共享资料库内 UTF-8 文件，最大 1 MiB；需要编辑权限、审批及版本校验，不改变当前工作区。',
-  search_files: '在已选择工作区中按文件名或文件内容搜索；返回匹配路径、行号和片段。',
+  search_files: '在已选择工作区中按文件名或 UTF-8 文件内容进行不区分大小写的字面搜索，不支持正则表达式。预算两分钟；到期停止并返回已有匹配、扫描数量、耗时和 stopReason。truncated=true 表示搜索未完整结束，不能据此断言没有其他匹配；遇到 timeout 或数量上限应缩小 path 或查询范围，不要立即重复相同搜索。workerStopped=false 表示未确认子进程退出，应报告此状态，不要启动重复搜索。默认跳过 .git、node_modules、dist、build、.next；文件名仍可匹配，内容大于 512 KiB、二进制或非 UTF-8 时跳过内容。',
   write_file: '在现有工作区目录内原子写入 UTF-8 文本，可使用 createOnly 要求只新建；宿主自动检查读取后或审批期间的文件变化。',
   edit_file: '精确替换工作区文件中唯一匹配的 oldText；写入前检查文件是否变化并请求审批。',
   exec_command: '运行所选终端环境中的系统 shell。可设置最长 600 秒的 timeoutSeconds，输出超过 1 MiB 时截断但命令继续执行。Windows 可选择本机 PowerShell 或 WSL 发行版，其他系统使用 /bin/sh。',

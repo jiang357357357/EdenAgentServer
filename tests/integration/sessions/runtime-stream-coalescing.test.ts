@@ -13,8 +13,8 @@ function update(text: string, delta = text.at(-1)!) {
   return { message, assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta, partial: message } }
 }
 
-function fixture(t: TestContext) {
-  t.mock.method(performance, 'now', () => 0)
+function fixture(t: TestContext, freezeClock = true) {
+  if (freezeClock) t.mock.method(performance, 'now', () => 0)
   const database = new EdenDatabase(':memory:', 'local')
   t.after(() => database.close())
   const repository = new SessionRepository(database, 'local')
@@ -39,29 +39,30 @@ test('already coalesced child batches commit immediately without a second sampli
 })
 
 test('6000 fast SDK deltas use bounded durable writes, yield to I/O and preserve final output and contiguous history', async t => {
-  const f = fixture(t), callbacks = f.callbacks()
+  const f = fixture(t, false), callbacks = f.callbacks()
   let transactions = 0, yielded = false
   const transaction = f.database.transaction.bind(f.database)
   t.mock.method(f.database, 'transaction', <T>(operation: () => T): T => { transactions++; return transaction(operation) })
   await callbacks.event('message_start', { message: { role: 'assistant', content: [] } })
   const io = setImmediate().then(() => { yielded = true })
+  const started = performance.now()
   for (let index = 1; index <= 6000; index++) {
     await callbacks.event('message_update', update('中'.repeat(index), '中'))
-    if (index === 32) assert.equal(yielded, true, 'A fast stream must allow pending I/O before completion')
   }
+  assert.equal(yielded, true, 'A busy stream must allow pending I/O before completion')
   const final = update('中'.repeat(6000)).message
   await callbacks.event('message_end', { message: final })
   await io
   const updates = f.events.filter(event => event.kind === 'agent.message_update')
-  assert.equal(updates.length, 2)
-  assert.equal(transactions, 4, 'One start, first delta, final coalesced delta and message end')
+  assert.ok(updates.length <= Math.ceil((performance.now() - started) / 100) + 2)
+  assert.equal(transactions, updates.length + 2, 'Sampled updates plus message boundaries')
   const deltas = updates.map(event => (event.payload as Record<string, JsonValue>).assistantMessageEvent as Record<string, JsonValue>)
   assert.equal(deltas.map(value => value.delta).join(''), '中'.repeat(6000))
   assert.deepEqual((updates.at(-1)!.payload as Record<string, JsonValue>).message, final)
   assert.deepEqual((f.events.at(-1)!.payload as Record<string, JsonValue>).message, final)
   const restored = f.repository.events.list(f.session.id, '1', 100)
   assert.deepEqual(restored, f.events)
-  assert.deepEqual(restored.map(event => event.seq), ['2', '3', '4', '5'])
+  assert.deepEqual(restored.map(event => event.seq), restored.map((_event, index) => String(index + 2)))
   t.diagnostic(`6000 update callbacks -> ${updates.length} durable updates; ${transactions} event transactions including boundaries`)
 })
 
@@ -78,7 +79,8 @@ for (const boundary of ['message_end', 'agent_end', 'error', 'request', 'respons
     const count = f.events.length
     if (boundary === 'request') await callbacks.request({ requestId: 'request', payload: { messages: [] } })
     else if (boundary === 'response') await callbacks.response!({ requestId: 'request', message: { stopReason: 'aborted' } })
-    else if (boundary === 'checkpoint') await callbacks.checkpoint({} as RuntimeCheckpoint)
+    else if (boundary === 'checkpoint') await callbacks.checkpoint({ format: 'eden.pi-harness.v1', runtimeVersion: '0.82.0',
+      sessionId: f.session.id, createdAt: new Date().toISOString(), entries: [] } satisfies RuntimeCheckpoint)
     else if (boundary === 'beforeTool') await callbacks.beforeTool!('fixture', 'call', '1', {})
     else if (boundary === 'afterTool') await callbacks.afterTool!('call', { error: 'cancelled' }, true, 'cancelled')
     else await callbacks.event(boundary, boundary === 'message_end' ? { message: update('ab').message } : { reason: 'aborted' })

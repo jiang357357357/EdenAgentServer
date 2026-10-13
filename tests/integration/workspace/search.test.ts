@@ -24,9 +24,14 @@ test('workspace search preserves filename precedence and skips excluded or non-t
     ])
     assert.equal(result.scannedFiles, 5)
     assert.equal(result.truncated, false)
+    assert.equal(result.stopReason, 'completed')
+    assert.equal(result.budgetMs, 120_000)
+    assert.equal(result.workerStopped, true)
+    assert.equal(result.skippedFiles, 3)
     const bounded = await searchWorkspace(root, '', 'needle', 1, new AbortController().signal)
     assert.equal(bounded.matches.length, 1)
     assert.equal(bounded.truncated, true)
+    assert.equal(bounded.stopReason, 'match_limit')
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

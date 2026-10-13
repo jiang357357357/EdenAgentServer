@@ -7,6 +7,7 @@ import { WorkspaceService } from './workspace-service.ts'
 import { workspaceReadTools } from './workspace-read-tools.ts'
 import { workspaceWriteTools } from './workspace-write-tools.ts'
 import { toolDescription } from '../../model-prompts/tool-descriptions.ts'
+import { terminalToolContext } from '../../model-prompts/terminal.ts'
 
 const commandSchema = z.object({ command: z.string().min(1).max(65536),
   timeoutSeconds: z.number().int().min(1).max(600).default(30) }).strict()
@@ -18,8 +19,8 @@ export function workspaceTools(workspace: WorkspaceService, permissions: Permiss
     ...workspaceReadTools(workspace, scope),
     ...workspaceWriteTools(workspace, permissions, sessionId, turnId, scope),
     {
-      name: 'exec_command', revision: 'eden.workspace.exec.v2', executionMode: 'sequential',
-      description: `${toolDescription('exec_command')} 当前终端：${terminal?.kind === 'wsl' ? `WSL ${terminal.distribution} /bin/sh` : process.platform === 'win32' ? '本机 PowerShell' : '本机 /bin/sh'}。`,
+      name: 'exec_command', revision: 'eden.workspace.exec.v3', executionMode: 'sequential',
+      description: `${toolDescription('exec_command')}\n${terminalToolContext(terminal)}`,
       outcome: result => result && typeof result === 'object' && !Array.isArray(result) && result.exitCode === 0 ? 'completed' : 'failed',
       parameters: toJson(z.toJSONSchema(commandSchema, { io: 'input' })) as Record<string, import('@eden/api').JsonValue>,
       async execute(input, context) {

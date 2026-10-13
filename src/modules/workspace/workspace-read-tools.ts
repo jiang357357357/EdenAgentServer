@@ -33,11 +33,13 @@ export function workspaceReadTools(workspace: WorkspaceService, scope: string): 
         return toJson({ path: directory.path, entries,
           nextOffset: input.offset + input.limit < directory.entries.length ? input.offset + input.limit : null })
       } },
-    { name: 'search_files', revision: 'eden.workspace.search.v1', description: toolDescription('search_files'),
+    { name: 'search_files', revision: 'eden.workspace.search.v2', description: toolDescription('search_files'),
       parameters: toJson(z.toJSONSchema(search, { io: 'input' })) as Record<string, import('@eden/api').JsonValue>,
       async execute(raw, context) {
         const input = search.parse(raw)
-        return toJson(await searchWorkspace(workspace.root(), input.path, input.query, input.limit, context.signal))
+        context.signal.throwIfAborted()
+        const location = workspace.searchLocation()
+        return toJson(await searchWorkspace(location.root, input.path, input.query, input.limit, context.signal, location.expectedRoot))
       } },
   ]
 }

@@ -1,11 +1,12 @@
-import { toJson } from '@eden/api'
+import { jsonSnapshot } from '@eden/api'
 import type { DurableEvent, JsonValue } from '@eden/api'
-import { applyMessagePatches, isObject, messagePatches } from './message-delta.ts'
-import type { MessagePatch } from './message-delta.ts'
+import { isObject } from './message-delta.ts'
+import { restoreMessage, restorePartial, storeMessage, storePartial } from './message-storage.ts'
 
-const format = 'eden.message.delta.v1'
+const format = 'eden.message.delta.v2'
+const legacyFormat = 'eden.message.delta.v1'
 const snapshotInterval = 128
-interface Previous { seq: string; message: JsonValue; depth: number }
+interface Previous { seq: string; message: JsonValue; partial?: JsonValue; depth: number }
 
 /** Compact only on disk. Public events retain their original, independently renderable payload. */
 export class StreamPersistence {
@@ -15,16 +16,15 @@ export class StreamPersistence {
     const payload = event.payload
     if (!event.kind.endsWith('.message_update') || !isObject(payload) || !isObject(payload.message)) return payload
     const stream = payload.assistantMessageEvent
-    if (!isObject(stream) || JSON.stringify(stream.partial) !== JSON.stringify(payload.message)) return payload
+    if (!isObject(stream)) return payload
     const previous = this.previous.get(this.key(event))
     const { message, assistantMessageEvent: _stream, ...rest } = payload
     const { partial: _partial, ...update } = stream
     const base = previous && previous.depth < snapshotInterval && BigInt(previous.seq) < BigInt(event.seq) ? previous : undefined
-    const patches = base ? messagePatches(base.message, message) : undefined
-    // A replacement can be larger than a snapshot (e.g. tool argument structure changes).
-    const delta = patches && JSON.stringify(patches).length < JSON.stringify(message).length
-    return toJson({ ...rest, assistantMessageEvent: update, messageStorage: { format,
-      ...(delta ? { baseSeq: base!.seq, patches } : { snapshot: message }) } })
+    const storage = storeMessage(message, base && { seq: base.seq, value: base.message })
+    if (Object.hasOwn(stream, 'partial')) storage.partial = storePartial(message, stream.partial!,
+      base?.partial !== undefined ? { seq: base.seq, value: base.partial } : undefined)
+    return jsonSnapshot({ ...rest, assistantMessageEvent: update, messageStorage: { format, ...storage } })
   }
 
   committed(event: DurableEvent): void {
@@ -39,9 +39,15 @@ export class StreamPersistence {
     }
     if (!event.kind.endsWith('.message_start') && !event.kind.endsWith('.message_update')) return
     if (!isObject(payload.message) || payload.message.role !== 'assistant') return
+    this.remember(event, payload, key)
+  }
+
+  private remember(event: DurableEvent, payload: Record<string, JsonValue>, key: string): void {
     const previous = this.previous.get(key)
     if (previous && BigInt(previous.seq) >= BigInt(event.seq)) return
-    this.previous.set(key, { seq: event.seq, message: structuredClone(payload.message),
+    const stream = payload.assistantMessageEvent
+    this.previous.set(key, { seq: event.seq, message: jsonSnapshot(payload.message),
+      ...(isObject(stream) && Object.hasOwn(stream, 'partial') ? { partial: jsonSnapshot(stream.partial) } : {}),
       depth: previous && previous.depth < snapshotInterval ? previous.depth + 1 : 0 })
   }
 
@@ -52,16 +58,23 @@ export class StreamPersistence {
 }
 
 export function restoreStreamPayload(payload: JsonValue, previous: (seq: string) => JsonValue): JsonValue {
-  if (!isObject(payload) || !isObject(payload.messageStorage) || payload.messageStorage.format !== format) return payload
+  if (!isObject(payload) || !isObject(payload.messageStorage) || ![format, legacyFormat].includes(String(payload.messageStorage.format))) return payload
   const { messageStorage: storage, ...rest } = payload
-  let message: JsonValue
-  if (Object.hasOwn(storage, 'snapshot')) message = storage.snapshot!
-  else {
-    if (typeof storage.baseSeq !== 'string' || !Array.isArray(storage.patches)) throw new Error('Invalid persisted message delta')
-    const base = previous(storage.baseSeq)
+  const basePayload = (seq: JsonValue | undefined) => {
+    if (typeof seq !== 'string') throw new Error('Invalid persisted message delta sequence')
+    const base = previous(seq)
     if (!isObject(base) || !isObject(base.message) || base.messageId !== payload.messageId) throw new Error('Missing persisted message delta base')
-    message = applyMessagePatches(base.message, storage.patches as unknown as MessagePatch[])
+    return base
   }
+  const message = restoreMessage(storage, () => basePayload(storage.baseSeq).message!)
   if (!isObject(rest.assistantMessageEvent)) throw new Error('Invalid persisted stream event')
-  return { ...rest, message, assistantMessageEvent: { ...rest.assistantMessageEvent, partial: message } }
+  const stream = { ...rest.assistantMessageEvent }
+  if (storage.format === legacyFormat) stream.partial = message
+  else if (Object.hasOwn(storage, 'partial')) stream.partial = restorePartial(storage.partial!, message, () => {
+    const partialStorage = storage.partial as Record<string, JsonValue>
+    const baseStream = basePayload(partialStorage.baseSeq).assistantMessageEvent
+    if (!isObject(baseStream) || !Object.hasOwn(baseStream, 'partial')) throw new Error('Missing persisted partial delta base')
+    return baseStream.partial!
+  })
+  return { ...rest, message, assistantMessageEvent: stream }
 }

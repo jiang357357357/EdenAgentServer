@@ -1,6 +1,7 @@
 import { setImmediate } from 'node:timers/promises'
 import { performance } from 'node:perf_hooks'
 import type { JsonValue } from '@eden/api'
+import { jsonSnapshot } from '@eden/api'
 
 type Payload = Record<string, JsonValue>
 interface Update { kind: string; payload: Payload }
@@ -12,7 +13,7 @@ export class StreamCoalescer {
   private pending: Update | undefined
   private streamKey: string | undefined
   private writtenAt = 0
-  private updates = 0
+  private yieldedAt = performance.now()
   private failure: unknown
   private failed = false
 
@@ -27,15 +28,16 @@ export class StreamCoalescer {
       this.flush()
       this.write(kind, payload)
       this.streamKey = undefined
+      await this.yieldIfBusy()
       return
     }
     if (key !== this.streamKey) {
       this.flush()
       this.streamKey = key
-      this.write(kind, structuredClone(payload))
+      this.write(kind, jsonSnapshot(payload))
       this.writtenAt = this.now()
     } else {
-      const latest = structuredClone(payload)
+      const latest = jsonSnapshot(payload) as Payload
       if (this.pending) {
         const previous = this.pending.payload.assistantMessageEvent as Payload
         const stream = latest.assistantMessageEvent as Payload
@@ -45,7 +47,14 @@ export class StreamCoalescer {
       if (this.now() - this.writtenAt >= 100) this.flush()
     }
     // Await only after all synchronous state changes; resuming never performs a delayed write.
-    if (++this.updates % 32 === 0) await setImmediate()
+    await this.yieldIfBusy()
+    this.assertHealthy()
+  }
+
+  private async yieldIfBusy(): Promise<void> {
+    if (performance.now() - this.yieldedAt < 5) return
+    await setImmediate()
+    this.yieldedAt = performance.now()
     this.assertHealthy()
   }
 

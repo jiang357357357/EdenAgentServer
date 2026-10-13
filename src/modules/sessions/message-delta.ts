@@ -1,4 +1,5 @@
 import type { JsonValue } from '@eden/api'
+import { jsonSnapshot } from '@eden/api'
 
 type Path = (string | number)[]
 export type MessagePatch = { path: Path; value?: JsonValue; append?: string; remove?: true }
@@ -20,7 +21,7 @@ export function messagePatches(previous: JsonValue, next: JsonValue, path: Path 
 }
 
 export function applyMessagePatches(previous: JsonValue, patches: MessagePatch[]): JsonValue {
-  let result = structuredClone(previous)
+  let result = jsonSnapshot(previous)
   for (const patch of patches) {
     if (!patch.path.length) { result = replacement(result, patch); continue }
     let target = result
@@ -43,7 +44,7 @@ function replacement(previous: JsonValue, patch: MessagePatch): JsonValue {
     return previous + patch.append
   }
   if (patch.value === undefined) throw new Error('Missing message delta value')
-  return structuredClone(patch.value)
+  return jsonSnapshot(patch.value)
 }
 
 export function isObject(value: JsonValue | undefined): value is Record<string, JsonValue> {

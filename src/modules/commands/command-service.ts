@@ -41,8 +41,11 @@ export class CommandService {
     const host = hostCommandInfo()
     const deviceDefault = this.deviceDefault()
     const sessionOverride = this.sessionOverride(sessionId)
+    let wslDistributions: string[] = [], wslDetectionError: string | undefined
+    try { wslDistributions = await listWslDistributions() }
+    catch (error) { wslDetectionError = (error instanceof Error ? error.message : String(error)).slice(0, 8192) }
     return { platform: process.platform, hostShell: host.shell, hostAvailable: host.available,
-      wslDistributions: await listWslDistributions(), deviceDefault, sessionOverride,
+      wslDistributions, ...(wslDetectionError ? { wslDetectionError } : {}), deviceDefault, sessionOverride,
       effective: sessionOverride ?? deviceDefault }
   }
 

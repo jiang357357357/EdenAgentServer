@@ -63,7 +63,57 @@ test('legacy updates and unequal SDK partials remain readable without losing fie
   const payload = { messageId: 'legacy', message: { role: 'assistant', content: 'legacy' }, assistantMessageEvent: { partial: { content: 'different' } } }
   const event = f.sessions.events.append(f.session.id, null, 'agent.message_update', payload)
   assert.deepEqual(f.sessions.events.list(f.session.id, '1'), [event])
-  assert.deepEqual(JSON.parse(String(f.db.connection.prepare('SELECT payload_json FROM events WHERE id=?').get(event.id)?.payload_json)), payload)
+  const stored = JSON.parse(String(f.db.connection.prepare('SELECT payload_json FROM events WHERE id=?').get(event.id)?.payload_json))
+  assert.equal(stored.messageStorage.format, 'eden.message.delta.v2')
+})
+
+test('large unequal SDK partials compact independently and replay their exact fields', context => {
+  const f = fixture(context), expected: DurableEvent[] = []
+  for (let index = 0; index < 48; index++) {
+    const text = 'x'.repeat(330_000 + index)
+    const message = { role: 'assistant', content: [{ type: 'text', text }] }
+    const partial = { ...message, sdkOnly: { key: index, removed: index < 24 ? true : null } }
+    expected.push(f.sessions.events.append(f.session.id, null, 'agent.message_update', { messageId: 'large', message,
+      assistantMessageEvent: { type: 'text_delta', delta: 'x', partial } }))
+  }
+  const original = expected.reduce((bytes, event) => bytes + Buffer.byteLength(JSON.stringify(event.payload)), 0)
+  const stored = Number(f.db.connection.prepare("SELECT sum(length(CAST(payload_json AS BLOB))) AS bytes FROM events WHERE kind='agent.message_update'").get()!.bytes)
+  context.diagnostic(`Unequal SDK partial bytes: ${original} -> ${stored}`)
+  assert.ok(stored < original / 20)
+  const reopened = new SessionRepository(f.db, 'mon')
+  assert.deepEqual(reopened.events.list(f.session.id, '1', 100), expected)
+  assert.deepEqual(reopened.events.list(f.session.id, expected[30]!.seq, 10), expected.slice(31, 41))
+})
+
+test('distinct partial text, absent partials and scalar partials survive snapshots and restart', context => {
+  const f = fixture(context), expected: DurableEvent[] = []
+  for (let index = 0; index < 270; index++) {
+    const message = { role: 'assistant', content: 'body'.repeat(1000 + index) }
+    const stream: Record<string, JsonValue> = { type: 'text_delta' }
+    if (index % 7 === 0) stream.partial = null
+    else if (index % 7 !== 1) stream.partial = { role: 'assistant', content: 'separate'.repeat(1000 + index), sdk: index }
+    expected.push(f.sessions.events.append(f.session.id, null, 'agent.message_update', { messageId: 'distinct', message, assistantMessageEvent: stream }))
+  }
+  const reopened = new SessionRepository(f.db, 'mon')
+  assert.deepEqual(reopened.events.list(f.session.id, '1', 1000), expected)
+})
+
+test('old raw and v1 events mix with v2 events without changing public replay', context => {
+  const f = fixture(context)
+  const payload = { messageId: 'old', message: { role: 'assistant', content: 'legacy' }, assistantMessageEvent: { partial: { extra: true } } }
+  const old = f.sessions.events.append(f.session.id, null, 'agent.message_update', payload)
+  f.db.connection.prepare('UPDATE events SET payload_json=? WHERE id=?').run(JSON.stringify(payload), old.id)
+  const message = { role: 'assistant', content: 'old snapshot' }
+  const previous = f.sessions.events.append(f.session.id, null, 'agent.message_update', { messageId: 'v1', message, assistantMessageEvent: { partial: message } })
+  f.db.connection.prepare('UPDATE events SET payload_json=? WHERE id=?').run(JSON.stringify({ messageId: 'v1', assistantMessageEvent: {},
+    messageStorage: { format: 'eden.message.delta.v1', snapshot: message } }), previous.id)
+  const continuedMessage = { role: 'assistant', content: 'old snapshot tail' }
+  const continued = f.sessions.events.append(f.session.id, null, 'agent.message_update', { messageId: 'v1', message: continuedMessage,
+    assistantMessageEvent: { partial: continuedMessage } })
+  f.db.connection.prepare('UPDATE events SET payload_json=? WHERE id=?').run(JSON.stringify({ messageId: 'v1', assistantMessageEvent: {},
+    messageStorage: { format: 'eden.message.delta.v1', baseSeq: previous.seq, patches: [{ path: ['content'], append: ' tail' }] } }), continued.id)
+  const next = f.append('new event')
+  assert.deepEqual(new SessionRepository(f.db, 'mon').events.list(f.session.id, '1'), [old, previous, continued, next])
 })
 
 test('missing delta bases fail explicitly rather than silently returning truncated text', context => {

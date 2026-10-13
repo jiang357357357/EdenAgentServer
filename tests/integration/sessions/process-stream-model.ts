@@ -2,7 +2,7 @@ import { createServer, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 
 /** Local SSE recording for the session integration tests; never contacts a model provider. */
-export async function processStreamModel(mode: 'tool' | 'wait', tokens = 400) {
+export async function processStreamModel(mode: 'tool' | 'wait', tokens = 400, chunkSize = 1) {
   let requests = 0
   const responses = new Set<ServerResponse>()
   const server = createServer(async (request, response) => {
@@ -17,10 +17,12 @@ export async function processStreamModel(mode: 'tool' | 'wait', tokens = 400) {
     })}\n\n`)
     chunk({ role: 'assistant' })
     if (requests === 1) {
-      for (let index = 0; index < tokens; index++) chunk({ reasoning_content: '想' })
+      for (let index = 0; index < tokens; index++) chunk({ reasoning_content: '想'.repeat(chunkSize) })
       if (mode === 'wait') { response.flushHeaders(); return }
       chunk({ tool_calls: [{ index: 0, id: 'fixture-call', type: 'function', function: { name: 'write_once', arguments: '' } }] })
-      for (const character of JSON.stringify({ value: '文'.repeat(tokens) })) chunk({ tool_calls: [{ index: 0, function: { arguments: character } }] })
+      const argumentsText = JSON.stringify({ value: '文'.repeat(tokens * chunkSize) })
+      for (let index = 0; index < argumentsText.length; index += chunkSize)
+        chunk({ tool_calls: [{ index: 0, function: { arguments: argumentsText.slice(index, index + chunkSize) } }] })
       chunk({}, 'tool_calls')
     } else {
       for (const character of 'fixture done') chunk({ content: character })

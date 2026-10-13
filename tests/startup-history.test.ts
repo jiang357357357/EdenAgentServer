@@ -12,7 +12,7 @@ import { InputRepository } from '../src/modules/sessions/input/input-repository.
 import { MemoryExtractionRepository } from '../src/modules/memories/extraction-repository.ts'
 import { recoverMemoryExtractions } from '../src/modules/memories/extraction-recovery.ts'
 
-test('Local host upgrades a populated history and recovers memories before serving health', async context => {
+test('Local host upgrades previous v1 history and recovers memories before serving health', async context => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-startup-history-'))
   context.after(() => rm(root, { recursive: true, force: true }))
   const config = loadConfig({ EDEN_AGENT_RUNTIME_ORIGIN: 'local', EDEN_AGENT_DATA_ROOT: root, EDEN_AGENT_PORT: '0' })
@@ -33,16 +33,16 @@ test('Local host upgrades a populated history and recovers memories before servi
       const payload = JSON.stringify({ delta: 'x'.repeat(4096) })
       for (let i = 0; i < 12000; i++) insert.run(`filler-${i}`, session.id, 'other-turn', 1000 + i, 'agent.message_update', payload, 0)
     })
-    // Reproduce the preceding schema using synthetic data only.
-    db.connection.exec('DROP INDEX events_session_kind_seq; DROP INDEX events_session_turn_kind_seq; DROP TABLE request_contents; DROP INDEX jobs_one_pending_self_awake; DROP TABLE self_awake_timer_publications; DROP TABLE self_awake_submission_aliases; DROP TABLE session_capability_selections')
-    db.connection.exec('DROP TABLE ui_preferences; DROP TABLE account_ui_preferences; DROP TABLE account_records; DROP TABLE blob_owners; DROP TABLE session_owners')
-    const indexMigration = migrations.findIndex(sql => sql.includes('CREATE INDEX events_session_kind_seq'))
-    db.connection.prepare('DELETE FROM schema_migrations WHERE version>?').run(indexMigration)
-    db.connection.prepare("DELETE FROM realm_meta WHERE key='event_payload_format'").run()
-    db.connection.exec(`PRAGMA user_version=${indexMigration}`)
+    // The immediately preceding schema differs only in its stream format marker.
+    // Do not manufacture an invalid old schema by dropping tables introduced by dozens of later migrations.
+    const previousVersion = migrations.length - 1
+    assert.match(migrations[previousVersion]!, /eden.message.delta.v2/)
+    db.connection.prepare('DELETE FROM schema_migrations WHERE version>?').run(previousVersion)
+    db.connection.prepare("UPDATE realm_meta SET value='eden.message.delta.v1' WHERE key='event_payload_format'").run()
+    db.connection.exec(`PRAGMA user_version=${previousVersion}`)
     const before = performance.now()
     await recoverMemoryExtractions(new MemoryExtractionRepository(db), new AbortController().signal)
-    context.diagnostic(`Unindexed recovery: ${Math.round(performance.now() - before)}ms`)
+    context.diagnostic(`Previous-format history recovery: ${Math.round(performance.now() - before)}ms`)
   } finally { db.close() }
   const started = performance.now()
   const server = await startServer(config)
@@ -52,6 +52,8 @@ test('Local host upgrades a populated history and recovers memories before servi
     assert.equal(response.status, 200)
     assert.equal((await response.json()).runtimeOrigin, 'local')
     assert.equal(server.sessions.repository.database.connection.prepare('SELECT count(*) AS n FROM memory_extractions').get()?.n, 30)
+    assert.equal(server.sessions.repository.database.connection.prepare("SELECT value FROM realm_meta WHERE key='event_payload_format'").get()?.value, 'eden.message.delta.v2')
+    assert.equal(server.sessions.repository.database.connection.prepare("SELECT count(*) AS n FROM events WHERE kind='agent.message_update'").get()?.n, 12000)
     const before = performance.now()
     await recoverMemoryExtractions(new MemoryExtractionRepository(server.sessions.repository.database), new AbortController().signal)
     context.diagnostic(`Indexed recovery: ${Math.round(performance.now() - before)}ms`)

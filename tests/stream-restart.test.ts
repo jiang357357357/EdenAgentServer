@@ -23,7 +23,7 @@ test('real runtime persists compact events and restart RPC restores exact public
   const updates = live.filter(event => event.kind === 'agent.message_update')
   assert.ok(updates.length > 0)
   const stored = server.sessions.repository.database.connection.prepare("SELECT payload_json FROM events WHERE kind='agent.message_update'").all()
-  assert.ok(stored.every(row => JSON.parse(String(row.payload_json)).messageStorage?.format === 'eden.message.delta.v1'))
+  assert.ok(stored.every(row => JSON.parse(String(row.payload_json)).messageStorage?.format === 'eden.message.delta.v2'))
   await server.close()
   server = await startServer(config)
   const events = server.sessions.repository.events.list(session.id, '0', 1000)
