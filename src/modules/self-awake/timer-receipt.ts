@@ -9,7 +9,9 @@ export function timerReceipt(job: JobInfo, requestedAt: number, deadline: number
   try { new Intl.DateTimeFormat('en', { timeZone: timezone }).format() } catch { timezone = 'UTC' }
   const local = (at: number) => new Intl.DateTimeFormat('sv-SE', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23', timeZoneName: 'longOffset' }).format(at)
-  return toJson({ ...job, requestedAt: new Date(requestedAt).toISOString(), scheduledAt: new Date(job.dueAt).toISOString(),
+  const payload = job.payload && typeof job.payload === 'object' && !Array.isArray(job.payload) ? job.payload : {}
+  const { roleScope: _owner, ...visiblePayload } = payload
+  return toJson({ ...job, payload: visiblePayload, requestedAt: new Date(requestedAt).toISOString(), scheduledAt: new Date(job.dueAt).toISOString(),
     scheduledLocal: local(job.dueAt), timezone, adjusted: job.dueAt !== requestedAt,
     adjustment: job.dueAt === requestedAt ? null : { reason: deadline <= Date.now() ? 'max_24h_overdue' : 'max_24h_deadline',
       latestWakeAt: new Date(deadline).toISOString() },

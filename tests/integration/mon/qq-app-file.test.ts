@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createServer } from 'node:http'
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, ftruncateSync, mkdtempSync, mkdirSync, openSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { EdenDatabase } from '@eden/store'
 import { MonClient } from '@eden/integrations'
+import { QQ_FILE_MAX_BYTES, QQ_FILE_TRANSFER_TIMEOUT_MS } from '@eden/api'
 import { BlobRepository, BlobService } from '../../../src/modules/blobs/index.ts'
 import { SessionRepository } from '../../../src/modules/sessions/index.ts'
 import { PermissionService } from '../../../src/modules/permissions/index.ts'
@@ -154,11 +155,12 @@ test('unconfigured QQ and paths outside the workspace fail without uploading fil
   } finally { await f.close() }
 })
 
-test('files larger than 8 MiB fail before any Core upload', async () => {
+test('files larger than 100 MB fail before any Core upload', async () => {
   const f = await fixture()
   try {
-    writeFileSync(path.join(f.first, '报告.md'), Buffer.alloc(8 * 1024 * 1024 + 1))
-    await assert.rejects(f.approved(), /at most 8 MiB/)
+    const handle = openSync(path.join(f.first, '报告.md'), 'w')
+    try { ftruncateSync(handle, QQ_FILE_MAX_BYTES + 1) } finally { closeSync(handle) }
+    await assert.rejects(f.approved(), /at most 100 MB/)
     assert.equal(f.requests.length, 0)
   } finally { await f.close() }
 })
@@ -173,7 +175,7 @@ test('an interrupted upload leaves a durable unknown intent and a replay cannot 
     async get() { return { data: { bot_id: 42, default_send_target: { target_type: 'user', target_qq_number: '987654321' } } } },
     async post(_path: string, _body: unknown, signal: AbortSignal, timeout: number) {
       uploads++
-      assert.equal(timeout, 180000)
+      assert.equal(timeout, QQ_FILE_TRANSFER_TIMEOUT_MS + 60_000)
       controller.abort()
       signal.throwIfAborted()
     },

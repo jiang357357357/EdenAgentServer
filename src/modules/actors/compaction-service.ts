@@ -23,8 +23,8 @@ export class ActorCompactionService {
     const callbacks = runtimeCallbacks(this.sessions, input, { actor: { assistantID }, privateNonAssistantMessages: true,
       checkpoint: async snapshot => this.checkpoints.save(input.sessionId, assistantID, input.turnId, snapshot) })
     let persistenceFailed = false
-    const guard = async (work: () => Promise<void>) => {
-      try { await work() } catch (error) { persistenceFailed = true; throw error }
+    const guard = async <T>(work: () => Promise<T>): Promise<T> => {
+      try { return await work() } catch (error) { persistenceFailed = true; throw error }
     }
     const guarded: RuntimeCallbacks = {
       checkpoint: snapshot => guard(() => callbacks.checkpoint(snapshot)),

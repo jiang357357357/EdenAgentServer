@@ -27,7 +27,7 @@ export function sessionRoutes(service: SessionService, signal?: AbortSignal): Re
     },
     'session.list': async value => {
       const params = sessionListSchema.parse(value)
-      const sessions = await repository.listAsync(params.limit, params.includeClosed, params.includeBackground, params.purpose, params.sourceChannel, signal)
+      const sessions = await repository.listAsync(params.limit, params.includeClosed, params.includeBackground, params.purpose, params.sourceChannel, signal, params.archived)
       return toJson(sessions.map(summary))
     },
     'session.read': value => toJson(summary(repository.read(sessionIdSchema.parse(value).sessionId))),
@@ -38,6 +38,8 @@ export function sessionRoutes(service: SessionService, signal?: AbortSignal): Re
       return { requests: repository.events.latestContextRequests(sessionId).map(wireEvent) }
     },
     'session.rename': value => { const params = sessionTitleSchema.parse(value); return toJson(summary(repository.rename(params.sessionId, params.title))) },
+    'session.set_archived': contractHandler(rpcMethods['session.set_archived'], input =>
+      toJson(summary(repository.setArchived(input.sessionId, input.archived)))),
     'session.set_participants': async value => {
       const params = sessionParticipantsSchema.parse(value)
       return toJson(summary(await service.setParticipants(params.sessionId, params.participants)))

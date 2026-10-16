@@ -50,5 +50,5 @@ test('real host reads the memory guide, approves a write, unloads instructions a
   const messages = model.requests.at(-1)!.messages as { role: string; content: string }[]
   const result = JSON.parse(messages.filter(message => message.role === 'tool').at(-1)!.content)
   assert.equal(result[0].content, '临时测试角色偏好薄荷茶')
-  assert.equal(result[0].scopeKey, '7')
+  assert.equal('scopeKey' in result[0], false)
 })

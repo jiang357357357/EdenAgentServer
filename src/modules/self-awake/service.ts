@@ -22,6 +22,7 @@ export class SelfAwakeService {
 
   start(): void {
     if (this.unsubscribe || this.closed) return
+    this.repository.roles.reconcile(this.sessions.repository, this.jobs)
     this.repository.timerPublication.start()
     this.unsubscribe = this.sessions.repository.events.subscribe(event => {
       if (event.kind.startsWith('input.') || event.kind.startsWith('turn.')) this.wake()
@@ -39,7 +40,7 @@ export class SelfAwakeService {
     const author = session.participants[0] ?? {}
     const recovery = this.recovery.assertDispatch(job, author, session.environment)
     const topics = recentSharedTopics(this.repository.database, job.sessionId, author)
-    const request = toJson({ current_time: new Date().toISOString(), recent_conversation: topics, wakeSchedule: this.repository.wakeSchedule(job.sessionId), ...selfAwakeRequest(job, author, session.environment), ...(recovery ? { recovery } : {}) })
+    const request = toJson({ current_time: new Date().toISOString(), recent_conversation: topics, wakeSchedule: this.repository.wakeSchedule(job.sessionId), ...selfAwakeRequest(job, author, session.environment), merged_plans: this.repository.roles.merged(job.sessionId), ...(recovery ? { recovery } : {}) })
     const id = this.repository.begin(job, request, author)
     try {
       this.sessions.submitJob(job.sessionId, selfAwakePrompt(request), job.id, job.kind, input => {

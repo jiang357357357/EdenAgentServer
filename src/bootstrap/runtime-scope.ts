@@ -90,6 +90,7 @@ export async function openRuntime(config: ServerConfig) {
     services.pluginHooks.close()
     services.selfAwake.close()
     return Promise.allSettled([
+      services.browser.close(),
       services.sharedWorkspace.close(),
       services.mcpResults.close(),
       services.mcp.close(),

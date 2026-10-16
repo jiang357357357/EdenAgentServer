@@ -4,16 +4,17 @@ import type { RuntimeImage } from '@eden/runtime-pi'
 import type { BlobService } from '../blobs/index.ts'
 import { imageMime, assertImageSignature } from './image-kind.ts'
 
-function validateBudget(snapshots: AttachmentSnapshot[]): void {
+function validateBudget(snapshots: AttachmentSnapshot[], maximumBytes = 32 * 1024 * 1024): void {
   const total = snapshots.reduce((sum, item) => sum + item.byteLength, 0)
-  if (total > 32 * 1024 * 1024) throw new Error('Attachments exceed the 32 MiB input limit')
+  if (total > maximumBytes) throw new Error(maximumBytes === 32 * 1024 * 1024
+    ? 'Attachments exceed the 32 MiB input limit' : `Attachments exceed the ${maximumBytes} byte input limit`)
   if (snapshots.filter(item => item.kind === 'image').length > 8) throw new Error('At most eight images may be submitted per input')
 }
 
 export class AttachmentService {
-  constructor(private readonly blobs: BlobService) {}
+  constructor(private readonly blobs: BlobService, private readonly maxFileBytes = 32 * 1024 * 1024) {}
 
-  async snapshot(references: readonly AttachmentRef[]): Promise<AttachmentSnapshot[]> {
+  async snapshot(references: readonly AttachmentRef[], maximumInputBytes?: number): Promise<AttachmentSnapshot[]> {
     const refs = attachmentRefsSchema.parse(references)
     const snapshots = refs.map(ref => {
       const info = this.blobs.info(ref.blobId)
@@ -21,7 +22,7 @@ export class AttachmentService {
       return attachmentSnapshotSchema.parse({ ...ref, sha256: info.sha256, byteLength: info.byteLength,
         kind: imageMime(info.mime) ? 'image' : 'file' })
     })
-    validateBudget(snapshots)
+    validateBudget(snapshots, maximumInputBytes)
     // Verify all content before the caller can accept the input into its durable queue.
     for (const snapshot of snapshots) await this.read(snapshot)
     return snapshots
@@ -29,7 +30,7 @@ export class AttachmentService {
 
   async read(value: AttachmentSnapshot): Promise<Buffer> {
     const snapshot = attachmentSnapshotSchema.parse(value)
-    validateBudget([snapshot])
+    validateBudget([snapshot], snapshot.kind === 'file' ? this.maxFileBytes : undefined)
     const info = this.blobs.info(snapshot.blobId)
     if (info.sha256 !== snapshot.sha256 || info.mime !== snapshot.mime || info.byteLength !== snapshot.byteLength) {
       throw new Error('Attachment no longer matches the accepted snapshot')
@@ -41,9 +42,9 @@ export class AttachmentService {
     return bytes
   }
 
-  async images(values: readonly AttachmentSnapshot[]): Promise<RuntimeImage[]> {
+  async images(values: readonly AttachmentSnapshot[], maximumInputBytes?: number): Promise<RuntimeImage[]> {
     const snapshots = attachmentSnapshotsSchema.parse(values)
-    validateBudget(snapshots)
+    validateBudget(snapshots, maximumInputBytes)
     const images: RuntimeImage[] = []
     for (const snapshot of snapshots) {
       const bytes = await this.read(snapshot)

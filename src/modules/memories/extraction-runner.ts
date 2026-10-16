@@ -1,4 +1,4 @@
-import type { JsonValue } from '@eden/api'
+import { toJson, type JsonValue } from '@eden/api'
 import type { RuntimeModel } from '@eden/runtime-pi'
 import type { PermissionService } from '../permissions/index.ts'
 import { extractionApproval } from './extraction-approval.ts'
@@ -43,7 +43,7 @@ export class MemoryExtractionRunner {
     const approval = extractionApproval(job)
     const approvalId = approval.details.candidates.length ? await this.permissions.requestWithId({
       sessionId: job.sessionId, turnId: job.turnId, callId: `memory-extraction:${job.id}`, signal,
-    }, approval.capability, approval.resource, approval.details) : undefined
+    }, approval.capability, approval.resource, toJson(approval.details)) : undefined
     signal.throwIfAborted()
     return this.commits.commit(id, approvalId)
   }
@@ -55,7 +55,7 @@ export class MemoryExtractionRunner {
     if (!claimed) throw new Error('Memory extraction could not be claimed')
     try {
       const candidates = await extractMemoryCandidates({ model, userText: claimed.userText, assistantText: claimed.assistantText,
-        signal, record: snapshot => this.execution.record(claimed, snapshot) })
+        actionEvidence: this.jobs.actionEvidence(claimed), signal, record: snapshot => this.execution.record(claimed, snapshot) })
       signal.throwIfAborted()
       return this.jobs.saveCandidates(job.id, candidates)
     } catch (error) {

@@ -13,7 +13,7 @@ const policySchema = z.object({
 }).strict()
 export type SubagentPolicy = z.infer<typeof policySchema>
 const rootOnly = ['remember_memory', 'update_memory', 'forget_memory', 'switch_workspace', 'switch_assistant',
-  'write_shared_file', 'edit_shared_file',
+  'write_shared_file', 'edit_shared_file', 'delete_shared_file', 'rename_shared_file', 'restore_shared_file',
   'switch_character_action', 'list_character_stickers', 'remember_character_sticker', 'send_character_sticker', 'delete_character_sticker',
   'send_qq_message', 'send_external_email', 'list_esp32_devices', 'control_esp32_device', 'get_esp32_command_status']
 const readOnly = ['list_tools', 'load_tools', 'unload_tools', 'unload_skill', 'read_file', 'read_attachment', 'list_skills', 'read_skill', 'load_skill', 'read_skill_file', 'search_memories',

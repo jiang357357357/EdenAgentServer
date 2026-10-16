@@ -7,6 +7,7 @@ import type { SessionRepository } from '../sessions/index.ts'
 import type { SelfAwakeRepository } from './repository.ts'
 import { selfAwakePromptContext } from './prompt.ts'
 import { SELF_AWAKE_INTERPRETATIONS } from '../../model-prompts/self-awake.ts'
+import { SelfAwakeHistory } from './history-context.ts'
 
 export const selfAwakeContextSchema = z.object({
   section: z.enum(['request', 'desktop_window', 'desktop_session', 'audio_state', 'recent_events', 'recent_diaries', 'wake_notes']).default('request'),
@@ -16,33 +17,30 @@ export const selfAwakeContextSchema = z.object({
 }).strict()
 
 export class SelfAwakeContext {
-  constructor(private readonly repository: SelfAwakeRepository, private readonly sessions: SessionRepository, private readonly identity?: MonServiceIdentity) { }
-  async read(sessionId: string, turnId: string, raw: unknown, signal: AbortSignal): Promise<JsonValue> {
+  private readonly history: SelfAwakeHistory
+  constructor(private readonly repository: SelfAwakeRepository, private readonly sessions: SessionRepository, private readonly identity?: MonServiceIdentity) {
+    this.history = new SelfAwakeHistory(repository, sessions)
+  }
+  async read(sessionId: string, turnId: string, raw: unknown, signal: AbortSignal, actorId?: string | number): Promise<JsonValue> {
     const input = selfAwakeContextSchema.parse(raw)
     signal.throwIfAborted()
     const session = this.sessions.read(sessionId)
     if (session.status !== 'active') throw new Error('Self-awake context requires an active session')
-    if (input.section === 'request') return modelSelfAwakeContext(toJson(this.repository.context(sessionId, turnId)))
-    if (input.section === 'wake_notes') {
-      const context = this.repository.context(sessionId, turnId)
-      return toJson({ source: 'wake_schedule', wakeSchedule: selfAwakePromptContext({ wakeSchedule: context.wakeSchedule }).wakeSchedule })
-    }
+    if (input.section === 'request') return this.request(sessionId, turnId, actorId)
+    if (input.section === 'wake_notes' || input.section === 'recent_diaries') return this.history.read(sessionId, turnId, input, actorId)
     const environment = object(session.environment)
     const owner = this.sessions.origin === 'mon' && this.identity && environment.sessionPurpose === 'self_awake' && environment.selfAwakeUserId === this.identity.userId
       && this.repository.ownsBackgroundSession(sessionId, this.identity.userId) ? this.identity : undefined
-    const user = owner?.userId ?? ''
-    if (input.section === 'recent_diaries') return this.history(sessionId, user, input)
     if (!owner) throw new Error('Personal activity context requires the owning Mon background session')
     return await activityContext(owner, signal, input)
   }
-  private history(sessionId: string, user: string, input: z.infer<typeof selfAwakeContextSchema>): JsonValue {
-    if (input.section === 'recent_diaries') return toJson({
-      section: input.section, source: 'agent.diaries',
-      diaries: this.repository.recentDiaries(sessionId, user, input.limit).map(({ content, ...entry }) => ({ ...entry, ...(input.includeContent && input.query && typeof content === 'string' && content.includes(input.query) ? { content } : { contentAvailable: Boolean(content) }) })), interpretation: SELF_AWAKE_INTERPRETATIONS.diaries
-    })
-    throw new Error('Unknown history section')
-  }
 
+  private request(sessionId: string, turnId: string, actorId?: string | number): JsonValue {
+    const context = this.repository.context(sessionId, turnId)
+    if (context.run) return modelSelfAwakeContext(toJson(context))
+    return toJson({ current_time: context.current_time, run: null,
+      ...object(this.history.read(sessionId, turnId, { section: 'wake_notes', limit: 3, includeContent: false }, actorId)) })
+  }
 }
 async function activityContext(owner: MonServiceIdentity, signal: AbortSignal, input: z.infer<typeof selfAwakeContextSchema>) {
   const token = await acquireMonServiceToken(owner, signal)

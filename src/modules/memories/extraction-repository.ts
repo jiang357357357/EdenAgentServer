@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import type { EdenDatabase } from '@eden/store'
 import { extractionSource } from './extraction-source.ts'
+import { extractionActionEvidence } from './extraction-evidence.ts'
 import { parseMemoryCandidates } from './extraction.ts'
 import type { MemoryCandidate } from './extraction.ts'
 import { jsonValue } from '@eden/api'
@@ -97,6 +98,8 @@ export class MemoryExtractionRepository {
       userText: row.user_text, assistantText: row.assistant_text, state: row.state, candidates: JSON.parse(String(row.candidates_json)),
       savedIds: JSON.parse(String(row.saved_ids_json)), error: row.error, createdAt: row.created_at, updatedAt: row.updated_at })
   }
+
+  actionEvidence(job: MemoryExtractionJob) { return extractionActionEvidence(this.database, job) }
 
   modelSnapshot(id: string) {
     const job = this.read(id)

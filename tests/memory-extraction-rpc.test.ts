@@ -28,7 +28,8 @@ function rpc(client: WebSocket, method: string, params: unknown): Promise<{ resu
 }
 
 async function poll<T>(read: () => Promise<T>, ready: (value: T) => boolean): Promise<T> {
-  const deadline = Date.now() + 5000
+  // A turn and its extractor each cold-start an isolated TypeScript process.
+  const deadline = Date.now() + 30_000
   let value = await read()
   while (!ready(value) && Date.now() < deadline) { await delay(10); value = await read() }
   assert.ok(ready(value), 'RPC state did not settle')

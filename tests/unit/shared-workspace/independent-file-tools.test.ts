@@ -160,3 +160,38 @@ test('the separate bundled shared skill declares its own tools and read-only sub
   assert.ok(!rolePolicy('researcher').allowedTools?.includes('write_shared_file'))
   assert.ok(rolePolicy('researcher').deniedTools?.includes('write_shared_file'))
 })
+
+test('shared deletion, rename and recovery stay in the bound library and keep backups outside sync collection', async t => {
+  const f = fileFixture(t)
+  writeFileSync(path.join(f.first, 'remove.txt'), 'shared bytes')
+  writeFileSync(path.join(f.project, 'remove.txt'), 'project bytes')
+  const renamed = await f.call('rename_shared_file', { path: 'remove.txt', destination: 'renamed.txt' })
+  assert.equal(renamed.synchronized, false)
+  assert.equal(existsSync(path.join(f.first, 'remove.txt')), false)
+  writeFileSync(path.join(f.first, 'renamed.txt'), 'later modified')
+  await f.call('restore_shared_file', { recoveryId: renamed.result.recoveryId }, f.tools('main', 'next-turn'))
+  assert.equal(readFileSync(path.join(f.first, 'remove.txt'), 'utf8'), 'shared bytes')
+  assert.equal(readFileSync(path.join(f.project, 'remove.txt'), 'utf8'), 'project bytes')
+  f.states.set(f.first, { spaceId: randomUUID() })
+  await assert.rejects(f.call('restore_shared_file', { recoveryId: renamed.result.recoveryId }), /不属于/)
+  assert.ok(rolePolicy('researcher').deniedTools.includes('delete_shared_file'))
+  assert.ok(rolePolicy('researcher').deniedTools.includes('rename_shared_file'))
+})
+
+test('shared destructive operations refuse denial, revoked roles, changed contents and occupied destinations', async t => {
+  for (const reason of ['denial', 'viewer', 'changed', 'destination', 'binding', 'selection']) await t.test(reason, async child => {
+    const f = fileFixture(child), filename = path.join(f.first, 'keep.txt')
+    writeFileSync(filename, 'original')
+    if (reason === 'viewer') f.spaces[0]!.role = 'viewer'
+    if (reason === 'destination') writeFileSync(path.join(f.first, 'other.txt'), 'occupied')
+    f.hook(async () => {
+      if (reason === 'denial') f.deny()
+      if (reason === 'changed') writeFileSync(filename, 'concurrent')
+      if (reason === 'binding') f.states.set(f.first, { spaceId: randomUUID() })
+      if (reason === 'selection') f.service.selectDirectory(f.a.id, f.second, f.service.directory(f.a.id).revision)
+    })
+    await assert.rejects(f.call('rename_shared_file', { path: 'keep.txt', destination: 'other.txt' }))
+    assert.equal(readFileSync(filename, 'utf8'), reason === 'changed' ? 'concurrent' : 'original')
+    assert.equal(existsSync(path.join(f.first, 'other.txt')), reason === 'destination')
+  })
+})

@@ -24,6 +24,7 @@ test('production companion actors receive shared images and scoped files without
     await Promise.all([director.close(), first.close(), second.close()]); await rm(root, { recursive: true, force: true })
   })
   const session = services.repository.create('Shared attachments', [{ assistantId: 1 }, { assistantId: 2 }])
+  services.repository.ownership.assign(session.id, '["http://fixture.invalid/","1"]')
   services.models.bindActors(session.id, [
     { assistantId: 1, characterId: 1, main: { model: first.config, entityId: 1, label: 'First' } },
     { assistantId: 2, characterId: 2, main: { model: second.config, entityId: 2, label: 'Second' } },

@@ -4,6 +4,8 @@ import path from 'node:path'
 import type { EdenDatabase } from '@eden/store'
 import type { SQLOutputValue } from 'node:sqlite'
 import { assertScopedScheduler, selfAwakeScopeState } from './scope-paths.ts'
+import { SelfAwakeRoleRepository } from './role-repository.ts'
+import { publishRoleCoordinator } from './role-publication.ts'
 
 /** Session revisions are a durable outbox; MonOs owns actual timed activation. */
 export class SelfAwakeTimerPublication {
@@ -35,6 +37,9 @@ export class SelfAwakeTimerPublication {
         catch (error) { this.error = error instanceof Error ? error.message : String(error) }
       }
       this.deliver(sessionId); this.activations()
+      publishRoleCoordinator(this.database, this.stateFile)
+      const pending = this.database.connection.prepare('SELECT publication_error FROM self_awake_session_schedules WHERE publication_error IS NOT NULL LIMIT 1').get()?.publication_error
+      if (pending) this.error = String(pending)
       if (sessionId) {
         const failure = this.database.connection.prepare('SELECT publication_error FROM self_awake_session_schedules WHERE session_id=?').get(sessionId)?.publication_error
         if (failure) throw new Error(String(failure))
@@ -61,14 +66,16 @@ export class SelfAwakeTimerPublication {
     }
   }
   private writeRequest(row: Record<string, SQLOutputValue>): void {
+    const kind = new SelfAwakeRoleRepository(this.database).schedulerKind(String(row.session_id))
+    if (kind === 'role') assertScopedScheduler(this.stateFile!, true)
     const stateFile = selfAwakeScopeState(this.stateFile!, String(row.session_id))
     const directory = path.join(path.dirname(stateFile), 'schedule_requests')
     mkdirSync(directory, { recursive: true, mode: 0o700 })
     const filename = path.join(directory, `${row.revision}.json`), temporary = `${filename}.tmp`
     const payload = row.payload_json ? JSON.parse(String(row.payload_json)) : {}
-    const request = { schema_version: 'self-awake.schedule.v2', session_id: row.session_id, revision: row.revision,
+    const request = { schema_version: 'self-awake.schedule.v2', scope_kind: kind, session_id: row.session_id, revision: row.revision,
       legacy_request_id: row.legacy_request_id,
-      action: row.job_id ? 'schedule' : 'cancel', request_id: row.job_id ?? `cancel:${row.session_id}:${row.revision}`, job_id: row.job_id,
+      action: row.job_id ? 'schedule' : kind === 'role' ? 'watchdog' : 'cancel', request_id: row.job_id ?? `cancel:${row.session_id}:${row.revision}`, job_id: row.job_id,
       requested_by: 'eden-agent', requested_at: new Date(Number(row.revision)).toISOString(),
       next_wake_at: row.job_id ? new Date(Number(row.due_at)).toISOString() : null,
       after_minutes: row.job_id ? Math.max(1, Math.ceil((Number(row.due_at) - Date.now()) / 60000)) : null,

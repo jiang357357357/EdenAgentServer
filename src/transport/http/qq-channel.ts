@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { serviceSignature } from '@eden/integrations'
+import { QQ_FILE_MAX_JSON_BYTES, QQ_FILE_TRANSFER_TIMEOUT_MS } from '@eden/api'
 import type { QqChannelBridge } from '../../modules/qq-channel/bridge.ts'
 import { BodyError, readBlobBody } from './blob-body.ts'
 
@@ -23,6 +24,9 @@ export class QqChannelHttp {
     if (this.closed || !this.bridge) { reply(response, 503, { error: 'QQ service identity unavailable' }); return true }
     if (request.method !== 'POST' || request.headers.origin) { reply(response, 403, { error: 'Service requests only' }); return true }
     if (this.tasks.size >= 16) { reply(response, 429, { error: 'QQ request limit reached' }); return true }
+    if (request.url === paths[5] && [...this.tasks.values()].filter(task => task.url === paths[5]).length >= 2) {
+      reply(response, 429, { error: 'QQ file upload limit reached' }); return true
+    }
     const task = this.dispatch(request, response).catch(error => {
       reply(response, error instanceof BodyError ? error.status : 400,
         { error: error instanceof Error ? error.message : 'QQ request could not be processed' })
@@ -41,7 +45,9 @@ export class QqChannelHttp {
   }
 
   private async dispatch(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const body = await readBlobBody(request, request.url === paths[5] ? 11_300_000 : 65536)
+    const uploading = request.url === paths[5]
+    const body = await readBlobBody(request, uploading ? QQ_FILE_MAX_JSON_BYTES : 65536,
+      uploading ? QQ_FILE_TRANSFER_TIMEOUT_MS : undefined)
     if (this.closed) { reply(response, 503, { error: 'Server is closing' }); return }
     if (!this.authorize(request, body)) { reply(response, 401, { error: 'Invalid service signature' }); return }
     const raw: unknown = JSON.parse(body.toString('utf8'))

@@ -22,7 +22,7 @@ const qqTools = new Set(['web_search', 'web_fetch', 'web_find', 'read_file', 'li
   'list_contact_channels', 'send_external_email', 'read_attachment', 'send_qq_file',
   'list_qq_capabilities', 'list_qq_events', 'read_qq_action', 'execute_qq_action'])
 const qqReadTools = new Set(['web_find', 'read_file', 'list_directory', 'search_files', 'list_memos'])
-const qqGroupTools = new Set(['list_qq_capabilities', 'read_qq_action', 'execute_qq_action'])
+const qqGroupTools = new Set(['list_qq_capabilities', 'read_qq_action', 'execute_qq_action', 'read_attachment'])
 
 export class SessionCapabilities {
   private readonly selections: SelectionRepository
@@ -35,10 +35,11 @@ export class SessionCapabilities {
   private get scope() { return this.scopeProvider() }
 
   registry(): ToolRegistry {
-    if (this.scope.sourceChannel === 'qq' && this.database.connection.prepare('SELECT 1 FROM qq_group_sessions WHERE session_id=?').get(this.scope.sessionId))
+    const scope = this.scope
+    if (scope.sourceChannel === 'qq' && this.database.connection.prepare('SELECT 1 FROM qq_group_sessions WHERE session_id=?').get(scope.sessionId))
       return new ToolRegistry(this.definitions().filter(tool =>
         (tool.source === undefined || tool.source === 'builtin') && qqGroupTools.has(tool.name)))
-    if (this.scope.sourceChannel === 'qq') return new ToolRegistry(this.definitions().filter(tool =>
+    if (scope.sourceChannel === 'qq') return new ToolRegistry(this.definitions().filter(tool =>
       (tool.source === undefined || tool.source === 'builtin') && qqTools.has(tool.name)).map(tool =>
       qqReadTools.has(tool.name) ? { ...tool, execute: async (input: Record<string, unknown>, context: Parameters<RuntimeTool['execute']>[1]) => {
         if (!this.approveQqRead) throw new Error('QQ tool approval is unavailable')
@@ -46,22 +47,25 @@ export class SessionCapabilities {
         return tool.execute(input, context)
       } } : tool))
     const tools = [...this.definitions(), ...discoveryTools(this)].filter(tool => tool.name !== 'read_skill')
-    return new ToolRegistry(filterSubagentTools(this.database, this.scope.sessionId, tools))
+    return new ToolRegistry(filterSubagentTools(this.database, scope.sessionId, tools))
   }
 
-  private saved() { return this.selections.list(this.scope.sessionId, this.scope.owner) }
-  private save(values: CapabilitySelection[]) { this.selections.save(this.scope.sessionId, this.scope.owner, values) }
-  private current(selection: CapabilitySelection, registry: ToolRegistry): boolean {
+  private saved() { const scope = this.scope; return this.selections.list(scope.sessionId, scope.owner) }
+  private save(values: CapabilitySelection[]) { const scope = this.scope; this.selections.save(scope.sessionId, scope.owner, values) }
+  private current(selection: CapabilitySelection, registry: ToolRegistry, captured?: CapabilityScope): boolean {
     if (!selection.enabled) return false
+    const scope = captured ?? this.scope
     const scoped = selection.kind === 'skill' || selection.tools.some(tool => tool.id.startsWith('skill:') || ['read_file', 'write_file', 'exec_command'].includes(tool.name))
-    if (scoped && selection.contextRoot !== this.scope.workspaceRoot) return false
-    return selection.kind === 'skill' ? skillSelectionCurrent(this.skills, selection, this.scope.profile)
+    if (scoped && selection.contextRoot !== scope.workspaceRoot) return false
+    return selection.kind === 'skill' ? skillSelectionCurrent(this.skills, selection, scope.profile)
       : selection.tools.every(tool => registry.matches(tool))
   }
   private visible(registry: ToolRegistry): Set<string> {
-    if (this.scope.sourceChannel === 'qq') return new Set(registry.tools.map(tool => tool.identity!))
-    const visible = new Set(registry.tools.filter(tool => defaultTool(tool, this.scope.profile, Boolean(this.scope.workspaceRoot))).map(tool => tool.identity!))
-    for (const selection of this.saved()) if (selection.kind === 'tool' && this.current(selection, registry)) {
+    // One synchronous pass shares a scope; later tool calls and approvals read it again.
+    const scope = this.scope
+    if (scope.sourceChannel === 'qq') return new Set(registry.tools.map(tool => tool.identity!))
+    const visible = new Set(registry.tools.filter(tool => defaultTool(tool, scope.profile, Boolean(scope.workspaceRoot))).map(tool => tool.identity!))
+    for (const selection of this.saved()) if (selection.kind === 'tool' && this.current(selection, registry, scope)) {
       for (const tool of selection.tools) visible.add(tool.id)
     }
     return visible
@@ -69,10 +73,11 @@ export class SessionCapabilities {
 
   tools(): RuntimeTool[] {
     const registry = this.registry()
+    const scope = this.scope
     this.preload(registry)
     const visible = this.visible(registry)
-    const stale = this.saved().some(item => item.enabled && !this.current(item, registry))
-    const hint = capabilityHint(availableSkillSummaries(this.skills, registry, this.scope.profile), stale)
+    const stale = this.saved().some(item => item.enabled && !this.current(item, registry, scope))
+    const hint = capabilityHint(availableSkillSummaries(this.skills, registry, scope.profile), stale)
     const directory = toolDirectoryHint(registry.tools.filter(tool => !visible.has(tool.identity!)))
     return registry.tools.filter(tool => visible.has(tool.identity!)).map(tool => ({ ...tool, exposure: 'direct',
       ...(tool.name === 'list_skills' ? { promptHint: [hint, tool.promptHint].filter(Boolean).join('\n') } : {}),
@@ -90,12 +95,13 @@ export class SessionCapabilities {
 
   discover(input: { query: string; offset: number; limit: number }) {
     const registry = this.registry(), visible = this.visible(registry)
+    const scope = this.scope
     const all = searchTools(registry.tools, input.query)
     return { tools: all.slice(input.offset, input.offset + input.limit).map(tool => ({ id: tool.identity!, name: tool.name,
       source: tool.source, description: tool.description.slice(0, 400), loaded: visible.has(tool.identity!), executionMode: tool.executionMode })),
       nextOffset: input.offset + input.limit < all.length ? input.offset + input.limit : null, total: all.length,
       selections: this.saved().map(item => ({ kind: item.kind, key: item.key, enabled: item.enabled,
-        status: !item.enabled ? 'unloaded' : this.current(item, registry) ? 'loaded' : 'stale' })) }
+        status: !item.enabled ? 'unloaded' : this.current(item, registry, scope) ? 'loaded' : 'stale' })) }
   }
 
   loadTools(requested: { id: string }[]) {
@@ -125,7 +131,8 @@ export class SessionCapabilities {
     selection.contextRoot = this.scope.workspaceRoot
     this.assertLimit([selection])
     this.save([selection])
-    return { name, tools: selection.tools.map(tool => ({ id: tool.id, name: tool.name, loaded: this.visible(registry).has(tool.id) })),
+    const visible = this.visible(registry)
+    return { name, tools: selection.tools.map(tool => ({ id: tool.id, name: tool.name, loaded: visible.has(tool.id) })),
       missingTools: this.skills.read(name, false).tools.filter(dependency => !registry.lookup(dependency)) }
   }
 
@@ -144,18 +151,19 @@ export class SessionCapabilities {
   }
 
   private preload(registry: ToolRegistry) {
-    if (this.scope.profile !== 'subagent') return
+    const scope = this.scope
+    if (scope.profile !== 'subagent') return
     const saved = this.saved()
-    for (const binding of roleSkillBindings(this.database, this.scope.sessionId)) {
+    for (const binding of roleSkillBindings(this.database, scope.sessionId)) {
       if (saved.some(item => item.kind === 'skill' && item.key === binding.name)) continue
       let selection: CapabilitySelection
-      try { selection = selectSkill(this.skills, registry, binding.name, this.scope.profile) }
+      try { selection = selectSkill(this.skills, registry, binding.name, scope.profile) }
       catch { selection = { kind: 'skill', key: binding.name, revision: binding.contentHash, workspaceRoot: binding.workspaceRoot,
-        contextRoot: this.scope.workspaceRoot, tools: [], enabled: true } }
+        contextRoot: scope.workspaceRoot, tools: [], enabled: true } }
       if (selection.revision !== binding.contentHash || selection.workspaceRoot !== binding.workspaceRoot) {
         selection = { ...selection, revision: binding.contentHash, workspaceRoot: binding.workspaceRoot, tools: [] }
       }
-      selection.contextRoot = this.scope.workspaceRoot
+      selection.contextRoot = scope.workspaceRoot
       this.assertLimit([selection])
       this.save([selection])
     }

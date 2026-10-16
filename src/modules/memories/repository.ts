@@ -1,24 +1,32 @@
 import { recordFilter, ownRecord } from '../accounts/index.ts'
-import { memoryRecordSchema, memoryScopeSchema, memoryKindSchema } from '@eden/api'
+import { memoryRecordSchema, memoryScopeSchema, memoryKindSchema, credentialValues, redactCredentialJson } from '@eden/api'
 import type { MemoryScope, MemoryRecord, MemoryKind, JsonValue } from '@eden/api'
 import type { EdenDatabase } from '@eden/store'
 import type { SQLOutputValue } from 'node:sqlite'
 import { memoryContent } from './content.ts'
+import { safeMemoryRecord } from './safe-record.ts'
 
 function record(row: Record<string, SQLOutputValue>): MemoryRecord {
   const metadata = JSON.parse(String(row.metadata_json))
   const provenance = metadata?.source === 'explicit_tool' ? { ...metadata, epistemicStatus: 'character_report' } : metadata
-  return memoryRecordSchema.parse({ id: row.id, content: row.content, kind: row.kind,
+  return safeMemoryRecord(memoryRecordSchema.parse({ id: row.id, content: row.content, kind: row.kind,
     scopeType: row.scope_type, scopeKey: row.scope_key, sourceSessionId: row.source_session_id,
-    metadata: provenance, createdAt: row.created_at, updatedAt: row.updated_at })
+    metadata: provenance, createdAt: row.created_at, updatedAt: row.updated_at }))
 }
 
 export class MemoryRepository {
   constructor(private readonly database: EdenDatabase) {}
 
+  /** Private redaction material from the current account; never expose it as a tool. */
+  credentialValues(): string[] {
+    const rows = this.database.connection.prepare(`SELECT content FROM memories WHERE ${recordFilter(this.database, 'memory', 'id')}`).all()
+    return [...new Set(rows.flatMap(row => credentialValues(String(row.content))))]
+  }
+
   create(scope: MemoryScope, content: string, kind: MemoryKind = 'fact', sourceSessionId = '', metadata: JsonValue = {}): MemoryRecord {
+    metadata = redactCredentialJson(metadata)
     const now = Date.now()
-    const candidate = memoryRecordSchema.parse({ ...scope, id: 1, content: memoryContent(content), kind, sourceSessionId, metadata, createdAt: now, updatedAt: now })
+    const candidate = memoryRecordSchema.parse({ ...scope, id: 1, content: memoryContent(content, this.credentialValues()), kind, sourceSessionId, metadata, createdAt: now, updatedAt: now })
     if (JSON.stringify(metadata).length > 16000) throw new Error('Memory metadata exceeds 16000 characters')
     return this.database.transaction(() => {
       const inserted = this.database.connection.prepare(`INSERT INTO memories(content, kind, scope_type, scope_key, source_session_id, metadata_json, created_at, updated_at)
@@ -44,7 +52,7 @@ export class MemoryRepository {
   }
 
   update(scope: MemoryScope, id: number, expectedUpdatedAt: number, content: string, kind?: MemoryKind): MemoryRecord {
-    const safe = memoryContent(content)
+    const safe = memoryContent(content, this.credentialValues())
     if (kind !== undefined) memoryKindSchema.parse(kind)
     return this.database.transaction(() => {
       const current = this.read(scope, id)

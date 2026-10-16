@@ -38,7 +38,7 @@ test('a real WebSocket disconnect restores the session, draft and clock without 
   const fixture = await mkdtemp(path.join(tmpdir(), 'eden-tui-reconnect-'))
   const tokenFile = path.join(fixture, 'capability.token')
   await writeFile(tokenFile, 'a'.repeat(32))
-  const session: SessionSummary = { id: sessionId, title: '恢复测试', titleSource: 'user', status: 'active', executionStatus: 'idle',
+  const session: SessionSummary = { id: sessionId, title: '恢复测试', archived: false, titleSource: 'user', status: 'active', executionStatus: 'idle',
     runtimeOrigin: 'local', purpose: 'user_chat', sourceChannel: 'app', participants: [], environment: null, createdAt: 1000, updatedAt: 5000 }
   const events: SessionEvent[] = []
   const makeEvent = (seq: number, eventType: string, payload: SessionEvent['payload']): SessionEvent =>

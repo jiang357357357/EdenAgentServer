@@ -7,7 +7,9 @@ export function publishWakeActivation(database: EdenDatabase, stateFile: string,
   const filename = path.join(path.dirname(stateFile), 'agent_activation.json')
   const latest = sessionId
     ? database.connection.prepare(`SELECT run_id,started_at FROM self_awake_activations
-      WHERE session_id=? ORDER BY started_at DESC,run_id DESC LIMIT 1`).get(sessionId)
+      WHERE session_id=? OR session_id IN (SELECT member.session_id FROM self_awake_role_members member
+        JOIN self_awake_role_members target ON target.scope_key=member.scope_key WHERE target.session_id=?)
+      ORDER BY started_at DESC,run_id DESC LIMIT 1`).get(sessionId, sessionId)
     : database.connection.prepare(`SELECT run_id,started_at FROM self_awake_activations
       WHERE legacy_scope=1 ORDER BY started_at DESC,run_id DESC LIMIT 1`).get()
   if (!latest) { rmSync(filename, { force: true }); return }

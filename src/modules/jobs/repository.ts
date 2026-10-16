@@ -6,6 +6,7 @@ import { jobScheduleSchema, jobInfoSchema, jobListSchema, jobIdSchema, jobPageSc
 import type { JobSchedule, JobInfo } from '@eden/api'
 import type { EdenDatabase } from '@eden/store'
 import type { SQLOutputValue } from 'node:sqlite'
+import { normalizeWakeOwnership } from './wake-ownership.ts'
 
 /** Jobs dispatch durable inputs/notifications only. External effects belong to turn operation ledgers. */
 export class JobRepository {
@@ -38,6 +39,7 @@ export class JobRepository {
     if (input.kind === 'self_awake' && !input.sessionId) throw new Error('Self-awake requires a target session')
     if (input.kind === 'self_awake') input.payload = wakePayload(input.payload)
     if (input.sessionId) new SessionOwnership(this.database).assert(input.sessionId)
+    normalizeWakeOwnership(this.database, input)
     const existing = this.database.connection.prepare('SELECT * FROM jobs WHERE operation_key=?').get(input.key)
     if (existing) {
       const job = fromRow(existing)
@@ -47,7 +49,10 @@ export class JobRepository {
     const id = randomUUID()
     const previousTime = input.kind === 'self_awake' ? Number(this.database.connection.prepare("SELECT COALESCE(MAX(created_at),0) AS stamp FROM jobs WHERE kind='self_awake' AND session_id=?").get(input.sessionId)?.stamp) : 0
     const now = Math.max(Date.now(), previousTime + 1)
-    if (input.kind === 'self_awake') replacePendingWake(this.database.connection, input.sessionId!, now)
+    if (input.kind === 'self_awake') {
+      const payload = input.payload && typeof input.payload === 'object' && !Array.isArray(input.payload) ? input.payload : {}
+      replacePendingWake(this.database.connection, input.sessionId!, now, typeof payload.roleScope === 'string' ? payload.roleScope : undefined)
+    }
     this.database.connection.prepare(`INSERT INTO jobs(id,kind,session_id,due_at,payload_json,operation_key,causation_id,depth,state,attempts,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,'queued',0,?,?)`).run(id, input.kind, input.sessionId, input.dueAt, JSON.stringify(input.payload), input.key, input.causationId, input.depth, now, now)
     return this.read(id)
@@ -92,7 +97,8 @@ export class JobRepository {
           OR EXISTS(SELECT 1 FROM sessions s WHERE s.id=candidate.session_id AND s.status='active'))
         AND (candidate.kind!='self_awake' OR ((?=0 OR json_extract(candidate.payload_json,'$.scheduler')='monos')
           AND NOT EXISTS(SELECT 1 FROM jobs busy LEFT JOIN self_awake_runs r ON r.job_id=busy.id
-            WHERE busy.session_id=candidate.session_id AND busy.kind='self_awake'
+            WHERE COALESCE(json_extract(busy.payload_json,'$.roleScope'),busy.session_id)
+              =COALESCE(json_extract(candidate.payload_json,'$.roleScope'),candidate.session_id) AND busy.kind='self_awake'
               AND (busy.state IN ('running','dispatched','unknown') OR r.state IN ('running','awaiting_action','action_running','action_interrupted')))))
         ORDER BY candidate.due_at,candidate.id LIMIT 1`).get(now, Number(this.externalSelfAwake))
       if (!row) return undefined
@@ -111,7 +117,9 @@ export class JobRepository {
   defer(id: string, error: string, delayMs = 30000): void {
     this.database.transaction(() => {
       const current = this.read(id)
-      const superseded = current.kind === 'self_awake' && this.database.connection.prepare("SELECT 1 FROM jobs WHERE session_id=? AND kind='self_awake' AND state='queued'").get(current.sessionId)
+      const superseded = current.kind === 'self_awake' && this.database.connection.prepare(`SELECT 1 FROM jobs newer JOIN jobs original ON original.id=?
+        WHERE newer.kind='self_awake' AND newer.state='queued' AND COALESCE(json_extract(newer.payload_json,'$.roleScope'),newer.session_id)
+          =COALESCE(json_extract(original.payload_json,'$.roleScope'),original.session_id)`).get(id)
       this.database.connection.prepare("UPDATE jobs SET state=?,due_at=?,error=?,updated_at=? WHERE id=? AND state='running'")
         .run(superseded ? 'cancelled' : 'queued', Date.now() + delayMs, superseded ? 'Superseded while dispatch was deferred' : error.slice(0, 4000), Date.now(), id)
     })

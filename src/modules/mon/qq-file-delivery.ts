@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
-import { toJson } from '@eden/api'
+import { toJson, QQ_FILE_TRANSFER_TIMEOUT_MS } from '@eden/api'
 import { MonHttpError, type MonClient } from '@eden/integrations'
 import type { EdenDatabase } from '@eden/store'
 import { ContactNotDeliveredError } from './contact-error.ts'
@@ -31,7 +31,7 @@ export async function deliverOwnerQqFile(database: EdenDatabase, client: MonClie
     const raw = await client.post(`/api/devices/qq_bot/${current.bot}/send-file/`, toJson({
       target_type: 'user', target_qq_number: current.number, filename: input.filename,
       byte_length: input.bytes.length, sha256, content_base64: input.bytes.toString('base64'), request_id: input.requestId,
-    }), signal, 180000)
+    }), signal, QQ_FILE_TRANSFER_TIMEOUT_MS + 60_000)
     const parsed = receiptSchema.parse(raw).data
     if (parsed.request_id !== input.requestId || parsed.target_qq_number !== current.number || parsed.filename !== input.filename
       || parsed.byte_length !== input.bytes.length || parsed.sha256 !== sha256) throw new Error('QQ file receipt does not match the approved file')

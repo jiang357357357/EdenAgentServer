@@ -4,7 +4,7 @@ export class BodyError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
 }
 
-export function readBlobBody(request: IncomingMessage, limit: number): Promise<Buffer> {
+export function readBlobBody(request: IncomingMessage, limit: number, timeoutMs = 30_000): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     let length = 0
@@ -23,7 +23,7 @@ export function readBlobBody(request: IncomingMessage, limit: number): Promise<B
       chunks.push(chunk)
     }
     const end = () => { cleanup(); resolve(Buffer.concat(chunks, length)) }
-    const timer = setTimeout(() => fail(new BodyError(408, 'Upload timed out')), 30_000)
+    const timer = setTimeout(() => fail(new BodyError(408, 'Upload timed out')), timeoutMs)
     timer.unref()
     // An aborted HTTP request may emit an error after the aborted callback has cleaned up.
     request.once('error', () => {})

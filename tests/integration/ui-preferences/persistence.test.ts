@@ -72,6 +72,36 @@ test("panel opacity accepts the full range and stays isolated by account across 
   }
 })
 
+test("new light and dark themes persist through RPC and restart without crossing account or realm", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "eden-theme-colors-"))
+  let database = new EdenDatabase(path.join(root, "mon.db"), "mon")
+  const local = new EdenDatabase(path.join(root, "local.db"), "local")
+  const account = (key: string) => ({ key, userId: key, coreBaseUrl: "https://fixture.invalid" })
+  const themes = ["sky", "pink", "teal", "white", "navy", "forest"] as const
+  try {
+    let routes = uiPreferenceRoutes(new UiPreferenceRepository(database))
+    for (const baseTheme of themes) {
+      const input = { ...defaultAppearance, baseTheme, backgroundMode: "theme", panelOpacity: 67, chatFontScale: 112 }
+      assert.deepEqual(await withAccount(account(baseTheme), () => routes["ui.appearance.update"](input)), input)
+    }
+    await assert.rejects(withAccount(account("sky"), () => routes["ui.appearance.update"]({ ...defaultAppearance, baseTheme: "invalid-theme" })))
+    database.close()
+    database = new EdenDatabase(path.join(root, "mon.db"), "mon")
+    routes = uiPreferenceRoutes(new UiPreferenceRepository(database))
+    for (const baseTheme of themes) {
+      const value = await withAccount(account(baseTheme), () => routes["ui.appearance.get"]({}))
+      assert.deepEqual(rpcMethods["ui.appearance.get"].result.parse(value),
+        { ...defaultAppearance, baseTheme, backgroundMode: "theme", panelOpacity: 67, chatFontScale: 112 })
+      assert.deepEqual(await withAccount(account(baseTheme), () => uiPreferenceRoutes(new UiPreferenceRepository(local))["ui.appearance.get"]({})), defaultAppearance)
+    }
+    assert.deepEqual(await withAccount(account("unconfigured"), () => routes["ui.appearance.get"]({})), defaultAppearance)
+  } finally {
+    database.close()
+    local.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test("old and corrupt panel preferences receive the readable default without rewriting stored settings", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "eden-panel-legacy-"))
   const database = new EdenDatabase(path.join(root, "local.db"), "local")

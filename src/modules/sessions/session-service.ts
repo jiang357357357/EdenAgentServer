@@ -2,7 +2,7 @@ import { logDiagnostic } from '../logging/index.ts'
 import { UiPreferenceRepository } from "../ui-preferences/index.ts"
 import { withAccount } from '../accounts/index.ts'
 import { randomUUID } from 'node:crypto'
-import { toJson } from '@eden/api'
+import { toJson, QQ_FILE_MAX_INPUT_BYTES } from '@eden/api'
 import type { JsonValue, AttachmentRef, AttachmentSnapshot } from '@eden/api'
 import { createIsolatedRuntime as createRuntime } from '@eden/runtime-pi'
 import type { EdenRuntime, RuntimeModel, RuntimeTool } from '@eden/runtime-pi'
@@ -83,7 +83,7 @@ export class SessionService {
     const captured = JSON.stringify(this.inputMetadata(sessionId, source.environment))
     return this.admissions.submit(sessionId, async signal => {
       if (source.attachments.length && !this.attachments) throw new Error('Attachment service unavailable')
-      const snapshots = source.attachments.length ? await this.attachments!.snapshot(source.attachments) : []
+      const snapshots = source.attachments.length ? await this.attachments!.snapshot(source.attachments, this.attachmentBudget(sessionId)) : []
       if (source.snapshots.length && JSON.stringify(snapshots) !== JSON.stringify(source.snapshots)) throw new Error('Original attachment snapshots no longer match')
       signal.throwIfAborted()
       const existing = recovery.existing(sessionId, sourceId, fingerprint, note)
@@ -109,7 +109,7 @@ export class SessionService {
     const refs = structuredClone(references)
     const savedEnvironment = environment === undefined ? undefined : structuredClone(environment)
     return this.admissions.submit(sessionId, async signal => {
-      const snapshots = await this.attachments!.snapshot(refs)
+      const snapshots = await this.attachments!.snapshot(refs, this.attachmentBudget(sessionId))
       signal.throwIfAborted()
       if (JSON.stringify(this.inputMetadata(sessionId, savedEnvironment)) !== JSON.stringify(captured)) throw new Error('Session configuration changed during attachment validation; resubmit')
       return this.accept(sessionId, text, idempotencyKey, savedEnvironment, 'prompt', snapshots, onCommit)
@@ -259,7 +259,11 @@ export class SessionService {
     const snapshots = inputAttachments(input.metadata)
     if (!snapshots.length) return []
     if (!this.attachments) throw new Error('Attachment service unavailable')
-    return this.attachments.images(snapshots)
+    return this.attachments.images(snapshots, this.attachmentBudget(input.sessionId))
+  }
+
+  private attachmentBudget(sessionId: string): number | undefined {
+    return this.repository.read(sessionId).sourceChannel === 'qq' ? QQ_FILE_MAX_INPUT_BYTES : undefined
   }
 
   setDescendantStop(handler: (sessionId: string) => Promise<void>): void { this.descendantStop = handler }

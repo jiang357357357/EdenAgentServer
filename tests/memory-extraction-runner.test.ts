@@ -13,7 +13,8 @@ import { MemoryRepository, MemoryExtractionRepository, MemoryExtractionCommitRep
 import { MemoryExtractionQueue } from '../src/modules/memories/index.ts'
 
 async function until(check: () => boolean) {
-  const deadline = Date.now() + 5000
+  // Extraction now cold-starts a real isolated TS process; five seconds can expire before dispatch.
+  const deadline = Date.now() + 30000
   while (!check() && Date.now() < deadline) await delay(10)
   assert.ok(check(), 'Expected asynchronous boundary was not reached')
 }
@@ -26,11 +27,12 @@ async function fixture(context: test.TestContext, wait = false, failCapture = fa
   const inputs = new InputRepository(db, sessions.events)
   const jobs = new MemoryExtractionRepository(db)
   const permissions = new PermissionService(db, sessions.events)
+  const captureFailure = new Error('capture disk failure')
   const runner = new MemoryExtractionRunner(jobs, new MemoryExtractionCommitRepository(db), permissions, {
     async resolve() { return model.config },
     async record(job, snapshot) {
       assert.equal(model.requests.length, 0)
-      if (failCapture) throw new Error('capture disk failure')
+      if (failCapture) throw captureFailure
       sessions.events.append(job.sessionId, job.turnId, 'memory.extraction.model_request', { jobId: job.id, snapshot })
     },
   }, 1)
@@ -44,7 +46,7 @@ async function fixture(context: test.TestContext, wait = false, failCapture = fa
     inputs.finish(input)
     return jobs.schedule(input.id)!
   }
-  return { db, model, jobs, permissions, runner, create, memories: new MemoryRepository(db), scope: { scopeType: 'agent_character' as const, scopeKey: '11' } }
+  return { db, model, jobs, permissions, runner, create, captureFailure, memories: new MemoryRepository(db), scope: { scopeType: 'agent_character' as const, scopeKey: '11' } }
 }
 
 test('runner persists candidates before approval, coalesces execution and commits the returned durable approval ID', async context => {
@@ -99,7 +101,10 @@ test('shutdown cancels live extraction, drains requests and leaves a non-replaya
 test('audit failure prevents model transmission and records failed extraction without a permission request', async context => {
   const f = await fixture(context, false, true)
   const job = f.create()
-  await assert.rejects(f.runner.run(job.id, new AbortController().signal), /persistence failed/)
+  await assert.rejects(f.runner.run(job.id, new AbortController().signal), error => {
+    assert.equal(error, f.captureFailure, 'the originating persistence failure must survive the process boundary')
+    return true
+  })
   assert.equal(f.jobs.read(job.id).state, 'failed')
   assert.equal(f.model.requests.length, 0)
   assert.equal(f.permissions.list().length, 0)

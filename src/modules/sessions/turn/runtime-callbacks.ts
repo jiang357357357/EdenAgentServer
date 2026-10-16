@@ -3,6 +3,8 @@ import { requestContext } from './request-context.ts'
 import { randomUUID } from 'node:crypto'
 import { RuntimePersistenceError, type RuntimeCallbacks } from '@eden/runtime-pi'
 import { toJson } from '@eden/api'
+import { privateMemoryPayload, privateMemoryCheckpoint } from '../../tool-results/index.ts'
+import { MemoryRepository } from '../../memories/index.ts'
 import type { JsonValue, RuntimeCheckpoint } from '@eden/api'
 import type { SessionInput } from '../contracts.ts'
 import type { SessionRepository } from '../session-repository.ts'
@@ -46,7 +48,7 @@ export function runtimeCallbacks(repository: SessionRepository, input: SessionIn
   const contexts = new Map<string, Record<string, JsonValue>>()
   const signals = new SignalRepository(repository.database, repository.events)
   const append = (kind: string, payload: Parameters<RuntimeCallbacks['event']>[1]) => {
-    repository.events.append(input.sessionId, input.turnId, kind, scoped(payload))
+    repository.events.append(input.sessionId, input.turnId, kind, scoped(privateMemoryPayload(payload)))
   }
   const scoped = (payload: JsonValue): JsonValue => scope.actor ? { ...(payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : { value: payload }), actor: scope.actor } : payload
   const stream = new StreamCoalescer(append)
@@ -57,6 +59,7 @@ export function runtimeCallbacks(repository: SessionRepository, input: SessionIn
         if (scope.checkpoint) await scope.checkpoint(snapshot)
         else repository.saveCheckpoint(snapshot, input.turnId)
         contextEntryId = checkpointEntryId(snapshot)
+        return privateMemoryCheckpoint(snapshot, new MemoryRepository(repository.database).credentialValues())
       } catch (error) { throw new RuntimePersistenceError('会话检查点提交失败', error) }
     },
     async event(kind, payload, delivery) {
@@ -74,7 +77,8 @@ export function runtimeCallbacks(repository: SessionRepository, input: SessionIn
     async request(snapshot) {
       stream.flush()
       const event = repository.database.transaction(() => {
-        const value = snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot) ? snapshot : {}
+        const projected = privateMemoryPayload(snapshot)
+        const value = projected && typeof projected === 'object' && !Array.isArray(projected) ? projected : {}
         const previous = repository.events.latestActorContextEstimate(input.sessionId, scope.actor?.assistantID)
         const contextEstimate = requestContext(value, input.metadata, previous, scope.actor?.assistantID)
         contexts.set(String(value.requestId), contextEstimate)

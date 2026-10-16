@@ -3,6 +3,7 @@ import type { JsonValue, RuntimeOrigin, SessionPurpose, SessionSourceChannel } f
 export interface SessionSummary {
   id: string
   title: string
+  archived: boolean
   contextTokens?: number
   tokenBreakdown?: JsonValue
   titleSource: string

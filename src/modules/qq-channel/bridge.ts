@@ -6,7 +6,8 @@ import type { SessionService } from '../sessions/index.ts'
 import type { PermissionService } from '../permissions/index.ts'
 import type { BlobService } from '../blobs/index.ts'
 import type { AttachmentService } from '../attachments/index.ts'
-import { attachmentRefsSchema } from '@eden/api'
+import { attachmentRefsSchema, QQ_FILE_MAX_BYTES, QQ_FILE_MAX_BASE64_LENGTH,
+  QQ_FILE_MAX_ATTACHMENTS, QQ_FILE_MAX_INPUT_BYTES } from '@eden/api'
 import { loadMonCatalog } from '../mon/index.ts'
 import type { MonBindingService } from '../mon/index.ts'
 import { z } from 'zod'
@@ -22,10 +23,11 @@ const submitInput = z.object({ schema_version: z.enum(['qq-turn.v2', 'qq-turn.v3
 const fileInput = z.object({ user_id: z.string(), bot_qq: qq, contact_qq: qq,
   input_id: z.uuid(), blob_id: z.uuid() }).strict()
 const uploadInput = z.object({ user_id: z.string(), bot_qq: qq, contact_qq: qq,
+  group_qq: qq.optional(),
   filename: z.string().min(1).max(255), mime: z.string().min(1).max(255),
-  content_base64: z.string().max(11_184_812) }).strict()
+  content_base64: z.string().max(QQ_FILE_MAX_BASE64_LENGTH) }).strict()
 const stageInput = z.object({ user_id: z.string(), bot_qq: qq, contact_qq: qq,
-  message_id: z.string().min(1).max(128), attachments: attachmentRefsSchema.min(1).max(4) }).strict()
+  message_id: z.string().min(1).max(128), attachments: attachmentRefsSchema.min(1).max(QQ_FILE_MAX_ATTACHMENTS) }).strict()
 const pendingLifetime = 30 * 60 * 1000
 const statusInput = z.object({ user_id: z.string(), bot_qq: qq, contact_qq: qq, input_id: z.uuid(),
   after_seq: z.string().regex(/^\d+$/).default('0') }).strict()
@@ -69,8 +71,8 @@ export class QqChannelBridge {
       }
       const refs = rows.flatMap(row => attachmentRefsSchema.parse(JSON.parse(String(row.attachments_json))))
         .concat(input.attachments)
-      if (refs.length > 4) throw new Error('最多暂存 4 个文件，请先发送文字消息')
-      await withAccount(account, () => this.attachments.snapshot(refs))
+      if (refs.length > QQ_FILE_MAX_ATTACHMENTS) throw new Error('最多暂存 4 个文件，请先发送文字消息')
+      await withAccount(account, () => this.attachments.snapshot(refs, QQ_FILE_MAX_INPUT_BYTES))
       this.database.connection.prepare(`INSERT INTO qq_channel_pending_files
         (owner_id,bot_qq,contact_qq,message_id,attachments_json,created_at) VALUES(?,?,?,?,?,?)`)
         .run(input.user_id, input.bot_qq, input.contact_qq, input.message_id,
@@ -87,8 +89,8 @@ export class QqChannelBridge {
     if ((input.content_base64 && !/^[A-Za-z0-9+/]+={0,2}$/.test(input.content_base64)) || input.content_base64.length % 4)
       throw new Error('Invalid QQ file encoding')
     const bytes = Buffer.from(input.content_base64, 'base64')
-    if (bytes.length > 8 * 1024 * 1024 || bytes.toString('base64') !== input.content_base64)
-      throw new Error('QQ file exceeds 8 MiB or is not canonical base64')
+    if (bytes.length > QQ_FILE_MAX_BYTES || bytes.toString('base64') !== input.content_base64)
+      throw new Error('QQ file exceeds 100 MB or is not canonical base64')
     const account = { key: accountKey(this.identity.coreBaseUrl, input.user_id),
       userId: input.user_id, coreBaseUrl: this.identity.coreBaseUrl }
     const info = await withAccount(account, () => this.blobs.put(bytes, input.mime))
@@ -112,7 +114,7 @@ export class QqChannelBridge {
     return withAccount(account, async () => {
       this.sessions.repository.ownership.assert(String(row.session_id))
       const { info, bytes } = await this.blobs.read(input.blob_id)
-      if (bytes.length > 8 * 1024 * 1024) throw new Error('QQ file exceeds 8 MiB')
+      if (bytes.length > QQ_FILE_MAX_BYTES) throw new Error('QQ file exceeds 100 MB')
       return { filename: JSON.parse(String(event.payload_json)).filename, mime: info.mime,
         sha256: info.sha256, byteLength: info.byteLength, content_base64: bytes.toString('base64') }
     })
@@ -174,7 +176,7 @@ export class QqChannelBridge {
         .all(input.user_id, input.bot_qq, input.contact_qq)
       const refs = pending.flatMap(item => attachmentRefsSchema.parse(JSON.parse(String(item.attachments_json))))
         .concat(input.attachments)
-      if (refs.length > 4) throw new Error('本轮文件超过 4 个，请先只发文字处理已暂存文件')
+      if (refs.length > QQ_FILE_MAX_ATTACHMENTS) throw new Error('本轮文件超过 4 个，请先只发文字处理已暂存文件')
       const accepted = await withAccount(account, () => refs.length
         ? this.sessions.startWithAttachments(sessionId, input.text, refs, key, undefined, () => {
           this.database.connection.prepare(`DELETE FROM qq_channel_pending_files

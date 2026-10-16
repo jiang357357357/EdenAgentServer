@@ -10,7 +10,8 @@ import { startServer } from '../src/bootstrap/container.ts'
 import { MemoryRepository } from '../src/modules/memories/index.ts'
 
 async function until(check: () => boolean) {
-  const deadline = Date.now() + 5000
+  // A production turn and its extractor each cold-start an independent TS process.
+  const deadline = Date.now() + 30000
   while (!check() && Date.now() < deadline) await delay(10)
   assert.ok(check(), 'Production extraction boundary was not reached')
 }
@@ -71,8 +72,18 @@ test('production extraction scheduling faults make readiness fail and remain vis
   assert.match(String(f.server.memoryExtractions.fault), /ledger failure/)
   assert.equal((await fetch(`http://127.0.0.1:${f.server.port}/readyz`)).status, 503)
   assert.equal(f.model.requests.length, 1)
-  await assert.rejects(f.server.close(), /shutdown completed with errors/)
+  await assert.rejects(f.server.close(), error => {
+    assert.ok(error instanceof AggregateError)
+    assert.match(faultMessages(error), /extraction ledger failure/)
+    return true
+  })
 })
+
+function faultMessages(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  const nested = error instanceof AggregateError ? error.errors.map(faultMessages) : []
+  return [error.message, ...nested, ...(error.cause ? [faultMessages(error.cause)] : [])].join('\n')
+}
 
 test('closing or deleting one session cancels its approval while another session continues', async context => {
   const replies = Array.from({ length: 3 }, () => [

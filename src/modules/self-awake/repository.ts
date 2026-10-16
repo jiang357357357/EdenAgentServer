@@ -11,13 +11,16 @@ import type { SQLOutputValue } from 'node:sqlite'
 import type { EdenDatabase } from '@eden/store'
 import { selfAwakeListSchema, selfAwakeExecutionSchema, selfAwakeDiaryWriteSchema, toJson } from '@eden/api'
 import type { JobInfo, JsonValue } from '@eden/api'
+import { SelfAwakeRoleRepository } from './role-repository.ts'
 
 export class SelfAwakeRepository {
   readonly timerPublication: SelfAwakeTimerPublication
+  readonly roles: SelfAwakeRoleRepository
   constructor(readonly database: EdenDatabase, private readonly scheduleStateFile?: string, private readonly externalScheduler = Boolean(scheduleStateFile)) {
     this.timerPublication = new SelfAwakeTimerPublication(database, scheduleStateFile, externalScheduler)
+    this.roles = new SelfAwakeRoleRepository(database)
   }
-  deadline(now = Date.now(), sessionId?: string) { if (sessionId) new SessionOwnership(this.database).assert(sessionId); return wakeDeadline(this.database, this.scheduleStateFile, now, sessionId) }
+  deadline(now = Date.now(), sessionId?: string) { return wakeDeadline(this.database, this.scheduleStateFile, now, sessionId ? this.roles.target(sessionId) : undefined) }
   runReview(runId: string) { this.read(runId); return previewRunReview(this.database, runId) }
   resolveRun(runId: string, fingerprint: string, decision: 'completed' | 'failed', note: string) {
     this.read(runId)
@@ -89,6 +92,8 @@ export class SelfAwakeRepository {
           '自醒日记', text, '', '{}', now)
       this.database.connection.prepare("UPDATE self_awake_runs SET state='completed',decision_json=NULL,completed_at=?,updated_at=? WHERE id=?")
         .run(now, now, id)
+      this.database.connection.prepare(`UPDATE self_awake_merged_plans SET reviewed_at=? WHERE reviewed_at IS NULL AND merged_at<=?
+        AND scope_key IN (SELECT scope_key FROM self_awake_role_members WHERE session_id=?)`).run(now, run.createdAt, run.sessionId)
     })
   }
 
@@ -137,7 +142,13 @@ export class SelfAwakeRepository {
   }
 
   wakeSchedule(sessionId?: string) {
-    if (sessionId) new SessionOwnership(this.database).assert(sessionId)
+    if (!sessionId) {
+      const role = this.database.connection.prepare(`SELECT r.session_id FROM self_awake_role_scopes r JOIN sessions s ON s.id=r.session_id
+        LEFT JOIN jobs j ON j.session_id=r.session_id AND j.kind='self_awake' AND j.state='queued'
+        WHERE s.status='active' AND ${accountFilter(this.database, 'r.session_id')} ORDER BY j.due_at IS NULL,j.due_at,r.scope_key LIMIT 1`).get()
+      if (role) sessionId = String(role.session_id)
+    }
+    if (sessionId) sessionId = this.roles.target(sessionId)
     const next = this.database.connection.prepare(`SELECT due_at,payload_json FROM jobs WHERE ${accountFilter(this.database, "session_id")} AND (? IS NULL OR session_id=?) AND kind='self_awake' AND state='queued' ORDER BY due_at LIMIT 1`).get(sessionId ?? null, sessionId ?? null)
     const external = this.externalScheduler ? this.externalSchedule(sessionId) : null
     const local = next ? { status: 'scheduled', source: 'tool', nextWakeAt: new Date(Number(next.due_at)).toISOString(), reason: String(object(JSON.parse(String(next.payload_json))).prompt ?? '') } : null
@@ -185,14 +196,6 @@ export class SelfAwakeRepository {
   ownsBackgroundSession(sessionId: string, userId: string): boolean {
     return Boolean(this.database.connection.prepare(`SELECT 1 FROM self_awake_submissions s
       JOIN jobs j ON j.id=s.job_id WHERE j.session_id=? AND s.user_id=? LIMIT 1`).get(sessionId, userId))
-  }
-
-  recentDiaries(sessionId: string, userId: string, limit: number) {
-    const rows = this.database.connection.prepare(`SELECT d.* FROM self_awake_diaries d JOIN self_awake_runs r ON r.id=d.run_id
-      WHERE (?='' AND d.session_id=?) OR (?!='' AND EXISTS (SELECT 1 FROM self_awake_submissions s JOIN jobs j ON j.id=s.job_id WHERE j.session_id=r.session_id AND s.user_id=?))
-      ORDER BY d.created_at DESC,d.id DESC LIMIT ?`).all(userId, sessionId, userId, userId, limit)
-    return rows.map(row => ({ id: row.id, sessionId: row.session_id, assistantId: row.assistant_id, characterId: row.character_id,
-      title: row.title, content: row.content, mood: row.mood, createdAt: row.created_at }))
   }
 
   finalText(sessionId: string, turnId: string): string {

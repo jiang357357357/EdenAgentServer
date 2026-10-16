@@ -153,7 +153,7 @@ function connectRpc(client: WebSocket, config: ServerConfig, resolve: (token: st
       if (input.eventMode === "reminders") { notifyReminder(event); return }
       if (input.eventMode !== "discovery") { delivery.publish(event); return }
       if (discovered.has(event.sessionId) && !['turn.started', 'input.queued', 'permission.requested',
-        'question.requested', 'media.requested', 'workspace.changed'].includes(event.kind)) return
+        'question.requested', 'media.requested', 'workspace.changed', 'session.archive_updated'].includes(event.kind)) return
       discovered.add(event.sessionId)
       // Only the first event announces a session. Token streams never enter the control socket.
       void delivery.refresh().then(() => {

@@ -61,6 +61,17 @@ export class MonBindingService {
     return this.run(params, signal => this.load(params, signal))
   }
 
+  /** Revalidate the source account connection before binding a newly created background context. */
+  async backgroundCatalog(sourceId: string, targetId: string): Promise<JsonValue> {
+    const source = this.sessions.repository.read(sourceId), target = this.sessions.repository.read(targetId)
+    if (source.runtimeOrigin !== target.runtimeOrigin) throw new Error('Background model binding requires the same world')
+    if (target.purpose !== 'self_awake' || this.sessions.repository.ownership.owner(sourceId) !== this.sessions.repository.ownership.owner(targetId))
+      throw new Error('Background model binding requires the same account')
+    const connection = this.connections?.read(sourceId)
+    if (!connection) throw new Error('请先确认当前会话的 Core 模型连接，再设置角色自醒')
+    const service = this.sessions.repository.database.connection.prepare('SELECT enabled FROM mon_service_credentials WHERE session_id=?').get(sourceId)?.enabled === 1
+    return this.catalog({ ...connection, sessionId: targetId, serviceCredential: service })
+  }
   listOperations(params: MonOperationQuery): JsonValue[] {
     if (this.closed) throw new Error('Mon integration is shutting down')
     if (this.sessions.repository.origin !== 'mon') throw new Error('Mon operations are only available in Mon')
@@ -197,7 +208,8 @@ export class MonBindingService {
       && !Array.isArray(results[1].value) ? results[1].value as Record<string, unknown> : {}
     return toJson({ qq: { available: results[0].status === 'fulfilled', availabilityMeaning: 'configured_owner_target', replyTool: 'read_qq_messages' },
       email: { statusAvailable: results[1].status === 'fulfilled', available: email.ready === true && Boolean(email.default_to), replyReadable: false },
-      device: { discoveryTool: 'list_esp32_devices', statusTool: 'get_esp32_command_status', replyReadable: false } })
+      desktop: { available: true, availabilityMeaning: 'persistent_queue_requires_running_desktop', deliveryTool: 'show_desktop_reminder', statusTool: 'get_desktop_reminder' },
+      device: { availability: 'requires_device_discovery', discoveryTool: 'list_esp32_devices', statusTool: 'get_esp32_command_status', replyReadable: false } })
   }
 
   contactOwnerByQq(sessionId: string, raw: unknown, signal: AbortSignal) {

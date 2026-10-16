@@ -6,6 +6,7 @@ import type { PermissionService } from '../permissions/index.ts'
 import { WorkspaceService } from './workspace-service.ts'
 import { workspaceReadTools } from './workspace-read-tools.ts'
 import { workspaceWriteTools } from './workspace-write-tools.ts'
+import { workspaceFileTools } from './workspace-file-tools.ts'
 import { toolDescription } from '../../model-prompts/tool-descriptions.ts'
 import { terminalToolContext } from '../../model-prompts/terminal.ts'
 
@@ -18,6 +19,7 @@ export function workspaceTools(workspace: WorkspaceService, permissions: Permiss
   return [
     ...workspaceReadTools(workspace, scope),
     ...workspaceWriteTools(workspace, permissions, sessionId, turnId, scope),
+    ...workspaceFileTools(workspace, permissions, sessionId, turnId, scope, actorId),
     {
       name: 'exec_command', revision: 'eden.workspace.exec.v3', executionMode: 'sequential',
       description: `${toolDescription('exec_command')}\n${terminalToolContext(terminal)}`,

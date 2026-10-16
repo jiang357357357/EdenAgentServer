@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { toJson } from '@eden/api'
+import { toJson, QQ_FILE_MAX_BYTES } from '@eden/api'
 import type { RuntimeTool } from '@eden/runtime-pi'
 import type { AttachmentService } from './service.ts'
 import type { AttachmentRepository } from './repository.ts'
@@ -8,7 +8,7 @@ import { toolDescription } from '../../model-prompts/tool-descriptions.ts'
 const parameters = z.object({
   action: z.enum(['list', 'read']), blobId: z.uuid().optional(),
   encoding: z.enum(['text', 'base64']).default('text'),
-  offset: z.number().int().min(0).max(32 * 1024 * 1024).default(0),
+  offset: z.number().int().min(0).max(QQ_FILE_MAX_BYTES).default(0),
   limit: z.number().int().min(1).max(16384).default(8192),
 }).strict()
 

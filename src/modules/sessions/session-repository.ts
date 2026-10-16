@@ -9,7 +9,8 @@ import { SessionEvents } from './session-events.ts'
 import { latestMetadataEvent } from './session-metadata-query.ts'
 import { readReplyTimer } from './reply-timer-query.ts'
 import { sessionStorage } from './session-storage.ts'
-import { privateQqCheckpoint } from '../tool-results/index.ts'
+import { privateQqCheckpoint, privateMemoryCheckpoint } from '../tool-results/index.ts'
+import { MemoryRepository } from '../memories/index.ts'
 import { SessionContextDeletion } from './history/context-deletion.ts'
 
 interface SessionMetadata {
@@ -52,8 +53,9 @@ export class SessionRepository {
 
   read(id: string): SessionSummary {
     this.ownership.assert(id)
-    const row = this.database.connection.prepare(`SELECT s.*,c.purpose,c.source_channel FROM sessions s
-      JOIN session_classification c ON c.session_id=s.id WHERE s.id=? AND s.origin=? AND s.status!='deleted'`).get(id, this.origin)
+    const row = this.database.connection.prepare(`SELECT s.*,c.purpose,c.source_channel,(a.session_id IS NOT NULL) AS archived FROM sessions s
+      JOIN session_classification c ON c.session_id=s.id LEFT JOIN session_archives a ON a.session_id=s.id
+      WHERE s.id=? AND s.origin=? AND s.status!='deleted'`).get(id, this.origin)
     if (!row) throw new Error('Session not found')
     const metadata = this.metadata(id, Number(row.created_at))
     const latestUsage = this.events.latestUsagePayload(id)
@@ -64,6 +66,7 @@ export class SessionRepository {
       id: String(row.id), title: String(row.title), titleSource: this.titleSource(id, String(row.title)) ?? 'pending',
       status: row.status === 'closed' ? 'closed' : 'active', executionStatus: runningInput ? 'busy' : 'idle',
       runtimeOrigin: runtimeOriginSchema.parse(row.origin),
+      archived: row.archived === 1,
       purpose: sessionPurposeSchema.parse(row.purpose), sourceChannel: sessionSourceChannelSchema.parse(row.source_channel),
       participants: metadata.participants, environment: metadata.environment,
       createdAt: Number(row.created_at), updatedAt: Number(row.updated_at),
@@ -93,15 +96,15 @@ export class SessionRepository {
     }
   }
 
-  list(limit = 100, includeClosed = false, includeBackground = true, purpose?: SessionPurpose, sourceChannel?: SessionSourceChannel): SessionSummary[] {
-    return this.listIds(limit, includeClosed, includeBackground, purpose, sourceChannel).map(id => this.read(id))
+  list(limit = 100, includeClosed = false, includeBackground = true, purpose?: SessionPurpose, sourceChannel?: SessionSourceChannel, archived?: boolean): SessionSummary[] {
+    return this.listIds(limit, includeClosed, includeBackground, purpose, sourceChannel, archived).map(id => this.read(id))
   }
 
   /** Snapshot ordered IDs, then recheck each summary's ownership while allowing other connections to run. */
   async listAsync(limit = 100, includeClosed = false, includeBackground = true, purpose?: SessionPurpose,
-    sourceChannel?: SessionSourceChannel, signal?: AbortSignal): Promise<SessionSummary[]> {
+    sourceChannel?: SessionSourceChannel, signal?: AbortSignal, archived?: boolean): Promise<SessionSummary[]> {
     await yieldToEventLoop(undefined, { signal })
-    const ids = this.listIds(limit, includeClosed, includeBackground, purpose, sourceChannel)
+    const ids = this.listIds(limit, includeClosed, includeBackground, purpose, sourceChannel, archived)
     const sessions: SessionSummary[] = []
     let count = 0, started = performance.now()
     for (const id of ids) {
@@ -119,20 +122,37 @@ export class SessionRepository {
   }
 
   private listIds(limit: number, includeClosed: boolean, includeBackground: boolean,
-    purpose?: SessionPurpose, sourceChannel?: SessionSourceChannel): string[] {
+    purpose?: SessionPurpose, sourceChannel?: SessionSourceChannel, archived?: boolean): string[] {
     const defaultApp = !includeBackground && !purpose && !sourceChannel
     return this.database.connection.prepare(`SELECT s.id FROM sessions s JOIN session_classification c ON c.session_id=s.id
+      LEFT JOIN session_archives a ON a.session_id=s.id
       WHERE ${accountFilter(this.database, 's.id')} AND s.origin=? AND s.status!='deleted' AND (? OR s.status='active')
       AND (? IS NULL OR c.purpose=?) AND (? IS NULL OR c.source_channel=?)
       AND (?=0 OR (c.purpose='user_chat' AND c.source_channel='app'))
+      AND (? IS NULL OR (a.session_id IS NOT NULL)=?)
       ORDER BY s.updated_at DESC LIMIT ?`)
       .all(this.origin, Number(includeClosed), purpose ?? null, purpose ?? null, sourceChannel ?? null, sourceChannel ?? null,
-        Number(defaultApp), Math.min(limit, 1000)).map(row => String(row.id))
+        Number(defaultApp), archived === undefined ? null : Number(archived), archived === undefined ? null : Number(archived),
+        Math.min(limit, 1000)).map(row => String(row.id))
   }
 
   rename(id: string, title: string): SessionSummary {
     this.readMetadata(id)
     this.updateTitle(id, title, 'user')
+    return this.read(id)
+  }
+
+  setArchived(id: string, archived: boolean): SessionSummary {
+    const current = this.read(id)
+    if (current.archived === archived) return current
+    const event = this.database.transaction(() => {
+      const now = Date.now()
+      if (archived) this.database.connection.prepare('INSERT INTO session_archives VALUES(?,?)').run(id, now)
+      else this.database.connection.prepare('DELETE FROM session_archives WHERE session_id=?').run(id)
+      this.database.connection.prepare('UPDATE sessions SET updated_at=? WHERE id=?').run(now, id)
+      return this.events.insert(id, null, 'session.archive_updated', { archived })
+    })
+    this.events.publish(event)
     return this.read(id)
   }
 
@@ -205,7 +225,7 @@ export class SessionRepository {
     return sessionStorage('会话检查点读取失败', () => {
       const row = this.database.connection.prepare('SELECT checkpoint_json FROM runtime_checkpoints WHERE session_id=?').get(sessionId)
       const checkpoint = row ? runtimeCheckpointSchema.parse(JSON.parse(String(row.checkpoint_json))) : undefined
-      return checkpoint ? privateQqCheckpoint(new SessionContextDeletion(this.database).project(checkpoint)) : undefined
+      return checkpoint ? privateQqCheckpoint(this.modelCheckpoint(checkpoint)) : undefined
     })
   }
 
@@ -215,7 +235,8 @@ export class SessionRepository {
 
   modelCheckpoint(snapshot: RuntimeCheckpoint, actorId?: string): RuntimeCheckpoint {
     this.assertContextReady(snapshot.sessionId)
-    return new SessionContextDeletion(this.database).project(runtimeCheckpointSchema.parse(snapshot), actorId)
+    return privateMemoryCheckpoint(new SessionContextDeletion(this.database).project(runtimeCheckpointSchema.parse(snapshot), actorId),
+      new MemoryRepository(this.database).credentialValues())
   }
 
   saveCheckpoint(snapshot: RuntimeCheckpoint, turnId: string): void {

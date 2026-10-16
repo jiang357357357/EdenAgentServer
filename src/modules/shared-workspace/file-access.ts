@@ -1,7 +1,8 @@
 import path from 'node:path'
-import { readWorkspacePage, writeWorkspaceFile } from '../workspace/index.ts'
+import { readWorkspacePage, writeWorkspaceFile, fileVersion, changeFile, readRecovery, restoreFile } from '../workspace/index.ts'
 import { rpcMethods, toJson } from '@eden/api'
 import type { RuntimeTool } from '@eden/runtime-pi'
+import type { FileChange } from '../workspace/index.ts'
 import type { PermissionService } from '../permissions/index.ts'
 import type { SharedWorkspaceService } from './service.ts'
 
@@ -11,7 +12,8 @@ type FileInput = { path: string; content: string; expectedSha256: string | null;
 /** Only the selected, bound shared directory is resolved; ordinary workspace file tools stay unchanged. */
 export class SharedLibraryFiles {
   constructor(private readonly service: SharedWorkspaceService, private readonly permissions: PermissionService,
-    private readonly sessionId: string, private readonly turnId: string, private readonly scope: string) {}
+    private readonly sessionId: string, private readonly turnId: string, private readonly scope: string,
+    private readonly owner = sessionId) {}
 
   async read(requested: string, offset: number, limit: number, signal: AbortSignal) {
     this.relative(requested)
@@ -54,6 +56,43 @@ export class SharedLibraryFiles {
     const content = current.content.slice(0, first) + newText + current.content.slice(first + oldText.length)
     this.contentSize(content)
     return this.commit(captured, { path: requested, content, expectedSha256, createOnly: false }, context)
+  }
+
+  async change(input: Omit<FileChange, 'expectedSha256'>, context: Context) {
+    this.relative(input.path)
+    if (input.destination) this.relative(input.destination)
+    const captured = await this.capture(context.signal), root = captured.directory.path
+    const current = await fileVersion(root, input.path)
+    const previous = captured.folder.readHashes(this.scope).get(path.resolve(root, input.path))
+    if (previous && previous !== current.sha256) throw new Error('共享文件自上次读取后已改变，请重新读取')
+    const change = { ...input, expectedSha256: current.sha256 }
+    return this.fileMutation(captured, toJson({ ...change, bytes: current.bytes.length }), context,
+      () => changeFile(root, JSON.stringify([this.owner, captured.spaceId]), change, context.signal))
+  }
+
+  async restore(recoveryId: string, context: Context) {
+    const captured = await this.capture(context.signal), root = captured.directory.path
+    const owner = JSON.stringify([this.owner, captured.spaceId]), saved = await readRecovery(root, owner, recoveryId)
+    return this.fileMutation(captured, toJson({ action: 'restore', recoveryId, path: saved.metadata.path, bytes: saved.bytes.length }), context,
+      () => restoreFile(root, owner, recoveryId, context.signal))
+  }
+
+  private async fileMutation(captured: Awaited<ReturnType<SharedLibraryFiles['capture']>>, details: import('@eden/api').JsonValue,
+    context: Context, work: () => Promise<import('@eden/api').JsonValue>) {
+    this.service.assertDirectorySnapshot(captured.directory, this.sessionId)
+    await this.writable(captured)
+    const root = captured.directory.path
+    await this.permissions.request({ ...context, sessionId: this.sessionId, turnId: this.turnId }, 'shared_workspace.write', root,
+      toJson({ spaceId: captured.spaceId, operation: details }))
+    return captured.folder.mutateFiles(root, context.signal, async () => {
+      this.service.assertDirectorySnapshot(captured.directory, this.sessionId); context.signal.throwIfAborted()
+      await this.writable(captured)
+      return captured.folder.perform(root, async client => {
+        if (client.status().spaceId !== captured.spaceId) throw new Error('共享资料库绑定在审批期间发生变化')
+        const result = await work()
+        return toJson({ result, spaceId: captured.spaceId, synchronized: false })
+      })
+    })
   }
 
   private async capture(signal: AbortSignal) {

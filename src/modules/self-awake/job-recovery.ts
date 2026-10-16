@@ -8,11 +8,12 @@ import type { JobRepository } from '../jobs/index.ts'
 import type { SessionService } from '../sessions/index.ts'
 import { SELF_AWAKE_RECOVERY_INSTRUCTION } from '../../model-prompts/self-awake.ts'
 import { SessionOwnership } from '../accounts/index.ts'
+import { SelfAwakeRoleRepository } from './role-repository.ts'
 
 const payloadSchema = z.object({
   prompt: z.string().optional(), trigger: jsonValue.optional(),
   schemaVersion: z.enum(['self-awake.v1', 'self-awake.v2']).optional(), scheduler: z.literal('monos').optional(),
-  scheduleScope: z.enum(['legacy', 'session']).optional(),
+  scheduleScope: z.enum(['legacy', 'session', 'role']).optional(), roleScope: z.string().optional(),
   eventId: z.string().optional(), userId: z.string().optional(),
 }).strict()
 
@@ -22,6 +23,8 @@ export class SelfAwakeJobRecovery {
   private basis(id: string) {
     const job = this.jobs.read(id), db = this.database.connection
     if (job.kind !== 'self_awake' || !job.sessionId || !['failed', 'cancelled', 'completed'].includes(job.state)) throw new Error('Stop or reconcile the original self-awake job first')
+    if (new SelfAwakeRoleRepository(this.database).target(job.sessionId) !== job.sessionId)
+      throw new Error('旧后台范围已合并，请在角色当前后台会话安排自醒，不能恢复旧循环')
     const payload = payloadSchema.parse(job.payload)
     const run = assertPriorDecision(db, id, job)
     this.sessions.repository.assertContextReady(job.sessionId)

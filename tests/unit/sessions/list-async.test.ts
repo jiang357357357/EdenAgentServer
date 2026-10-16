@@ -46,7 +46,7 @@ test('async listing preserves synchronous classification filters, status, origin
     [100, true, false, 'self_awake'], [100, true, false, undefined, 'qq'],
     [100, true, true, 'subagent', 'internal'], [100, false, true, 'subagent'], [0],
   ]
-  for (const args of filters) assert.deepEqual(await repository.listAsync(...args), repository.list(...args))
+  for (const args of filters) assert.deepEqual(await repository.listAsync(args[0], args[1], args[2], args[3], args[4], undefined, args[5]), repository.list(...args))
   assert.deepEqual((await repository.listAsync(100, false, false)).map(session => session.title), ['Kind 0'])
   assert.deepEqual((await repository.listAsync(100, true, true)).map(session => session.title), ['Kind 4', 'Kind 3', 'Kind 2', 'Kind 1', 'Kind 0'])
 })
@@ -136,7 +136,7 @@ test('session.list RPC awaits the async repository, preserves its schema and for
   const result = rpcMethods['session.list'].result.parse(await routes['session.list']!({ limit: 2 }))
   assert.deepEqual(result.map(session => session.id), ids.toReversed().slice(0, 2))
   assert.deepEqual(result.map(session => session.executionStatus), ['busy', 'idle'])
-  assert.deepEqual(parameters, [2, false, false, undefined, undefined, controller.signal])
+  assert.deepEqual(parameters, [2, false, false, undefined, undefined, controller.signal, undefined])
   await assert.rejects(Promise.resolve(routes['session.list']!({ limit: 1001 })))
   controller.abort()
   await assert.rejects(Promise.resolve(routes['session.list']!({ limit: 2 })), { name: 'AbortError' })

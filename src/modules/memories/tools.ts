@@ -1,11 +1,12 @@
 import { z } from 'zod'
-import { memoryKindSchema, toJson } from '@eden/api'
+import { memoryKindSchema, toJson, redactCredentialJson } from '@eden/api'
 import type { JsonValue } from '@eden/api'
 import type { RuntimeTool } from '@eden/runtime-pi'
 import type { PermissionService } from '../permissions/index.ts'
 import type { MemoryRepository } from './repository.ts'
 import type { MemoryScopes } from './scope.ts'
 import { memoryContent } from './content.ts'
+import { memoryModelResult, memoryApprovalRecord } from './safe-record.ts'
 import { memoryToolDescription } from '../../model-prompts/tool-descriptions.ts'
 
 const id = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
@@ -20,7 +21,8 @@ interface Owner { sessionId: string; turnId: string; actorId?: string | number; 
 
 export function memoryTools(repository: MemoryRepository, scopes: MemoryScopes, permissions: PermissionService, owner: Owner): RuntimeTool[] {
   return (Object.keys(schemas) as Name[]).map(name => ({
-    name, revision: 'eden.memory.v1', executionMode: 'sequential',
+    name, revision: 'eden.memory.v2', executionMode: 'sequential',
+    auditInput: input => redactCredentialJson(toJson(input), repository.credentialValues()),
     description: memoryToolDescription(name),
     parameters: toJson(z.toJSONSchema(schemas[name], { io: 'input' })) as Record<string, JsonValue>,
     async execute(raw, context) {
@@ -28,23 +30,23 @@ export function memoryTools(repository: MemoryRepository, scopes: MemoryScopes, 
       const scope = scopes.current(owner.sessionId, owner.turnId, owner.actorId)
       if (name === 'search_memories') {
         const input = schemas.search_memories.parse(raw)
-        return toJson(repository.search(scope, input.query, input.limit))
+        return repository.search(scope, input.query, input.limit).map(memoryModelResult)
       }
       if (owner.agentPath && owner.agentPath !== '/root') throw new Error('子智能体只能搜索长期记忆')
       const input = schemas[name].parse(raw)
-      const content = 'content' in input ? memoryContent(input.content) : undefined
+      const content = 'content' in input ? memoryContent(input.content, repository.credentialValues()) : undefined
       const previous = 'id' in input ? repository.read(scope, input.id) : undefined
       await permissions.request({ ...context, sessionId: owner.sessionId, turnId: owner.turnId }, 'memory.write',
-        `character:${scope.scopeKey}:memory:${previous?.id ?? 'new'}`, toJson({ action: name, scope, input: { ...input, ...(content ? { content } : {}) }, previous: previous ?? null }))
+        `character:${scope.scopeKey}:memory:${previous?.id ?? 'new'}`, toJson({ action: name, scope, input: { ...input, ...(content ? { content } : {}) }, previous: previous ? memoryApprovalRecord(previous) : null }))
       context.signal.throwIfAborted()
       if (JSON.stringify(scopes.current(owner.sessionId, owner.turnId, owner.actorId)) !== JSON.stringify(scope)) throw new Error('记忆范围在审批期间发生变化，请重新提交')
       if (name === 'remember_memory') {
         const parsed = schemas.remember_memory.parse(input)
-        return toJson(repository.create(scope, content!, parsed.kind, owner.sessionId, { source: 'explicit_tool', agentCharacterId: scope.scopeKey }))
+        return memoryModelResult(repository.create(scope, content!, parsed.kind, owner.sessionId, { source: 'explicit_tool', agentCharacterId: scope.scopeKey }))
       }
       if (name === 'forget_memory') { repository.forget(scope, previous!.id, previous!.updatedAt); return { deleted: true } }
       const parsed = schemas.update_memory.parse(input)
-      return toJson(repository.update(scope, previous!.id, previous!.updatedAt, content!, parsed.kind))
+      return memoryModelResult(repository.update(scope, previous!.id, previous!.updatedAt, content!, parsed.kind))
     },
   }))
 }

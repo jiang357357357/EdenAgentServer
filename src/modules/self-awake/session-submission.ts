@@ -5,6 +5,7 @@ import type { MonServiceIdentity } from '@eden/integrations'
 import { accountKey, withAccount } from '../accounts/index.ts'
 import type { SessionService } from '../sessions/index.ts'
 import type { SelfAwakeBridgeRepository } from './bridge-repository.ts'
+import { SelfAwakeRoleRepository } from './role-repository.ts'
 
 export const sessionWakeSubmission = z.object({ schema_version: z.literal('self-awake.v2'),
   user_id: z.union([z.string().min(1).max(128), z.number().int()]).transform(String), session_id: z.uuid(),
@@ -34,6 +35,8 @@ export class SessionWakeSubmissions {
     const session = this.sessions.repository.read(input.session_id)
     if (session.status !== 'active') throw new Error('Self-awake session is closed')
     if (session.participants.length !== 1) throw new Error('Session self-awake requires one explicitly selected participant')
+    const roles = new SelfAwakeRoleRepository(this.sessions.repository.database)
+    if (roles.target(input.session_id) !== input.session_id) return toJson({ accepted: true, retired: true, status: 'cancelled', session_id: input.session_id })
     const hash = createHash('sha256').update(JSON.stringify(input)).digest('hex')
     let job = this.repository.existing(input.user_id, input.idempotency_key, hash)
     if (job && job.sessionId !== input.session_id) throw new Error('Self-awake request belongs to another session')
@@ -41,7 +44,7 @@ export class SessionWakeSubmissions {
     if (!job) job = this.repository.coalesce(input.user_id, input.idempotency_key, hash, input.session_id)
     if (!job) job = this.repository.submit(input.user_id, input.idempotency_key, hash, {
       kind: 'self_awake', sessionId: input.session_id, dueAt: Date.now(),
-      payload: { schemaVersion: 'self-awake.v2', scheduler: 'monos', scheduleScope: 'session', userId: input.user_id,
+      payload: { schemaVersion: 'self-awake.v2', scheduler: 'monos', ...roles.payload(input.session_id), userId: input.user_id,
         eventId: input.event_id, trigger: input.context, prompt: '' },
       key: `self-awake:${input.user_id}:${input.session_id}:${input.idempotency_key}`, causationId: input.event_id, depth: 0,
     })

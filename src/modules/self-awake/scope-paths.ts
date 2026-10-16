@@ -7,9 +7,10 @@ export function selfAwakeScopeState(stateFile: string, sessionId: string): strin
 }
 
 /** Older MonOs must reject session-owned timers instead of accepting them into its global queue. */
-export function assertScopedScheduler(stateFile: string): void {
+export function assertScopedScheduler(stateFile: string, role = false): void {
   try {
     const value = JSON.parse(readFileSync(path.join(path.dirname(stateFile), 'session-protocol.json'), 'utf8'))
     if (value?.protocolVersion !== 2 || value?.sessionScopes !== true || !Number.isFinite(value.expiresAt) || value.expiresAt <= Date.now()) throw new Error('unsupported')
-  } catch { throw new Error('MonOs 尚未提供会话隔离调度协议，请先升级并启动匹配的 MonOs 服务') }
+    if (role && value.roleScopes !== true) throw new Error('unsupported role scopes')
+  } catch { throw new Error('MonOs 尚未提供匹配的会话/角色调度协议，请先升级并启动匹配的 MonOs 服务') }
 }

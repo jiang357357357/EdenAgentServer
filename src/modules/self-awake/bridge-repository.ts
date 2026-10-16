@@ -22,15 +22,29 @@ export class SelfAwakeBridgeRepository {
       const existing = this.existing(user, key, hash)
       if (existing) return existing
       const row = this.database.connection.prepare(`SELECT j.id FROM jobs j
-        JOIN self_awake_submissions s ON s.job_id=j.id LEFT JOIN self_awake_runs r ON r.job_id=j.id
-        WHERE s.user_id=? AND j.kind='self_awake'
+        LEFT JOIN self_awake_runs r ON r.job_id=j.id LEFT JOIN self_awake_submissions s ON s.job_id=j.id
+        WHERE j.kind='self_awake' AND (s.user_id=? OR (? IS NOT NULL AND s.user_id IS NULL))
           AND ((? IS NOT NULL AND j.session_id=?) OR (? IS NULL AND COALESCE(json_extract(j.payload_json,'$.scheduleScope'),'legacy')='legacy')) AND
           (j.state IN ('queued','running','dispatched','unknown') OR r.state IN ('running','awaiting_action','action_running','action_interrupted'))
-        ORDER BY j.created_at LIMIT 1`).get(user, sessionId ?? null, sessionId ?? null, sessionId ?? null)
+        ORDER BY j.created_at LIMIT 1`).get(user, sessionId ?? null, sessionId ?? null, sessionId ?? null, sessionId ?? null)
       if (!row) return undefined
-      this.database.connection.prepare('INSERT INTO self_awake_submission_aliases(user_id,request_key,request_hash,job_id) VALUES(?,?,?,?)')
-        .run(user, key, hash, row.id!)
-      return this.jobs.read(String(row.id))
+      return this.attach(user, key, hash, String(row.id))
+    })
+  }
+  attach(user: string, key: string, hash: string, jobId: string) {
+    const job = this.jobs.read(jobId)
+    const owner = this.database.connection.prepare('SELECT user_id FROM self_awake_submissions WHERE job_id=?').get(jobId)
+    if (owner && owner.user_id !== user) throw new Error('Self-awake plan owner mismatch')
+    const table = owner ? 'self_awake_submission_aliases' : 'self_awake_submissions'
+    this.database.connection.prepare(`INSERT INTO ${table}(user_id,request_key,request_hash,job_id) VALUES(?,?,?,?)`).run(user, key, hash, jobId)
+    return job
+  }
+  recent(user: string, key: string, hash: string, sessionId: string) {
+    return this.database.transaction(() => {
+      const row = this.database.connection.prepare(`SELECT j.id FROM jobs j JOIN self_awake_runs r ON r.job_id=j.id
+        JOIN self_awake_activations a ON a.run_id=r.id WHERE j.session_id=? AND j.state='completed' AND r.state='completed'
+        AND a.started_at>? ORDER BY a.started_at DESC LIMIT 1`).get(sessionId, Date.now() - 12 * 3600000)
+      return row ? this.attach(user, key, hash, String(row.id)) : undefined
     })
   }
   activate(user: string, key: string, hash: string, sessionId: string, jobId: string) {
@@ -46,7 +60,7 @@ export class SelfAwakeBridgeRepository {
       if (job.dueAt > Date.now() + 1000) throw new Error('Self-awake plan is not due')
       const payload = job.payload && typeof job.payload === 'object' && !Array.isArray(job.payload) ? job.payload : {}
       this.database.connection.prepare('UPDATE jobs SET payload_json=?,updated_at=? WHERE id=? AND state=\'queued\'')
-        .run(JSON.stringify({ ...payload, scheduler: 'monos', scheduleScope: 'session', userId: user }), Date.now(), jobId)
+        .run(JSON.stringify({ ...payload, scheduler: 'monos', scheduleScope: payload.roleScope ? 'role' : 'session', userId: user }), Date.now(), jobId)
       const owner = this.database.connection.prepare('SELECT user_id FROM self_awake_submissions WHERE job_id=?').get(jobId)
       if (owner && owner.user_id !== user) throw new Error('Self-awake plan owner mismatch')
       const table = owner ? 'self_awake_submission_aliases' : 'self_awake_submissions'

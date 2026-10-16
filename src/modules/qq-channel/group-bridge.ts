@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { attachmentRefsSchema, QQ_FILE_MAX_ATTACHMENTS } from '@eden/api'
 import { MonClient, acquireMonServiceToken } from '@eden/integrations'
 import type { MonServiceIdentity } from '@eden/integrations'
 import type { EdenDatabase } from '@eden/store'
@@ -9,10 +10,13 @@ import type { MonBindingService } from '../mon/index.ts'
 
 const qq = z.string().regex(/^\d{5,20}$/)
 const identityFields = { user_id: z.string(), bot_qq: qq, group_qq: qq, contact_qq: qq }
-const submitSchema = z.object({ ...identityFields, schema_version: z.literal('qq-group-turn.v1'),
+const submitSchema = z.object({ ...identityFields, schema_version: z.enum(['qq-group-turn.v1', 'qq-group-turn.v2']),
   message_id: z.string().min(1).max(128), text: z.string().trim().min(1).max(4000),
   assistant_id: z.number().int().positive(), character_id: z.number().int().positive(),
-  allow_actions: z.boolean().default(false) }).strict()
+  allow_actions: z.boolean().default(false), attachments: attachmentRefsSchema.max(QQ_FILE_MAX_ATTACHMENTS).default([]),
+  quoted_message_id: z.string().min(1).max(128).optional() }).strict().refine(input =>
+    input.attachments.length ? input.schema_version === 'qq-group-turn.v2' && Boolean(input.quoted_message_id)
+      : input.quoted_message_id === undefined, 'Group attachments require the v2 protocol and a quoted file message')
 const statusSchema = z.object({ ...identityFields, input_id: z.uuid(),
   after_seq: z.string().regex(/^\d+$/).default('0') }).strict()
 type GroupInput = z.infer<typeof submitSchema>
@@ -63,10 +67,22 @@ export class QqGroupBridge {
     this.database.connection.prepare('UPDATE qq_group_sessions SET allow_actions=? WHERE session_id=?')
       .run(Number(input.allow_actions), sessionId)
     const key = `qq-group:${input.bot_qq}:${input.group_qq}:${input.contact_qq}:${input.message_id}`
-    const old = this.database.connection.prepare('SELECT text FROM inputs WHERE session_id=? AND idempotency_key=?').get(sessionId, key)
-    if (old && old.text !== input.text) throw new Error('QQ group message ID was used with different content')
-    const accepted = withAccount(account, () => this.sessions.start(sessionId, input.text, key))
+    this.assertReplay(sessionId, key, input)
+    const accepted = await withAccount(account, () => input.attachments.length
+      ? this.sessions.startWithAttachments(sessionId, input.text, input.attachments, key)
+      : this.sessions.start(sessionId, input.text, key))
     return { accepted: true, session_id: sessionId, input_id: accepted.inputId, turn_id: accepted.turnId, status: accepted.state }
+  }
+
+  private assertReplay(sessionId: string, key: string, input: GroupInput): void {
+    const old = this.database.connection.prepare('SELECT text,metadata_json FROM inputs WHERE session_id=? AND idempotency_key=?')
+      .get(sessionId, key)
+    if (!old) return
+    const metadata = JSON.parse(String(old.metadata_json)) as { attachments?: { blobId: string; mime: string; filename?: string }[] }
+    const refs = (metadata.attachments ?? []).map(item => ({ blobId: item.blobId, mime: item.mime,
+      ...(item.filename ? { filename: item.filename } : {}) }))
+    if (old.text !== input.text || JSON.stringify(refs) !== JSON.stringify(input.attachments))
+      throw new Error('QQ group message ID was used with different content or attachments')
   }
 
   private async createSession(input: GroupInput): Promise<string> {

@@ -6,7 +6,7 @@ import { workspaceFile, workspaceRoot } from './workspace-path.ts'
 import { SEARCH_CONTENT_LIMIT, SEARCH_ENTRY_LIMIT, SEARCH_FILE_LIMIT } from './workspace-search-contracts.ts'
 import type { SearchRequest, SearchSnapshot, SearchStopReason } from './workspace-search-contracts.ts'
 
-const skipped = new Set(['.git', 'node_modules', 'dist', 'build', '.next'])
+const skipped = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.eden-shared-backups'])
 interface SearchState extends SearchSnapshot { pending: string[]; needle: string; limit: number }
 
 function limitReason(state: SearchState): SearchStopReason | undefined {

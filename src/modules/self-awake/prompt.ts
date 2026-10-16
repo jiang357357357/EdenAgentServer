@@ -20,8 +20,9 @@ export function selfAwakePromptContext(request: JsonValue) {
   const schedule = object(value.wakeSchedule)
   const scheduled = trigger.type === 'scheduled'
   return { current_time: value.current_time ?? null, trigger: scheduled ? activation : trigger,
+    ...(Array.isArray(value.merged_plans) && value.merged_plans.length ? { inheritedWakeNotes: value.merged_plans } : {}),
     environment: modelEnvironmentContext(value.environment), recent_conversation: value.recent_conversation ?? [], wakeSchedule: schedule ? { status: schedule.status ?? null, nextWakeAt: schedule.nextWakeAt ?? null, source: schedule.source ?? 'unknown',
-      ...(schedule.status === 'unavailable' ? { reason: schedule.reason ?? '自醒调度不可用' } : {}) } : null }
+      ...(schedule.status !== 'scheduled' ? { reason: schedule.reason ?? null } : {}) } : null }
 }
 
 export function selfAwakePrompt(request: JsonValue): string {

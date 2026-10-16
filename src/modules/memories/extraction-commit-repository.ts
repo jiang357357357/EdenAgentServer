@@ -43,7 +43,8 @@ export class MemoryExtractionCommitRepository {
       AND scope_key=? AND lower(content)=lower(?) ORDER BY id LIMIT 1`).get(owner, owner, job.scopeKey, candidate.content)
     if (existing) return Number(existing.id)
     const metadata = { source: 'automatic_extraction', sourceInputId: job.inputId, sourceAssistantId: job.actorId,
-      confidence: candidate.confidence, extractionJobId: job.id, approvalId }
+      confidence: candidate.confidence, extractionJobId: job.id, approvalId,
+      ...(candidate.basis ? { basis: candidate.basis } : {}), ...(candidate.action ? { action: candidate.action } : {}) }
     const now = Date.now()
     const result = this.database.connection.prepare(`INSERT INTO memories
       (content,kind,scope_type,scope_key,source_session_id,metadata_json,created_at,updated_at) VALUES (?,?,'agent_character',?,?,?,?,?)`)

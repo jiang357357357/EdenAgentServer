@@ -10,11 +10,23 @@ const filename = z.string().min(1).max(4096)
 const read = z.object({ path: filename, offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(4).max(262144).default(65536) }).strict()
 const write = z.object({ path: filename, content: z.string().max(1024 * 1024), createOnly: z.boolean().default(false) }).strict()
 const edit = z.object({ path: filename, oldText: z.string().min(1).max(1024 * 1024), newText: z.string().max(1024 * 1024) }).strict()
+const fileOperations = { delete_shared_file: z.object({ path: filename }).strict(),
+  rename_shared_file: z.object({ path: filename, destination: filename }).strict(),
+  restore_shared_file: z.object({ recoveryId: z.string().uuid() }).strict() }
 
 export function sharedLibraryFileTools(service: SharedWorkspaceService, permissions: PermissionService,
   sessionId: string, turnId: string, actorId?: string | number): RuntimeTool[] {
-  const files = new SharedLibraryFiles(service, permissions, sessionId, turnId, JSON.stringify([sessionId, turnId, actorId ?? null]))
+  const files = new SharedLibraryFiles(service, permissions, sessionId, turnId, JSON.stringify([sessionId, turnId, actorId ?? null]), JSON.stringify([sessionId, actorId ?? null]))
   return [
+    ...(Object.keys(fileOperations) as (keyof typeof fileOperations)[]).map(name => ({
+      name, revision: 'eden.shared-library.files.v1', executionMode: 'sequential' as const, description: toolDescription(name),
+      parameters: toJson(z.toJSONSchema(fileOperations[name], { io: 'input' })) as Record<string, import('@eden/api').JsonValue>,
+      async execute(raw: Record<string, unknown>, context: Parameters<RuntimeTool['execute']>[1]) {
+        const input = fileOperations[name].parse(raw)
+        return 'recoveryId' in input ? files.restore(input.recoveryId, context)
+          : files.change({ ...input, action: name === 'delete_shared_file' ? 'delete' : 'rename' }, context)
+      },
+    })),
     { name: 'read_shared_file', revision: 'eden.shared-library.read.v1', description: toolDescription('read_shared_file'),
       parameters: toJson(z.toJSONSchema(read, { io: 'input' })) as Record<string, import('@eden/api').JsonValue>,
       async execute(raw, context) { const input = read.parse(raw); return files.read(input.path, input.offset, input.limit, context.signal) } },

@@ -1,8 +1,7 @@
 import { constants } from 'node:fs'
 import { open, realpath } from 'node:fs/promises'
 import path from 'node:path'
-
-const maxBytes = 8 * 1024 * 1024
+import { QQ_FILE_MAX_BYTES } from '@eden/api'
 
 /** Read only after approval, checking both the selected path and the opened file. */
 export async function readQqWorkspaceFile(root: string, target: string): Promise<Buffer> {
@@ -14,9 +13,9 @@ export async function readQqWorkspaceFile(root: string, target: string): Promise
       if (!openedPath.startsWith(root + path.sep)) throw new Error('QQ file escaped the workspace')
     }
     const stat = await handle.stat()
-    if (!stat.isFile() || stat.size > maxBytes) throw new Error('QQ file must be a regular file of at most 8 MiB')
+    if (!stat.isFile() || stat.size > QQ_FILE_MAX_BYTES) throw new Error('QQ file must be a regular file of at most 100 MB')
     const bytes = await handle.readFile()
-    if (bytes.length !== stat.size || bytes.length > maxBytes) throw new Error('QQ file changed while reading')
+    if (bytes.length !== stat.size || bytes.length > QQ_FILE_MAX_BYTES) throw new Error('QQ file changed while reading')
     return bytes
   } finally { await handle.close() }
 }

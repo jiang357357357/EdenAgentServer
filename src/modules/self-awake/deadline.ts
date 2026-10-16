@@ -23,7 +23,10 @@ export function wakeDeadline(database: EdenDatabase, stateFile?: string, now = D
 
 function latestActivation(database: EdenDatabase, sessionId?: string) {
   const db = database.connection
-  const latest = sessionId ? db.prepare('SELECT started_at AS stamp FROM self_awake_activations WHERE session_id=? ORDER BY started_at DESC,run_id DESC LIMIT 1').get(sessionId)?.stamp
+  const latest = sessionId ? db.prepare(`SELECT started_at AS stamp FROM self_awake_activations WHERE session_id=?
+    OR session_id IN (SELECT member.session_id FROM self_awake_role_members member
+      JOIN self_awake_role_members target ON target.scope_key=member.scope_key WHERE target.session_id=?)
+    ORDER BY started_at DESC,run_id DESC LIMIT 1`).get(sessionId, sessionId)?.stamp
     : db.prepare('SELECT started_at AS stamp FROM self_awake_activations WHERE legacy_scope=1 ORDER BY started_at DESC,run_id DESC LIMIT 1').get()?.stamp
   return latest
 }

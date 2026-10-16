@@ -49,7 +49,9 @@ for (const allowed of [true, false]) {
       assert.equal(memories[0]?.content, 'User prefers tea')
       const messages = f.model.requests[2]!.messages as { role: string; content: string }[]
       const result = JSON.parse(messages.filter(message => message.role === 'tool').at(-1)!.content)
-      assert.equal(result[0].scopeKey, '7')
+      assert.equal(result[0].content, 'User prefers tea')
+      assert.equal('scopeKey' in result[0], false)
+      assert.equal('sourceSessionId' in result[0], false)
     }
   })
 }

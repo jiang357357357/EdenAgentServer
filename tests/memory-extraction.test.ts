@@ -67,16 +67,21 @@ test('a tool call from the extractor model is rejected rather than executed', as
   } finally { await model.close() }
 })
 
-test('cancellation interrupts an extraction already waiting on the model', { timeout: 10000 }, async () => {
+test('cancellation interrupts an extraction already waiting on the model', { timeout: 45000 }, async () => {
   const model = await recordedModel([{ wait: true }])
   const controller = new AbortController()
+  let rejected: Promise<void> | undefined
   try {
     const pending = extractMemoryCandidates({ model: model.config, userText: 'User', assistantText: 'Reply', signal: controller.signal, async record() {} })
-    const rejected = assert.rejects(pending, /cancelled extraction/)
-    const deadline = Date.now() + 5000
+    rejected = assert.rejects(pending, /cancelled extraction/)
+    const deadline = Date.now() + 30000
     while (!model.requests.length && Date.now() < deadline) await delay(10)
     assert.equal(model.requests.length, 1)
     controller.abort(new Error('cancelled extraction'))
     await rejected
-  } finally { controller.abort(); await model.close() }
+  } finally {
+    controller.abort(new Error('cancelled extraction'))
+    await rejected?.catch(() => {})
+    await model.close()
+  }
 })

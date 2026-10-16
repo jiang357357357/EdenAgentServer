@@ -10,7 +10,7 @@ import { PluginHookRepository, PluginHookService } from '../modules/plugin-hooks
 import { connectorPluginTools, PackageRecoveryRepository, PackageAssets, MarketRepository, MarketService, PackagePreviewRepository, InstalledPackageRepository } from '../modules/plugin-market/index.ts'
 import { SkillRepository, SkillService, SystemSkillCatalog, skillTools, builtinSkillSnapshots } from '../modules/skills/index.ts'
 import { DesktopReminderRepository, desktopReminderTools } from '../modules/notifications/index.ts'
-import { SelfAwakeRepository, SelfAwakeContext, SelfAwakeBridgeRepository, SelfAwakeBridge, SelfAwakeService, SelfAwakeActions, selfAwakeTools } from '../modules/self-awake/index.ts'
+import { SelfAwakeRepository, SelfAwakeContext, SelfAwakeBridgeRepository, SelfAwakeBridge, SelfAwakeService, SelfAwakeActions, SelfAwakeRoleSessions, selfAwakeTools } from '../modules/self-awake/index.ts'
 import { JobRepository, JobScheduler } from '../modules/jobs/index.ts'
 import { MemoRepository, memoTools, MemoNotifications, memoDispatcher, MemoJobRecovery } from '../modules/memos/index.ts'
 import { HandoffDispatcher, handoffTools } from '../modules/handoffs/index.ts'
@@ -28,15 +28,20 @@ import { ModelService, ModelBindingRepository, ModelPricingRepository, LocalChil
 import { MonBindingService } from '../modules/mon/index.ts'
 import { DirectorRunRepository, CompanionTurnCoordinator, CompanionSessionExtension } from '../modules/director/index.ts'
 import type { RuntimeTool } from '@eden/runtime-pi'
-import { toJson } from '@eden/api'
+import { toJson, QQ_FILE_MAX_BYTES } from '@eden/api'
 import { QuestionService, questionTool } from '../modules/questions/index.ts'
 import { BlobRepository, BlobService } from '../modules/blobs/index.ts'
+import { BrowserService, browserTools } from '../modules/browser/index.ts'
 import { AttachmentService, AttachmentRepository, attachmentTool } from '../modules/attachments/index.ts'
 import { MemoryRepository, MemoryScopes, MemoryRecall, memoryTools, MemoryExtractionService } from '../modules/memories/index.ts'
 import { WebResourceRepository, WebService, webTools } from '../modules/web/index.ts'
 import { QqChannelBridge } from '../modules/qq-channel/bridge.ts'
 import { qqFileTool } from '../modules/qq-channel/file-tool.ts'
 import { logDiagnostic } from '../modules/logging/index.ts'
+
+function storedBlobLimit(config: ServerConfig): number {
+  return Math.max(config.maxBlobBytes ?? 32 * 1024 * 1024, config.origin === 'mon' ? QQ_FILE_MAX_BYTES : 0)
+}
 
 export function createServices(database: EdenDatabase, config: ServerConfig) {
   const privateDataRoots = config.privateDataRoots ?? [config.dataRoot, path.resolve('Data')]
@@ -54,13 +59,15 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
   const repository = new SessionRepository(database, config.origin)
   const napcat = new NapcatClient(repository, config.monIdentity)
   const desktopReminders = new DesktopReminderRepository(repository)
-  const blobs = new BlobService(path.join(config.dataRoot, 'blobs'), new BlobRepository(database), config.maxBlobBytes)
+  const maxStoredBlobBytes = storedBlobLimit(config)
+  const blobs = new BlobService(path.join(config.dataRoot, 'blobs'), new BlobRepository(database), maxStoredBlobBytes)
+  const browser = new BrowserService(blobs)
   const mcpResults = new McpResults(database, blobs)
   const realtimeVoice = new RealtimeVoiceService(repository, voiceConfig, sessionId => mon.realtimeSttUrl(sessionId))
   const voice = new VoiceService(blobs)
   const speech = new SpeechService(new SpeechRepository(database), repository, voiceConfig, blobs, (input, signal) => mon.synthesizeSpeech(input, signal))
   const packageAssets = new PackageAssets(pluginMarket.installed, blobs)
-  const attachments = new AttachmentService(blobs)
+  const attachments = new AttachmentService(blobs, maxStoredBlobBytes)
   const media = new MediaService(repository, attachments)
   const attachmentRepository = new AttachmentRepository(database)
   const selfAwakeRepository = new SelfAwakeRepository(database, config.selfAwakeScheduleFile, config.origin === 'mon' && Boolean(config.monIdentity || config.selfAwakeScheduleFile))
@@ -120,7 +127,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
     ...connectorPluginTools(pluginMarket, permissions, sessionId, turnId),
     ...pluginTools(plugins, permissions, sessionId, turnId, actorId, sessionWorkspace(sessionId)), ...workspaceTools(sessionWorkspace(sessionId), permissions, sessionId, turnId, commands, subagentPolicy(database, sessionId)?.sandboxMode === 'workspace-write', actorId),
     ...desktopReminderTools(desktopReminders, permissions, sessionId, turnId),
-    ...selfAwakeTools(selfAwakeRepository, jobs, permissions, selfAwakeContext, sessionId, turnId),
+    ...selfAwakeTools(selfAwakeRepository, jobs, permissions, selfAwakeContext, sessionId, turnId, actorId, selfAwakeRoleSessions),
     questionTool(questions, sessionId, turnId), ...memoTools(memos, permissions, sessionId, turnId),
     attachmentTool(attachmentRepository, attachments, sessionId, turnId),
     ...(config.origin === 'mon' ? [sharedWorkspaceTool(sharedWorkspace, sessionId),
@@ -128,6 +135,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
     ...(config.origin === 'mon' ? [qqFileTool(repository, blobs, sessionWorkspace(sessionId), permissions, sessionId, turnId, mon)] : []),
     ...memoryTools(memories, memoryScopes, permissions, { sessionId, turnId, ...(actorId === undefined ? {} : { actorId }) }),
     ...webTools(web, permissions, sessionId, turnId),
+    ...browserTools(browser, permissions, sessionId, turnId),
     ...(config.origin === 'mon' ? [...contactTools(mon, permissions, sessionId, turnId),
       ...napcatTools(napcat, permissions, sessionId, turnId)] : []),
     ...(config.origin === 'mon' ? deviceTools(mon, permissions, sessionId, turnId) : []),
@@ -150,6 +158,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
   const sessions = new SessionService(repository, sessionId => models.resolve(sessionId), tools,
     sessionId => models.invalidateSession(sessionId), new CompanionSessionExtension(companion, models, tools), handoffs, attachments, memoryRecall)
   const mon: MonBindingService = new MonBindingService(models, sessions, config.monIdentity, config.account)
+  const selfAwakeRoleSessions = new SelfAwakeRoleSessions(sessions, mon)
   const selfAwakeBridge = config.monIdentity && config.origin === 'mon' ? new SelfAwakeBridge(config.monIdentity, new SelfAwakeBridgeRepository(database, jobs), sessions, mon) : undefined
   const qqChannelBridge = config.monIdentity && config.origin === 'mon'
     ? new QqChannelBridge(config.monIdentity, database, sessions, mon, permissions, blobs, attachments) : undefined
@@ -164,7 +173,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
   const pluginHooks = new PluginHookService(new PluginHookRepository(database, jobs), pluginMarket.installed, sessions, jobs)
   const memoJobRecovery = new MemoJobRecovery(database, memos, memoNotifications, jobs, sessions)
   const scheduler = new JobScheduler(jobs, { 'subagent.turn': job => subagents.dispatch(job), 'plugin.hook': job => pluginHooks.dispatch(job), self_awake: job => selfAwake.dispatch(job), 'memo.reminder': memoDispatcher(database, memos, memoNotifications, jobs, sessions), 'memo.reminder.redelivery': job => memoJobRecovery.dispatch(job) })
-  return { sharedWorkspace, memoJobRecovery, commands, repository, mcpResults, mcp, connectorCredentials, connectorLifecycle, connectorPermissions, connectorEvents, connectors, connectorCatalog, media, realtimeVoice, speech, voice, voiceConfig, subagentLifecycle, subagents, packageAssets, pluginHooks, pluginMarket, skills, plugins, permissions, sessions, workspace, models, mon, directors, companion, questions, handoffs, blobs, attachments, memories, memos, memoNotifications, jobs, scheduler, selfAwake, selfAwakeActions, selfAwakeBridge, qqChannelBridge, desktopReminders, memoryExtractions }
+  return { browser, sharedWorkspace, memoJobRecovery, commands, repository, mcpResults, mcp, connectorCredentials, connectorLifecycle, connectorPermissions, connectorEvents, connectors, connectorCatalog, media, realtimeVoice, speech, voice, voiceConfig, subagentLifecycle, subagents, packageAssets, pluginHooks, pluginMarket, skills, plugins, permissions, sessions, workspace, models, mon, directors, companion, questions, handoffs, blobs, attachments, memories, memos, memoNotifications, jobs, scheduler, selfAwake, selfAwakeActions, selfAwakeBridge, qqChannelBridge, desktopReminders, memoryExtractions }
 }
 
 function skillProfile(environment: unknown): string {
