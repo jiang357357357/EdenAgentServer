@@ -58,7 +58,7 @@ test('real group runtime exposes only scoped QQ tools and excludes private memor
   await services.sessions.waitForIdle(session.id)
   assert.equal(services.sessions.faultCount(), 0)
   const exposed = (model.requests[0]!.tools as { function: { name: string } }[]).map(tool => tool.function.name)
-  assert.deepEqual(exposed.sort(), ['execute_qq_action', 'list_qq_capabilities', 'read_qq_action'])
+  assert.deepEqual(exposed.sort(), ['execute_qq_action', 'list_qq_capabilities', 'read_attachment', 'read_qq_action'])
   assert.equal(search.mock.calls.length, 0)
   assert.match(JSON.stringify(model.requests[0]!.messages), /多人可见的 QQ 群聊/)
 })
