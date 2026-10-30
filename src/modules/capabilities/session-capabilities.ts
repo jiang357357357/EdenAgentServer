@@ -12,6 +12,7 @@ import { defaultTool } from './default-tools.ts'
 import { discoveryTools } from './discovery-tools.ts'
 import { resolveToolCall } from './call-resolution.ts'
 import { selectSkill, skillSelectionCurrent, availableSkillSummaries } from './skill-selection.ts'
+import { modelTool } from '../tool-results/index.ts'
 
 export interface CapabilityScope { sessionId: string; owner: string; profile: string; workspaceRoot: string; sourceChannel?: 'app' | 'qq' | 'internal' }
 
@@ -20,9 +21,13 @@ export interface CapabilityScope { sessionId: string; owner: string; profile: st
 const qqTools = new Set(['web_search', 'web_fetch', 'web_find', 'read_file', 'list_directory', 'search_files',
   'write_file', 'edit_file', 'exec_command', 'list_memos', 'create_reminder',
   'list_contact_channels', 'send_external_email', 'read_attachment', 'send_qq_file',
-  'list_qq_capabilities', 'list_qq_events', 'read_qq_action', 'execute_qq_action'])
+  'list_qq_capabilities', 'list_qq_events', 'read_qq_action', 'execute_qq_action',
+  'list_character_stickers', 'remember_character_sticker', 'send_character_sticker', 'delete_character_sticker'])
+for (const name of ['inspect_video', 'prepare_video', 'read_video_timeline', 'get_video_frames', 'get_video_frame_previews', 'delete_video_job', 'video_context_doctor']) qqTools.add(name)
 const qqReadTools = new Set(['web_find', 'read_file', 'list_directory', 'search_files', 'list_memos'])
-const qqGroupTools = new Set(['list_qq_capabilities', 'read_qq_action', 'execute_qq_action', 'read_attachment'])
+const qqGroupTools = new Set(['list_qq_capabilities', 'read_qq_action', 'execute_qq_action', 'read_attachment',
+  'list_character_stickers', 'remember_character_sticker', 'send_character_sticker'])
+for (const name of ['inspect_video', 'prepare_video', 'read_video_timeline', 'get_video_frames', 'get_video_frame_previews', 'delete_video_job', 'video_context_doctor']) qqGroupTools.add(name)
 
 export class SessionCapabilities {
   private readonly selections: SelectionRepository
@@ -38,15 +43,15 @@ export class SessionCapabilities {
     const scope = this.scope
     if (scope.sourceChannel === 'qq' && this.database.connection.prepare('SELECT 1 FROM qq_group_sessions WHERE session_id=?').get(scope.sessionId))
       return new ToolRegistry(this.definitions().filter(tool =>
-        (tool.source === undefined || tool.source === 'builtin') && qqGroupTools.has(tool.name)))
+        (tool.source === undefined || tool.source === 'builtin') && qqGroupTools.has(tool.name)).map(modelTool))
     if (scope.sourceChannel === 'qq') return new ToolRegistry(this.definitions().filter(tool =>
       (tool.source === undefined || tool.source === 'builtin') && qqTools.has(tool.name)).map(tool =>
       qqReadTools.has(tool.name) ? { ...tool, execute: async (input: Record<string, unknown>, context: Parameters<RuntimeTool['execute']>[1]) => {
         if (!this.approveQqRead) throw new Error('QQ tool approval is unavailable')
         await this.approveQqRead(tool, input, context)
         return tool.execute(input, context)
-      } } : tool))
-    const tools = [...this.definitions(), ...discoveryTools(this)].filter(tool => tool.name !== 'read_skill')
+      } } : tool).map(modelTool))
+    const tools = [...this.definitions(), ...discoveryTools(this)].filter(tool => tool.name !== 'read_skill').map(modelTool)
     return new ToolRegistry(filterSubagentTools(this.database, scope.sessionId, tools))
   }
 
@@ -72,22 +77,35 @@ export class SessionCapabilities {
   }
 
   tools(): RuntimeTool[] {
+    return this.registeredTools().filter(tool => tool.exposure === 'direct')
+  }
+
+  /** Execution registration is scoped by policy, independently of schema presentation. */
+  registeredTools(): RuntimeTool[] {
     const registry = this.registry()
-    const scope = this.scope
+    const scope = { ...this.scope }
     this.preload(registry)
     const visible = this.visible(registry)
     const stale = this.saved().some(item => item.enabled && !this.current(item, registry, scope))
     const hint = capabilityHint(availableSkillSummaries(this.skills, registry, scope.profile), stale)
     const directory = toolDirectoryHint(registry.tools.filter(tool => !visible.has(tool.identity!)))
-    return registry.tools.filter(tool => visible.has(tool.identity!)).map(tool => ({ ...tool, exposure: 'direct',
+    const assertScope = () => {
+      const current = this.scope
+      if (scope.sessionId !== current.sessionId || scope.owner !== current.owner || scope.profile !== current.profile
+        || scope.workspaceRoot !== current.workspaceRoot || scope.sourceChannel !== current.sourceChannel) throw new Error('Tool execution scope changed; refresh before calling')
+    }
+    return registry.tools.map(tool => ({ ...tool, exposure: visible.has(tool.identity!) ? 'direct' : 'deferred',
       ...(tool.name === 'list_skills' ? { promptHint: [hint, tool.promptHint].filter(Boolean).join('\n') } : {}),
       ...(tool.name === 'list_tools' ? { promptHint: [directory, tool.promptHint].filter(Boolean).join('\n') } : {}),
       resolveCall: input => {
+        assertScope()
         const latest = this.registry()
-        const resolved = resolveToolCall(tool, input, latest, this.visible(latest))
+        const resolved = resolveToolCall(tool, input, latest)
         return { ...resolved, tool: { ...resolved.tool, assertCurrent: () => {
+          assertScope()
           const current = this.registry()
-          resolveToolCall(resolved.tool, resolved.input, current, this.visible(current))
+          const latest = resolveToolCall(resolved.tool, resolved.input, current)
+          latest.tool.assertCurrent?.()
         } } }
       },
     }))

@@ -12,11 +12,12 @@ export async function capabilityFixture(filename = ':memory:', catalog?: SystemS
   const permissions = new PermissionService(database, sessions.events)
   permissions.setMode('takeover')
   let workspaceRoot = '', owner = '', profile = 'user_chat', extra: RuntimeTool[] = []
+  let sourceChannel: 'app' | 'qq' | 'internal' = 'app'
   let raw: () => RuntimeTool[] = () => []
   const skills: SkillRepository = new SkillRepository(database, () => workspaceRoot, undefined, () => ({ tools: raw().map(tool => tool.name), codeToolsAvailable: service.codeToolsAvailable }))
   const service: SkillService = new SkillService(skills, catalog)
   const capabilities = () => new SessionCapabilities(database, sessions.events, skills,
-    () => ({ sessionId: session.id, owner, profile, workspaceRoot }), raw)
+    () => ({ sessionId: session.id, owner, profile, workspaceRoot, sourceChannel }), raw)
   raw = () => [...skillTools(service, permissions, session.id, turnId, profile, () => capabilities().registry().tools.map(tool => tool.name), {
     load: (name, expected) => capabilities().loadSkill(name, expected), unload: name => capabilities().unloadSkill(name),
   }), ...extra]
@@ -35,11 +36,13 @@ export async function capabilityFixture(filename = ':memory:', catalog?: SystemS
   return { database, sessions, session, turnId, permissions, skills, service, capabilities, install,
     exposeEcho() { const scope = capabilities(); scope.loadTools(scope.discover({ query: 'echo_skill', offset: 0, limit: 20 }).tools) },
     setWorkspace(value: string) { workspaceRoot = value }, setOwner(value: string) { owner = value }, setProfile(value: string) { profile = value },
+    setChannel(value: 'app' | 'qq' | 'internal') { sourceChannel = value },
     setTools(value: RuntimeTool[]) { extra = value },
     async close() { await service.close(); database.close() },
   }
 }
 
 export function fixtureTool(name = 'special_action'): RuntimeTool {
-  return { name, revision: '1', description: '专业动作', parameters: { type: 'object', properties: {} }, async execute() { return { ok: true } } }
+  return { name, revision: '1', description: '专业动作', parameters: { type: 'object', properties: {} },
+    modelResult: value => value, async execute() { return { ok: true } } }
 }

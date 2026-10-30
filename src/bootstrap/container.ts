@@ -6,11 +6,16 @@ import { healthHandler } from "../transport/http/health.ts"
 import { acquireProcessLock } from "./process-lock.ts"
 import { persistToken, type ServerConfig } from "./config.ts"
 import { AccountRuntimes } from "./account-runtimes.ts"
+import { openOsRuntime } from './os-runtime.ts'
+import { osWakeTarget } from './os-wake-target.ts'
+import { startOsAccounts } from './os-account-startup.ts'
 
 export async function startServer(config: ServerConfig) {
   // Local's sole runtime owns its lock; Mon owns a parent lock plus one per-account storage lock.
   const release = config.origin === "mon" ? acquireProcessLock(config.dataRoot) : () => {}
   const runtimes = new AccountRuntimes(config)
+  let os: Awaited<ReturnType<typeof openOsRuntime>> | undefined
+  let accountsStartup: ReturnType<typeof startOsAccounts> | undefined
   if (config.origin === "local")
     try {
       await runtimes.start()
@@ -25,6 +30,7 @@ export async function startServer(config: ServerConfig) {
     sessionFaults: 0,
     memoryExtraction: true,
     accounts: runtimes.ready(),
+    localCapabilities: !os?.fault,
   }), config.workspaceId)
   const http = createServer((request, response) => {
     if (dispatch.handle(request, response)) return
@@ -33,6 +39,7 @@ export async function startServer(config: ServerConfig) {
   })
   const websocket = attachWebsocket(http, config, (token) => runtimes.resolve(token))
   try {
+    if (config.origin === 'mon' && config.os) os = await openOsRuntime(config.os, osWakeTarget(runtimes))
     await new Promise<void>((resolve, reject) => {
       http.once("error", reject)
       http.listen(config.port, config.host, () => {
@@ -43,8 +50,14 @@ export async function startServer(config: ServerConfig) {
     persistToken(config)
     // Mon's legacy account import can be large and synchronous. Keep its TCP health endpoint bound while it runs so
     // the process supervisor does not kill a valid, one-time migration after the normal startup grace period.
-    if (config.origin === "mon") await runtimes.start()
+    if (config.origin === "mon") {
+      if (config.os) accountsStartup = startOsAccounts(runtimes, config.coreBaseUrl ?? config.monIdentity?.coreBaseUrl ?? 'http://127.0.0.1:40011')
+      else await runtimes.start()
+    }
+    os?.start()
   } catch (error) {
+    await accountsStartup?.close()
+    await os?.close()
     websocket.close()
     await dispatch.close()
     await runtimes.close()
@@ -53,6 +66,7 @@ export async function startServer(config: ServerConfig) {
   }
   let closing: Promise<void> | undefined
   return {
+    get osPort() { return os?.port },
     port: (http.address() as AddressInfo).port,
     get sessions() {
       return runtimes.defaultRuntime().services.sessions
@@ -69,6 +83,8 @@ export async function startServer(config: ServerConfig) {
     close(): Promise<void> {
       closing ??= (async () => {
         for (const client of websocket.clients) client.terminate()
+        await accountsStartup?.close()
+        await os?.close()
         await dispatch.close()
         websocket.close()
         http.closeAllConnections()

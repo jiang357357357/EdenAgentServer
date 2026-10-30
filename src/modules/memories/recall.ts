@@ -1,7 +1,10 @@
 import type { MemoryRecord } from '@eden/api'
 import type { MemoryRepository } from './repository.ts'
 import type { MemoryScopes } from './scope.ts'
-import { MEMORY_RECALL_HEADING } from '../../model-prompts/memory.ts'
+import { MEMORY_RECALL_HEADING, MEMORY_RECALL_UNAVAILABLE } from '../../model-prompts/memory.ts'
+import { logDiagnostic } from '../logging/index.ts'
+import { validUntil } from './retrieval.ts'
+import type { MemoryRetriever } from './retrieval.ts'
 
 function fragments(query: string): string[] {
   const lower = Array.from(query).slice(0, 8192).join('').toLowerCase()
@@ -11,6 +14,7 @@ function fragments(query: string): string[] {
   return [...result]
 }
 
+/** Historical lexical baseline retained for comparison tests, not automatic recall. */
 export function selectMemories(candidates: readonly MemoryRecord[], query: string): MemoryRecord[] {
   const terms = fragments(query)
   const ranked = candidates.map(memory => {
@@ -33,14 +37,49 @@ export function selectMemories(candidates: readonly MemoryRecord[], query: strin
 }
 
 export class MemoryRecall {
-  constructor(private readonly repository: MemoryRepository, private readonly scopes: MemoryScopes) {}
+  constructor(private readonly repository: MemoryRepository, private readonly scopes: MemoryScopes, private readonly retrieve: MemoryRetriever) {}
 
-  prompt(sessionId: string, turnId: string, text: string, actorId?: string | number): string {
+  async prompt(sessionId: string, turnId: string, text: string, actorId?: string | number, signal?: AbortSignal): Promise<string> {
     const scope = this.scopes.optionalCurrent(sessionId, turnId, actorId)
-    if (!scope) return ''
-    const memories = selectMemories(this.repository.search(scope, '', 100), text)
+    if (!scope || !text.trim()) return ''
+    const candidates = this.repository.recallCandidates(scope).filter(memory => (validUntil(memory) ?? Infinity) > Date.now())
+    if (!candidates.length) return ''
+    let selected: { memory: MemoryRecord; excerpt?: string }[]
+    try {
+      const retrievalSignal = AbortSignal.any([AbortSignal.timeout(25000), ...(signal ? [signal] : [])])
+      const matches = await this.retrieve({ sessionId, scope, query: text, candidates, signal: retrievalSignal })
+      retrievalSignal.throwIfAborted()
+      const allowed = new Map(candidates.map(memory => [memory.id, memory]))
+      selected = matches.map(match => {
+        const memory = allowed.get(match.id)
+        if (!memory || !Number.isFinite(match.similarity) || (match.excerpt !== undefined && (!match.excerpt.trim() || !memory.content.includes(match.excerpt)))) throw new Error('Invalid memory selection')
+        allowed.delete(match.id)
+        return { memory, ...(match.excerpt ? { excerpt: match.excerpt } : {}) }
+      })
+    } catch (error) {
+      signal?.throwIfAborted()
+      logDiagnostic({ event: 'memory.recall.unavailable', message: '本轮长期记忆检索不可用，仅使用当前对话', errorName: error instanceof Error ? error.name : 'UnknownError' }, 'warn')
+      return MEMORY_RECALL_UNAVAILABLE
+    }
+    signal?.throwIfAborted()
+    const memories = budgetMemories(selected.flatMap(({ memory, excerpt }) => {
+      const current = this.repository.unchanged(scope, memory)
+      return current && (validUntil(current) ?? Infinity) > Date.now() ? [{ ...current, content: excerpt ?? current.content }] : []
+    }))
     if (!memories.length) return ''
     return MEMORY_RECALL_HEADING +
       JSON.stringify(memories.map(memory => ({ id: memory.id, kind: memory.kind, content: memory.content, provenance: { source: typeof memory.metadata === 'object' && memory.metadata !== null && !Array.isArray(memory.metadata) ? memory.metadata.source ?? 'historical_record' : 'historical_record', verification: 'unverified_history' }, createdAt: memory.createdAt, updatedAt: memory.updatedAt })))
   }
+}
+
+function budgetMemories(selected: MemoryRecord[]): MemoryRecord[] {
+  let remaining = 4000
+  return selected.slice(0, 5).flatMap(memory => {
+    const characters = Array.from(memory.content.replaceAll('\0', '').trim())
+    if (!characters.length || remaining <= 0) return []
+    const limit = Math.min(remaining, 1200)
+    const content = characters.length > limit ? characters.slice(0, limit - 1).join('') + '…' : characters.join('')
+    remaining -= Array.from(content).length
+    return [{ ...memory, content }]
+  })
 }

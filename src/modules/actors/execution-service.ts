@@ -44,9 +44,10 @@ export class ActorExecutionService {
       checkpoint: async snapshot => this.checkpoints.save(input.sessionId, assistantId, input.turnId, snapshot) })
     const checkpoint = this.checkpoints.read(input.sessionId, assistantId)
     const context = actorSystemContent(request.participant, input.metadata)
-    const memory = this.memoryRecall?.prompt(input.sessionId, input.turnId, input.text, assistantId) ?? ''
+    const memory = await this.memoryRecall?.prompt(input.sessionId, input.turnId, input.text, assistantId, signal) ?? ''
+    signal.throwIfAborted()
     const runtime = createRuntime({ sessionId: input.sessionId, model: request.model, tools: request.tools, ...(request.refreshTools ? { refreshTools: request.refreshTools } : {}),
-      systemPrompt: context.prompt + memory,
+      systemPrompt: context.prompt, turnContext: memory,
       contextSources: toJson([...context.sources, { kind: 'memory', title: '召回记忆', content: memory }]) as JsonValue[],
       toolCallPrefix: `${plan.planID}:${beatIndex}:`, ...(checkpoint ? { checkpoint } : {}),
       callbacks: { ...callbacks, event: async (kind, payload, delivery) => callbacks.event(kind, actorMessage(payload, request.participant, plan, beatIndex), delivery) },

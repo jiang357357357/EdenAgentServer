@@ -1,8 +1,25 @@
-import { SELF_AWAKE_DIARY_CLOCK } from './self-awake.ts'
+import { SELF_AWAKE_DIARY_CLOCK, SELF_AWAKE_CONTACT } from './self-awake.ts'
 import { sharedWorkspaceUsage } from './shared-workspace.ts'
+import { STICKER_GUIDE } from './stickers.ts'
+import { VIDEO_GUIDE } from './video.ts'
+import { CUA_SKILL_GUIDE, CUA_SKILL_TOOLS } from './cua-skill.ts'
 
 /** Instruction content only: execution schemas and permissions belong to their tools. */
 export const BUILTIN_SKILL_GUIDES = [
+  {
+    name: 'cua-computer-use', description: '用内置 Cua 操作本机 Windows 应用和已登录浏览器，按观察结果定位、输入并核验；相关剪贴板、录制和驱动配置按任务需要使用。',
+    tools: CUA_SKILL_TOOLS, profiles: ['user_chat', 'subagent'], content: CUA_SKILL_GUIDE,
+  },
+  {
+    name: 'video-context', description: '理解视频附件、本地视频及 YouTube：关键帧、语音转写、时间线和精确选帧。',
+    tools: ['inspect_video', 'prepare_video', 'read_video_timeline', 'get_video_frames', 'get_video_frame_previews', 'delete_video_job', 'video_context_doctor'],
+    profiles: ['user_chat', 'self_awake', 'subagent'], content: VIDEO_GUIDE,
+  },
+  {
+    name: 'character-stickers', description: '查询、发送和收藏当前角色的表情包，可寻找图片链接补充素材，支持 App 与 QQ。',
+    tools: ['list_character_stickers', 'remember_character_sticker', 'send_character_sticker', 'delete_character_sticker'],
+    profiles: ['user_chat'], content: STICKER_GUIDE,
+  },
   {
     name: 'eden-browser', description: '检查本地或公开网页的实际渲染、DOM、页面错误与截图。',
     tools: ['browser_inspect'], profiles: ['user_chat', 'self_awake', 'subagent'],
@@ -58,14 +75,15 @@ selector 可定位元素，waitMs 可等待短时间的异步绘制。截图来�
       'list_esp32_devices', 'control_esp32_device', 'get_esp32_command_status'], profiles: ['user_chat', 'self_awake'],
     content: `# 主动联系
 想起共同话题、有发现想分享、想问近况或邀请用户一起做点事，都可以成为联系的理由，无需包装成任务汇报。结合当前角色自然开口，也可以暂时安静。
-需要接上聊天时，read_qq_messages 查看 QQ 最近十轮，read_recent_conversation 查看最新会话最近三轮。联系渠道用 list_contact_channels，邮件用 send_external_email。短聊优先 QQ，长信可用邮件，设备需先发现在线设备与声明能力，再选择消息卡片、短提示或合适的来电。
+主动聊天不包括当前 App，不向 App 会话主动追加消息。联系时遵循用户的渠道与时段偏好；QQ 用 send_qq_message，邮件用 send_external_email，先用 list_contact_channels 核对渠道状态。没有可用渠道时可以先保留想法。
+需要接上聊天时，read_qq_messages 查看 QQ 最近十轮，read_recent_conversation 查看最新会话最近三轮。设备需先发现在线设备与声明能力，再选择消息卡片、短提示或合适的来电。
 一次选一个合适渠道；相同话题近期已发送且无新回复时留出空间，避免跨渠道追问。接受、送达、已读和回复是不同事实，结果未知先查询，明确失败后再判断是否换渠道。
 用户要求向自己的 QQ 发工作区文件时，使用 send_qq_file 的相对路径；App 会话也可使用，默认机器人与接收者由 Core 配置确定。不要改用要求公网 URL 的 upload_private_file，也不要猜测 bot_id、服务器文件路径或把文件内容塞进文字消息。
 邮件与设备当前没有回复正文读取接口，保留未知；设备命令可查询执行/接听状态。遵循用户的渠道与时段偏好。`,
   },
   {
-    name: 'eden-self-awake', description: '写日记与设置唤醒时钟。',
+    name: 'eden-self-awake', description: '醒来后回想近期交流，判断是否主动联系，写个人日记并设置下次自醒。',
     tools: ['write_diary', 'get_self_awake_context', 'set_self_awake_timer'], profiles: ['self_awake'],
-    content: SELF_AWAKE_DIARY_CLOCK,
+    content: `${SELF_AWAKE_CONTACT}\n${SELF_AWAKE_DIARY_CLOCK}`,
   },
 ] as const

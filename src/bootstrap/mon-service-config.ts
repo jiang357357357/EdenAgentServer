@@ -8,6 +8,7 @@ import { workspaceSchedulerStateFile } from './mon-scheduler-path.ts'
 const filePath = z.string().trim().min(1).max(4096)
 const configSchema = z.object({ deploymentRoot: filePath.optional(), authFile: filePath, coreBaseUrl: modelEndpointSchema,
   scheduleStateFile: filePath.optional() }).strict()
+interface MonConfigResult { env: NodeJS.ProcessEnv; scheduleStateFile?: string | undefined; externalDeployment?: boolean }
 
 function readable(filename: string, configFile: string, field: string) {
   try { accessSync(filename, constants.R_OK); if (!statSync(filename).isFile()) throw new Error('not a file') }
@@ -31,7 +32,7 @@ function environmentScheduleStateFile(env: NodeJS.ProcessEnv): string | undefine
 }
 
 /** Explicit realm-local references avoid choosing a different installed Mon account. */
-export function monServiceConfig(origin: 'mon' | 'local', dataRoot: string, env: NodeJS.ProcessEnv, workspaceRoot?: string): { env: NodeJS.ProcessEnv; scheduleStateFile?: string | undefined } {
+export function monServiceConfig(origin: 'mon' | 'local', dataRoot: string, env: NodeJS.ProcessEnv, workspaceRoot?: string): MonConfigResult {
   if (origin !== 'mon') return { env }
   // Explicit environment credentials and the explicit MonOs state path belong to one deployment;
   // do not combine them with a possibly stale mon-service.json binding.
@@ -55,7 +56,7 @@ export function monServiceConfig(origin: 'mon' | 'local', dataRoot: string, env:
   const sameWorkspace = workspaceAuth && path.relative(workspaceAuth, authFile) === ''
   const scheduleStateFile = explicitStateFile ?? (sameWorkspace ? workspaceSchedulerStateFile(workspaceRoot, env) : undefined)
   return { env: identityEnvironment(authFile, config.coreBaseUrl, env),
-    scheduleStateFile }
+    scheduleStateFile, externalDeployment: !sameWorkspace }
 }
 
 function workspaceServiceConfig(workspaceRoot: string | undefined, env: NodeJS.ProcessEnv): { env: NodeJS.ProcessEnv; scheduleStateFile?: string | undefined } {
@@ -65,6 +66,10 @@ function workspaceServiceConfig(workspaceRoot: string | undefined, env: NodeJS.P
     throw new Error('Mon 服务认证必须来自已锚定的当前工作区')
   const authFile = path.join(root, 'Config', 'ENV', 'service-auth.env')
   if (!existsSync(authFile)) return { env }
+  // Fresh installations generate a secret before a user exists. Keep ordinary
+  // Core/Agent startup available until the owner explicitly binds an account.
+  const initial = parseEnv(readFileSync(authFile, 'utf8'))
+  if (initial.MON_SERVICE_SHARED_SECRET?.trim() && !initial.MON_SERVICE_USER_ID?.trim()) return { env }
   const scheduleStateFile = environmentScheduleStateFile(env) ?? workspaceSchedulerStateFile(root, env)
   return { env: identityEnvironment(authFile, env.MON_CORE_BASE_URL ?? 'http://127.0.0.1:40011', env),
     ...(scheduleStateFile ? { scheduleStateFile } : {}) }

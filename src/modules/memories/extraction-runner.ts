@@ -54,7 +54,7 @@ export class MemoryExtractionRunner {
     const claimed = this.jobs.claim(job.id)
     if (!claimed) throw new Error('Memory extraction could not be claimed')
     try {
-      const candidates = await extractMemoryCandidates({ model, userText: claimed.userText, assistantText: claimed.assistantText,
+      const candidates = await extractMemoryCandidates({ model, ...this.jobs.modelSource(claimed),
         actionEvidence: this.jobs.actionEvidence(claimed), signal, record: snapshot => this.execution.record(claimed, snapshot) })
       signal.throwIfAborted()
       return this.jobs.saveCandidates(job.id, candidates)

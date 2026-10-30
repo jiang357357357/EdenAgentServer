@@ -18,8 +18,8 @@ test('actual model requests receive summaries before reading, full instructions 
   const model = await recordedModel([{ tool: 'list_skills', input: {} },
     { tool: 'load_skill', input: { name: 'echo-skill' } }, { text: '已读取说明' }, { text: '目录已更新' }])
   t.after(() => model.close())
-  const runtime = createRuntime({ sessionId: f.session.id, systemPrompt: '', model: model.config, tools: f.capabilities().tools(),
-    refreshTools: () => f.capabilities().tools(), callbacks: callbacks().handlers })
+  const runtime = createRuntime({ sessionId: f.session.id, systemPrompt: '', model: model.config, tools: f.capabilities().registeredTools(),
+    refreshTools: () => f.capabilities().registeredTools(), callbacks: callbacks().handlers })
   await runtime.prompt('读取回显流程。')
   assert.match(system(model.requests[0]!), /echo-skill/)
   assert.match(system(model.requests[0]!), /unavailable_workflow_tool/)

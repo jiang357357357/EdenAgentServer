@@ -1,0 +1,99 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "video-understanding-mcp"
+version = "0.1.0"
+description = "A secure local MCP server that turns videos into aligned transcript and frame resources."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { file = "LICENSE" }
+authors = [{ name = "VideoContext MCP contributors" }]
+keywords = ["mcp", "video", "youtube", "whisper", "ffmpeg", "local-first"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+  "faster-whisper>=1.2.0,<2",
+  # Pinned because top-level extra=forbid currently requires a tested FastMCP 1.28.1 hook.
+  "mcp[cli]==1.28.1",
+  "pillow>=11.3,<13",
+  "platformdirs>=4.3,<5",
+  "psutil>=7.0,<8",
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.10,<3",
+  "structlog>=25.4,<26",
+  "yt-dlp>=2026.6.25,<2027",
+]
+
+[project.urls]
+Homepage = "https://github.com/sakshamjain2301/videocontext-mcp"
+Repository = "https://github.com/sakshamjain2301/videocontext-mcp"
+Issues = "https://github.com/sakshamjain2301/videocontext-mcp/issues"
+Security = "https://github.com/sakshamjain2301/videocontext-mcp/security/policy"
+
+[project.optional-dependencies]
+dev = [
+  "bandit[toml]>=1.8.6,<2",
+  "mypy>=1.17,<2",
+  "pip-audit>=2.9,<3",
+  "pytest>=8.4,<10",
+  "pytest-asyncio>=1.1,<2",
+  "pytest-cov>=6.2,<8",
+  "ruff>=0.12,<1",
+  "types-psutil>=7.0,<8",
+  "types-yt-dlp>=2026.3.17.20260716,<2027",
+]
+
+[project.scripts]
+video-mcp = "video_understanding_mcp.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/video_understanding_mcp"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "S", "ASYNC", "RUF"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/video_understanding_mcp/schemas.py" = ["S105"]
+"tests/**/*.py" = ["S101", "S105", "S108", "S603"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+  "integration: requires local FFmpeg/FFprobe binaries",
+  "mcp: exercises MCP tool/resource registration",
+  "live_youtube: requires explicit network opt-in",
+  "real_whisper: requires explicit installed-model opt-in",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["video_understanding_mcp"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+skips = ["B101"]

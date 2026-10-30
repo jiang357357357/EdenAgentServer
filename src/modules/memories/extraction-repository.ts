@@ -6,6 +6,7 @@ import { extractionActionEvidence } from './extraction-evidence.ts'
 import { parseMemoryCandidates } from './extraction.ts'
 import type { MemoryCandidate } from './extraction.ts'
 import { jsonValue } from '@eden/api'
+import { modelAssistantText } from '../tool-results/index.ts'
 
 const jobSchema = z.object({
   id: z.uuid(), inputId: z.uuid(), sessionId: z.uuid(), turnId: z.uuid(), actorId: z.string(), scopeKey: z.string().min(1),
@@ -21,6 +22,9 @@ function pageBounds(after: string, limit: number): void {
 
 export class MemoryExtractionRepository {
   constructor(private readonly database: EdenDatabase) {}
+  modelSource(job: MemoryExtractionJob) {
+    return { userText: job.userText, assistantText: modelAssistantText(this.database, job.sessionId, job.assistantText, job.turnId) }
+  }
 
   schedule(inputId: string, actorId?: string | number): MemoryExtractionJob | undefined {
     return this.database.transaction(() => this.scheduleSource(extractionSource(this.database, inputId, actorId)))

@@ -4,6 +4,8 @@ export interface SessionSummary {
   id: string
   title: string
   archived: boolean
+  pinned: boolean
+  pinUpdatedAt: number
   contextTokens?: number
   tokenBreakdown?: JsonValue
   titleSource: string

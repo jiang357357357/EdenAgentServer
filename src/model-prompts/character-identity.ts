@@ -13,6 +13,20 @@ export function characterIdentity(participant: JsonValue): string {
 export function identityPrompt(identity: string, rules: string, context: JsonValue): string {
   return `${identity ? identity + '\n\n' : ''}${rules}\n${JSON.stringify(context)}`
 }
+
+/** Identity is already present as system prose; keep only descriptive fields in JSON. */
+export function characterContext(participant: JsonValue): JsonValue {
+  const value = object(participant), profile = object(value.profile)
+  const withoutPrompt = (source: Record<string, JsonValue>) => {
+    const { system_prompt: _snake, systemPrompt: _camel, ...rest } = source
+    return rest
+  }
+  return { ...value,
+    ...(value.profile ? { profile: { ...withoutPrompt(profile),
+      ...(profile.character ? { character: withoutPrompt(object(profile.character)) } : {}) } } : {}),
+    ...(value.character ? { character: withoutPrompt(object(value.character)) } : {}),
+  }
+}
 function object(value: JsonValue | undefined): Record<string, JsonValue> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
 }

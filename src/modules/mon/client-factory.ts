@@ -40,7 +40,7 @@ export class MonClientFactory {
     db.prepare(`INSERT INTO mon_service_credentials VALUES(?,?,?) ON CONFLICT(session_id)
       DO UPDATE SET core_base_url=excluded.core_base_url,enabled=excluded.enabled`).run(sessionId, connection.coreBaseUrl, Number(service))
   }
-  create(sessionId: string, connection: MonConnection): MonClient {
+  create(sessionId: string, connection: MonConnection, credentialUpdated?: (token: string) => void): MonClient {
     migrateDestination(this.sessions.database, sessionId, connection)
     const db = this.sessions.database.connection
     const service = db.prepare('SELECT core_base_url FROM mon_service_credentials WHERE session_id=? AND enabled=1').get(sessionId)
@@ -51,7 +51,7 @@ export class MonClientFactory {
         const current = db.prepare(`SELECT c.core_token FROM mon_connections c JOIN mon_service_credentials s ON s.session_id=c.session_id
           WHERE c.session_id=? AND c.core_base_url=? AND s.enabled=1`).get(sessionId, connection.coreBaseUrl)
         if (!current || (current.core_token !== expectedToken && current.core_token !== token)) throw new Error('Core credential binding changed during renewal')
-        if (expectedToken === token) return token
+        if (expectedToken === token) { credentialUpdated?.(token); return token }
         // Compare and swap: a browser rebind while renewal was in flight must win.
         this.sessions.database.transaction(() => {
           const changed = db.prepare(`UPDATE mon_connections SET core_token=?,updated_at=? WHERE session_id=? AND core_token=? AND core_base_url=?
@@ -60,6 +60,7 @@ export class MonClientFactory {
           if (changed.changes) this.renewed(sessionId, connection.coreBaseUrl, expectedToken, token)
         })
         expectedToken = token
+        credentialUpdated?.(token)
         return token
       },
     } : undefined

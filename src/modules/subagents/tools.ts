@@ -51,5 +51,5 @@ export function subagentTools(service: SubagentService, permissions: PermissionS
         return toJson(action === 'send_message' ? service.send(input.agentId, message, sessionId, `${turnId}:${context.callId}`) : service.followup(input.agentId, message, `${turnId}:${context.callId}`))
       } })
   }
-  return tools
+  return tools.map(tool => ({ ...tool, modelResult: value => service.modelResult(value) }))
 }

@@ -13,13 +13,14 @@ import { AccountRuntimes } from '../../../src/bootstrap/account-runtimes.ts'
 import { attachWebsocket } from '../../../src/transport/websocket/upgrade.ts'
 import { createSharedLanRuntime, createSharedWorkspaceClient } from '@eden/shared-workspace'
 import { exerciseSharedModelQueries } from './model-query-runtime.ts'
+import { exerciseCloudHostRpc } from './cloud-host-rpc.ts'
 
 for (const publisher of [true, false]) test(`authenticated ${publisher ? 'publisher with DLC' : 'receiver without installed DLC'} RPC pairs, syncs without Core file APIs and suspends on logout`, async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'eden-shared-rpc-'))
   const dlc = path.join(directory, 'DLC', 'SharedWorkspace')
   await mkdir(path.join(directory, '.run', 'dlc'), { recursive: true })
-  await writeFile(path.join(directory, '.monconfig'), '')
-  await writeFile(path.join(directory, '.monworkspace'), '')
+  await writeFile(path.join(directory, '.monconfig'), '{}')
+  await writeFile(path.join(directory, '.monworkspace'), '{}')
   if (publisher) {
     await cp(fileURLToPath(new URL('../../../../../DLC/SharedWorkspace', import.meta.url)), dlc, { recursive: true })
     await writeFile(path.join(directory, '.run', 'dlc', 'state.json'), '{"enabled":{"shared-workspace":true}}')
@@ -102,6 +103,11 @@ for (const publisher of [true, false]) test(`authenticated ${publisher ? 'publis
     await writeFile(path.join(peerRoot, 'lan.txt'), 'peer edit'); await peerClient.sync(); await rpc(client, 'sharedWorkspace.sync', scope)
     assert.equal(await readFile(path.join(scope.expectedWorkspacePath, 'lan.txt'), 'utf8'), 'peer edit')
     await exerciseSharedModelQueries(runtime.services, scope.sessionId)
+    if (publisher) await exerciseCloudHostRpc((method, input) => rpc(client!, method, input), runtime.config.dataRoot, directory, scope, peer)
+    else {
+      await assert.rejects(rpc(client, 'sharedWorkspace.exportHost', scope), /DLC/)
+      await assert.rejects(rpc(client, 'sharedWorkspace.sshProbe', { ...scope, target: { host: '127.0.0.1', port: 9, username: 'fixture' } }), /DLC/)
+    }
     assert.equal(runtime.services.workspace.forSession(sessionId).root(), projectRoot)
     await assert.rejects(access(path.join(projectRoot, 'skill-written.txt')), error => (error as NodeJS.ErrnoException).code === 'ENOENT')
     assert.ok(observed.length > 0); assert.ok(observed.every(value => value === '/api/users/me/profile/'), 'Core is used only for local login identity')

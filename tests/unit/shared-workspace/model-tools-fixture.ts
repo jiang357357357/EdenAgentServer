@@ -48,7 +48,7 @@ export function sharedModelFixture(t: TestContext) {
       return client
     },
   })
-  service.selectDirectory(a.id, first, '0')
+  service.selectDirectory(a.id, first, service.directorySnapshot().revision)
   const detach = service.attach(async () => ({ accountKey: account.key, coreBaseUrl: account.coreBaseUrl, token: 'fixture-private-token' }))
   const tools = (sessionId = a.id) => [sharedWorkspaceTool(service, sessionId)]
   const call = (action: 'status' | 'spaces' | 'files', input: Record<string, unknown> = {}, sessionId = a.id, signal = new AbortController().signal) =>

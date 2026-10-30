@@ -9,9 +9,10 @@ import { SessionEvents } from './session-events.ts'
 import { latestMetadataEvent } from './session-metadata-query.ts'
 import { readReplyTimer } from './reply-timer-query.ts'
 import { sessionStorage } from './session-storage.ts'
-import { privateQqCheckpoint, privateMemoryCheckpoint } from '../tool-results/index.ts'
+import { privateToolCheckpoint, privateToolHistoryEntries, modelHistoryReceipts, privateMemoryCheckpoint, recoverCheckpointMedia, checkpointImageReceipts } from '../tool-results/index.ts'
 import { MemoryRepository } from '../memories/index.ts'
 import { SessionContextDeletion } from './history/context-deletion.ts'
+import { assertCheckpointImages } from '@eden/runtime-pi'
 
 interface SessionMetadata {
   participants: JsonValue[]
@@ -53,8 +54,10 @@ export class SessionRepository {
 
   read(id: string): SessionSummary {
     this.ownership.assert(id)
-    const row = this.database.connection.prepare(`SELECT s.*,c.purpose,c.source_channel,(a.session_id IS NOT NULL) AS archived FROM sessions s
+    const row = this.database.connection.prepare(`SELECT s.*,c.purpose,c.source_channel,(a.session_id IS NOT NULL) AS archived,
+      COALESCE(p.pinned,0) AS pinned,COALESCE(p.updated_at,0) AS pin_updated_at FROM sessions s
       JOIN session_classification c ON c.session_id=s.id LEFT JOIN session_archives a ON a.session_id=s.id
+      LEFT JOIN session_pins p ON p.session_id=s.id
       WHERE s.id=? AND s.origin=? AND s.status!='deleted'`).get(id, this.origin)
     if (!row) throw new Error('Session not found')
     const metadata = this.metadata(id, Number(row.created_at))
@@ -67,6 +70,7 @@ export class SessionRepository {
       status: row.status === 'closed' ? 'closed' : 'active', executionStatus: runningInput ? 'busy' : 'idle',
       runtimeOrigin: runtimeOriginSchema.parse(row.origin),
       archived: row.archived === 1,
+      pinned: row.pinned === 1, pinUpdatedAt: Number(row.pin_updated_at),
       purpose: sessionPurposeSchema.parse(row.purpose), sourceChannel: sessionSourceChannelSchema.parse(row.source_channel),
       participants: metadata.participants, environment: metadata.environment,
       createdAt: Number(row.created_at), updatedAt: Number(row.updated_at),
@@ -126,11 +130,12 @@ export class SessionRepository {
     const defaultApp = !includeBackground && !purpose && !sourceChannel
     return this.database.connection.prepare(`SELECT s.id FROM sessions s JOIN session_classification c ON c.session_id=s.id
       LEFT JOIN session_archives a ON a.session_id=s.id
+      LEFT JOIN session_pins p ON p.session_id=s.id
       WHERE ${accountFilter(this.database, 's.id')} AND s.origin=? AND s.status!='deleted' AND (? OR s.status='active')
       AND (? IS NULL OR c.purpose=?) AND (? IS NULL OR c.source_channel=?)
       AND (?=0 OR (c.purpose='user_chat' AND c.source_channel='app'))
       AND (? IS NULL OR (a.session_id IS NOT NULL)=?)
-      ORDER BY s.updated_at DESC LIMIT ?`)
+      ORDER BY COALESCE(p.pinned,0) DESC,CASE WHEN p.pinned=1 THEN p.updated_at ELSE 0 END DESC,s.updated_at DESC,s.id LIMIT ?`)
       .all(this.origin, Number(includeClosed), purpose ?? null, purpose ?? null, sourceChannel ?? null, sourceChannel ?? null,
         Number(defaultApp), archived === undefined ? null : Number(archived), archived === undefined ? null : Number(archived),
         Math.min(limit, 1000)).map(row => String(row.id))
@@ -153,6 +158,21 @@ export class SessionRepository {
       return this.events.insert(id, null, 'session.archive_updated', { archived })
     })
     this.events.publish(event)
+    return this.read(id)
+  }
+
+  setPinned(id: string, pinned: boolean): SessionSummary {
+    this.readMetadata(id)
+    const event = this.database.transaction(() => {
+      const current = this.database.connection.prepare('SELECT pinned,updated_at FROM session_pins WHERE session_id=?').get(id)
+      if (Boolean(current?.pinned) === pinned) return undefined
+      const pinUpdatedAt = Math.max(Date.now(), Number(current?.updated_at ?? 0) + 1)
+      this.database.connection.prepare(`INSERT INTO session_pins(session_id,pinned,updated_at) VALUES(?,?,?)
+        ON CONFLICT(session_id) DO UPDATE SET pinned=excluded.pinned,updated_at=excluded.updated_at`)
+        .run(id, Number(pinned), pinUpdatedAt)
+      return this.events.insert(id, null, 'session.pin_updated', { pinned, pinUpdatedAt })
+    })
+    if (event) this.events.publish(event)
     return this.read(id)
   }
 
@@ -225,7 +245,7 @@ export class SessionRepository {
     return sessionStorage('会话检查点读取失败', () => {
       const row = this.database.connection.prepare('SELECT checkpoint_json FROM runtime_checkpoints WHERE session_id=?').get(sessionId)
       const checkpoint = row ? runtimeCheckpointSchema.parse(JSON.parse(String(row.checkpoint_json))) : undefined
-      return checkpoint ? privateQqCheckpoint(this.modelCheckpoint(checkpoint)) : undefined
+      return checkpoint ? this.restoreModelCheckpoint(checkpoint) : undefined
     })
   }
 
@@ -235,8 +255,22 @@ export class SessionRepository {
 
   modelCheckpoint(snapshot: RuntimeCheckpoint, actorId?: string): RuntimeCheckpoint {
     this.assertContextReady(snapshot.sessionId)
-    return privateMemoryCheckpoint(new SessionContextDeletion(this.database).project(runtimeCheckpointSchema.parse(snapshot), actorId),
-      new MemoryRepository(this.database).credentialValues())
+    const checkpoint = privateToolCheckpoint(privateMemoryCheckpoint(new SessionContextDeletion(this.database).project(runtimeCheckpointSchema.parse(snapshot), actorId),
+      new MemoryRepository(this.database).credentialValues()))
+    assertCheckpointImages(checkpoint)
+    return checkpoint
+  }
+
+  restoreModelCheckpoint(snapshot: RuntimeCheckpoint, actorId?: string): RuntimeCheckpoint {
+    this.assertContextReady(snapshot.sessionId)
+    const receipts = modelHistoryReceipts(this.database, snapshot.sessionId)
+    const images = checkpointImageReceipts(this.database, snapshot, receipts)
+    return this.modelCheckpoint(privateToolCheckpoint(recoverCheckpointMedia(snapshot, images), receipts, true), actorId)
+  }
+
+  modelHistory(payloads: JsonValue[], sessionId: string): JsonValue[] {
+    this.assertContextReady(sessionId)
+    return privateToolHistoryEntries(payloads, modelHistoryReceipts(this.database, sessionId))
   }
 
   saveCheckpoint(snapshot: RuntimeCheckpoint, turnId: string): void {

@@ -10,7 +10,10 @@ import { normalizeWakeOwnership } from './wake-ownership.ts'
 
 /** Jobs dispatch durable inputs/notifications only. External effects belong to turn operation ledgers. */
 export class JobRepository {
-  constructor(private readonly database: EdenDatabase, private readonly externalSelfAwake = false) {}
+  constructor(private readonly database: EdenDatabase, private readonly externalSelfAwake = false,
+    private readonly selfAwakeEnabled: () => boolean = () => true) {}
+
+  canSelfAwake(): boolean { return this.selfAwakeEnabled() }
 
   schedule(value: JobSchedule): JobInfo { return this.database.transaction(() => this.scheduleInTransaction(value)) }
   byKey(key: string): JobInfo | undefined {
@@ -95,12 +98,12 @@ export class JobRepository {
       const row = this.database.connection.prepare(`SELECT candidate.id FROM jobs candidate WHERE candidate.state='queued' AND candidate.due_at<=?
         AND (candidate.session_id IS NULL OR candidate.kind IN ('memo.reminder','memo.reminder.redelivery')
           OR EXISTS(SELECT 1 FROM sessions s WHERE s.id=candidate.session_id AND s.status='active'))
-        AND (candidate.kind!='self_awake' OR ((?=0 OR json_extract(candidate.payload_json,'$.scheduler')='monos')
+        AND (candidate.kind!='self_awake' OR (?=1 AND (?=0 OR json_extract(candidate.payload_json,'$.scheduler')='monos')
           AND NOT EXISTS(SELECT 1 FROM jobs busy LEFT JOIN self_awake_runs r ON r.job_id=busy.id
             WHERE COALESCE(json_extract(busy.payload_json,'$.roleScope'),busy.session_id)
               =COALESCE(json_extract(candidate.payload_json,'$.roleScope'),candidate.session_id) AND busy.kind='self_awake'
               AND (busy.state IN ('running','dispatched','unknown') OR r.state IN ('running','awaiting_action','action_running','action_interrupted')))))
-        ORDER BY candidate.due_at,candidate.id LIMIT 1`).get(now, Number(this.externalSelfAwake))
+        ORDER BY candidate.due_at,candidate.id LIMIT 1`).get(now, Number(this.canSelfAwake()), Number(this.externalSelfAwake))
       if (!row) return undefined
       this.database.connection.prepare("UPDATE jobs SET state='running',attempts=attempts+1,updated_at=? WHERE id=?").run(now, row.id!)
       return this.read(String(row.id))

@@ -36,13 +36,16 @@ test('persisted service sessions renew under the same owner, browser bindings an
   const renewed: string[] = []
   const factory = new MonClientFactory(sessions, identity, account, (_id, _base, _previous, next) => { renewed.push(next) })
   t.after(async () => { factory.close(); db.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) })
-  const client = factory.create(service.id, connection)
+  let contextToken = connection.coreToken
+  const client = factory.create(service.id, connection, value => { contextToken = value })
   await factory.validateConnection({ ...connection, coreToken: 'browser-seven' }, new AbortController().signal)
   await assert.rejects(factory.validateConnection({ ...connection, coreToken: 'browser-eight' }, new AbortController().signal), /another account/)
   await assert.rejects(factory.validateConnection({ ...connection, coreBaseUrl: 'http://127.0.0.1:1' }, new AbortController().signal), /another account endpoint/)
   assert.throws(() => db.transaction(() => factory.bindService(foreign.id, connection, true)), /another account/)
   await client.get('/api/check/'); assert.equal(exchanges, 1); assert.equal(connections.read(service.id)!.coreToken, 'service-1')
+  assert.equal(contextToken, 'service-1')
   invalidated = true; await client.get('/api/check/'); assert.equal(exchanges, 2); assert.deepEqual(renewed, ['service-1', 'service-2'])
+  assert.equal(contextToken, 'service-2')
   await assert.rejects(factory.create(browser.id, connection).get('/api/check/'), error => error instanceof MonHttpError && error.status === 401)
   await assert.rejects(factory.create(foreign.id, connection).get('/api/check/'), error => error instanceof MonHttpError && error.status === 401)
   assert.equal(exchanges, 2)

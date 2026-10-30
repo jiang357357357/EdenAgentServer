@@ -24,6 +24,7 @@ function fixture(t: test.TestContext) {
   const root = mkdtempSync(path.join(tmpdir(), 'eden-session-wakes-')), db = new EdenDatabase(':memory:', 'mon')
   const identity = { coreBaseUrl: 'http://127.0.0.1:1234', userId: '2', secret: 'fixture-only' }
   const account = { ...identity, key: accountKey(identity.coreBaseUrl, identity.userId) }
+  db.connection.prepare("INSERT INTO realm_meta(key,value) VALUES('account_key',?)").run(account.key)
   const sessions = new SessionRepository(db, 'mon'), jobs = new JobRepository(db, true)
   const create = () => withAccount(account, () => sessions.create('test', [{ assistantId: 1 }]))
   const a = create(), b = create(), state = path.join(root, 'state.json')
@@ -39,6 +40,18 @@ function fixture(t: test.TestContext) {
   const requests = (sessionId: string) => readdirSync(path.join(scope(sessionId), 'schedule_requests')).map(name => JSON.parse(readFileSync(path.join(scope(sessionId), 'schedule_requests', name), 'utf8')))
   return { db, root, state, repo, bridge, store, jobs, sessions, account, a, b, plan, request, scope, requests }
 }
+
+test('status polling preserves unknown job and interrupted action outcomes for reconciliation without replay', async t => {
+  const f = fixture(t), job = f.plan(f.a.id)
+  await f.bridge.submit(f.request(f.a.id, job.id))
+  f.db.connection.prepare("UPDATE jobs SET state='unknown',error='confirmation pending' WHERE id=?").run(job.id)
+  assert.equal(f.store.status('2', job.id).status, 'unknown')
+  const run = f.repo.begin(job, {}, { assistantId: 1 })
+  f.db.connection.prepare("UPDATE jobs SET state='dispatched' WHERE id=?").run(job.id)
+  f.db.connection.prepare("UPDATE self_awake_runs SET state='action_interrupted',last_error='delivery uncertain' WHERE id=?").run(run)
+  assert.equal(f.store.status('2', job.id).status, 'action_interrupted')
+  assert.equal(f.db.connection.prepare('SELECT COUNT(*) AS n FROM jobs').get()!.n, 1)
+})
 
 test('A running does not block B; replacement, deferral and recovery remain session-owned', async t => {
   const f = fixture(t), a = f.plan(f.a.id), b = f.plan(f.b.id)
@@ -111,7 +124,8 @@ test('actual activation, deadline and context do not borrow the legacy or other-
   assert.equal(existsSync(path.join(f.root, 'agent_activation.json')), false)
   f.repo.timerPublication.publish()
   assert.equal(JSON.parse(readFileSync(path.join(f.scope(f.a.id), 'agent_activation.json'), 'utf8')).run_id, ar)
-  assert.equal(f.repo.context(f.a.id, at).wakeSchedule?.status, 'unscheduled')
+  assert.equal(f.repo.context(f.a.id, at).wakeSchedule?.status, 'queued')
+  assert.match(f.repo.context(f.a.id, at).wakeSchedule?.reason ?? '', /等待调度派发/)
   assert.equal(f.db.connection.prepare('PRAGMA foreign_key_check').all().length, 0)
 })
 

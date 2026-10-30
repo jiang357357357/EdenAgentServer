@@ -2,6 +2,12 @@ import { randomUUID } from 'node:crypto'
 import type { EdenDatabase } from '@eden/store'
 export class SubagentMailbox {
   constructor(private readonly database: EdenDatabase) {}
+  private sender(sessionId: string, rootSessionId?: string) {
+    if (!rootSessionId) return { kind: 'unknown' }
+    if (sessionId === rootSessionId) return { agentPath: '/root' }
+    const row = this.database.connection.prepare('SELECT id,agent_path,task_name FROM subagent_threads WHERE child_session_id=? AND root_session_id=?').get(sessionId, rootSessionId)
+    return row ? { agentId: String(row.id), agentPath: String(row.agent_path), taskName: String(row.task_name) } : { kind: 'unknown' }
+  }
   sendRoot(sessionId: string, senderSessionId: string, message: string, key: string) {
     if (!message.trim() || message.length > 16000) throw new Error('Root message must contain 1–16000 characters')
     return this.database.transaction(() => {
@@ -26,7 +32,7 @@ export class SubagentMailbox {
         LEFT JOIN legacy_subagent_mailbox l ON l.id=m.id WHERE m.session_id=? AND m.read_at IS NULL
         ORDER BY m.created_at,m.id LIMIT 10`).all(sessionId)
       for (const row of rows) db.prepare('UPDATE subagent_root_messages SET read_at=? WHERE id=?').run(Date.now(), row.id!)
-      return rows.map(row => ({ id: String(row.id), senderSessionId: String(row.sender_session_id), message: String(row.message), createdAt: Number(row.created_at),
+      return rows.map(row => ({ id: String(row.id), senderSessionId: String(row.sender_session_id), sender: this.sender(String(row.sender_session_id), sessionId), message: String(row.message), createdAt: Number(row.created_at),
         kind: row.legacy_kind === null ? 'message' : String(row.legacy_kind), historical: row.legacy_kind !== null,
         details: messageDetails(row.details_json) }))
     })
@@ -48,10 +54,11 @@ export class SubagentMailbox {
   }
   receive(agentId: string) {
     return this.database.transaction(() => {
+      const root = this.database.connection.prepare('SELECT root_session_id FROM subagent_threads WHERE id=?').get(agentId)
       const rows = this.database.connection.prepare(`SELECT m.*,l.kind AS legacy_kind,l.details_json FROM subagent_messages m LEFT JOIN legacy_subagent_mailbox l ON l.id=m.id
         WHERE m.agent_id=? AND m.read_at IS NULL AND (l.id IS NULL OR l.state='available') ORDER BY m.seq LIMIT 10`).all(agentId)
       for (const row of rows) this.database.connection.prepare('UPDATE subagent_messages SET read_at=? WHERE id=?').run(Date.now(), row.id!)
-      return rows.map(row => ({ id: String(row.id), senderSessionId: String(row.sender_session_id), message: String(row.message), createdAt: Number(row.created_at),
+      return rows.map(row => ({ id: String(row.id), senderSessionId: String(row.sender_session_id), sender: this.sender(String(row.sender_session_id), root ? String(root.root_session_id) : undefined), message: String(row.message), createdAt: Number(row.created_at),
         kind: row.legacy_kind === null ? 'message' : String(row.legacy_kind), historical: row.legacy_kind !== null,
         details: messageDetails(row.details_json) }))
     })

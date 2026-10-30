@@ -32,19 +32,40 @@ function fixture(t: TestContext) {
     root: () => root, info: () => ({ name: 'test', path: root, kind: 'external' as const, status: 'ready' as const, defaultPath: null, error: null }),
     mutate: async <T>(_root: string, signal: AbortSignal, work: () => Promise<T>): Promise<T> => { signal.throwIfAborted(); mutations++; return work() },
   }
+  const lan = fakeSharedLanRuntime(() => { calls++ })
   const service = new SharedWorkspaceService({ dataRoot: directory, account,
-    lan: fakeSharedLanRuntime(() => { calls++ }),
+    lan,
     workspace: { ...pinned, restorePinned: selection => ({ ...pinned, root: () => selection.root,
       info: () => ({ ...pinned.info(), path: selection.root }) }) },
     discover: () => ({ entry: enabled ? '/fixture/client.ts' : null, reason: enabled ? null : 'DLC disabled' }),
-    load: async () => input => { options = input; return client },
+    load: async () => Object.assign((input: SharedClientOptions) => { options = input; return client }, { createLanRuntime: async () => lan }),
   })
-  service.selectDirectory('fixture', root, '0')
+  service.selectDirectory('fixture', root, service.directorySnapshot().revision)
   t.after(async () => { await service.close(); rmSync(directory, { recursive: true, force: true }) })
-  return { service, credential, account, client, root, other, options: () => options!, counts: () => ({ starts, suspends, closes, mutations, calls }),
+  return { service, credential, account, client, lan, root, other, options: () => options!, counts: () => ({ starts, suspends, closes, mutations, calls }),
     enabled: (value: boolean) => { enabled = value },
     select: (next: string) => service.selectDirectory('fixture', next, service.directory('fixture').revision) }
 }
+
+test('an older cloud host cannot silently ignore source selection and create an empty library', async t => {
+  const f = fixture(t), hostId = '44444444-4444-4444-8444-444444444444'
+  f.service.attach(async () => f.credential)
+  await f.service.selectPosture('fixture', 'cloud', f.service.posture('fixture').revision)
+  f.lan.hosts = async () => ({ hosts: [{ deviceId: hostId, name: 'old cloud', addresses: [], local: false,
+    reachable: true, canPublish: true, canManage: true, dedicated: true, error: null }] })
+  const before = f.counts().calls
+  await assert.rejects(f.service.create('', 'cloud documents', hostId, f.root), /服务需要更新/)
+  assert.equal(f.counts().calls, before, 'no creation request reaches a host without directory-source support')
+  f.lan.hosts = async () => ({ hosts: [{ deviceId: hostId, name: 'browse-only cloud', addresses: [], local: false,
+    reachable: true, canPublish: true, canManage: true, dedicated: true, directorySources: true, error: null }] })
+  await assert.rejects(f.service.cloudSourceRequest('', hostId, 'POST', 'directories/create', { parent: f.root, name: 'child' }), /尚不支持新建文件夹/)
+  assert.equal(f.counts().calls, before)
+  f.enabled(false)
+  assert.throws(() => f.service.cloudSourceRequest('', hostId, 'POST', 'directories/create', { parent: f.root, name: 'child' }), /DLC/)
+  f.enabled(true)
+  await f.service.cloudSourceRequest('', hostId, 'GET', `spaces/55555555-5555-4555-8555-555555555555/members`)
+  assert.equal(f.counts().calls, before + 1, 'existing permission management remains available without a local directory')
+})
 
 test('shared workspace leases start once authenticated, last detach suspends, and reconnect resumes', async t => {
   const f = fixture(t)

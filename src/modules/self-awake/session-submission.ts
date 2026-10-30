@@ -32,6 +32,7 @@ export class SessionWakeSubmissions {
   private admit(input: z.output<typeof sessionWakeSubmission>) {
     if (this.closed) throw new Error('Self-awake bridge is closing')
     if (input.user_id !== this.identity.userId) throw new Error('Self-awake user mismatch')
+    this.repository.control.assertEnabled()
     const session = this.sessions.repository.read(input.session_id)
     if (session.status !== 'active') throw new Error('Self-awake session is closed')
     if (session.participants.length !== 1) throw new Error('Session self-awake requires one explicitly selected participant')

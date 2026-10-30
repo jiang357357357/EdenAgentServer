@@ -11,10 +11,27 @@ import type { SessionService } from '../sessions/index.ts'
 import type { ModelService } from '../models/index.ts'
 import type { JobRepository } from '../jobs/index.ts'
 import { SubagentRepository } from './repository.ts'
+import type { JsonValue } from '@eden/api'
+import { modelAssistantText } from '../tool-results/index.ts'
 export class SubagentService {
   constructor(readonly repository: SubagentRepository, private readonly sessions: SessionService, private readonly models: ModelService, private readonly jobs: JobRepository, readonly mailbox: SubagentMailbox,
     private readonly skills?: SkillRepository | ((sessionId: string) => SkillRepository)) { }
   private skillsFor(sessionId: string) { return typeof this.skills === 'function' ? this.skills(sessionId) : this.skills }
+  modelResult(value: JsonValue): JsonValue {
+    if (Array.isArray(value)) return value.map(item => this.modelResult(item))
+    if (!value || typeof value !== 'object') return value
+    if (value.agent) return { ...value, agent: this.modelResult(value.agent) }
+    const next = { ...value }
+    if (typeof value.childSessionId === 'string' && value.result && typeof value.result === 'object' && !Array.isArray(value.result)) {
+      const result = { ...value.result }
+      for (const key of ['content', 'summary']) if (typeof result[key] === 'string')
+        result[key] = modelAssistantText(this.sessions.repository.database, value.childSessionId, result[key])
+      next.result = result
+    }
+    if (typeof value.senderSessionId === 'string' && typeof value.message === 'string')
+      next.message = modelAssistantText(this.sessions.repository.database, value.senderSessionId, value.message)
+    return next
+  }
   private readonly stopping = new Set<string>()
   async stopChildren(sessionId: string): Promise<void> {
     if (this.stopping.has(sessionId)) return

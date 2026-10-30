@@ -34,13 +34,15 @@ export class SelfAwakeService {
   dispatch(job: JobInfo): void {
     if (this.closed) throw new Error('Self-awake service is closed')
     if (!job.sessionId) throw new Error('Self-awake job requires a session')
+    this.repository.control.assertEnabled()
     const session = this.sessions.repository.read(job.sessionId)
     if (session.status !== 'active') throw new Error('Self-awake session is not active')
     if (session.participants.length > 1) throw new Error('Self-awake requires a single acting character')
     const author = session.participants[0] ?? {}
     const recovery = this.recovery.assertDispatch(job, author, session.environment)
     const topics = recentSharedTopics(this.repository.database, job.sessionId, author)
-    const request = toJson({ current_time: new Date().toISOString(), recent_conversation: topics, wakeSchedule: this.repository.wakeSchedule(job.sessionId), ...selfAwakeRequest(job, author, session.environment), merged_plans: this.repository.roles.merged(job.sessionId), ...(recovery ? { recovery } : {}) })
+    const request = toJson({ current_time: new Date().toISOString(), recent_conversation: topics,
+      wakeSchedule: this.repository.wakeSchedule(job.sessionId), ...selfAwakeRequest(job, author, session.environment), ...(recovery ? { recovery } : {}) })
     const id = this.repository.begin(job, request, author)
     try {
       this.sessions.submitJob(job.sessionId, selfAwakePrompt(request), job.id, job.kind, input => {

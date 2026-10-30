@@ -4,7 +4,7 @@ import { ZodError } from 'zod'
 export type SelfAwakeStage = 'request_body' | 'request_json' | 'submission_validation' | 'status_validation'
   | 'owner_identity' | 'status_lookup' | 'idempotency' | 'service_token' | 'assistant_fetch'
   | 'assistant_profile' | 'session_create' | 'model_catalog' | 'job_persist' | 'session_cleanup'
-  | 'authorization' | 'service_availability' | 'request_limit' | 'request_method'
+  | 'authorization' | 'service_availability' | 'self_awake_control' | 'request_limit' | 'request_method'
   | 'submission_processing' | 'status_processing' | 'response_serialization'
 
 export class SelfAwakeStageError extends Error {
@@ -76,6 +76,7 @@ function failureKind(cause: unknown, errorName: string): Omit<SelfAwakeFailure, 
 }
 
 const knownFailures: Record<string, string> = {
+    '自醒已关闭，请先在自醒页面开启': 'self_awake_disabled',
     'Self-awake user mismatch': 'user_mismatch',
     'Self-awake job owner mismatch': 'job_owner_mismatch',
     'Idempotency key was used with a different request': 'idempotency_conflict',

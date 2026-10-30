@@ -5,7 +5,8 @@ import type { EdenDatabase } from '@eden/store'
 import { removeCheckpointMessages } from '@eden/runtime-pi'
 import { projectActorTurnHistory } from '../../../model-prompts/actors.ts'
 import { publicMessage } from './public-message.ts'
-import { privateQqHistoryEntries } from '../../tool-results/index.ts'
+import { privateToolHistoryEntries, modelHistoryReceipts } from '../../tool-results/index.ts'
+import { legacyQqIdentity } from './legacy-qq-identity.ts'
 
 interface DeletedMessage {
   key: string
@@ -99,8 +100,10 @@ export class SessionContextDeletion {
       const receipts = this.database.connection.prepare(`SELECT payload_json FROM events WHERE session_id=?
         AND kind IN ('agent.message_end','actor.runtime.message_end') AND json_extract(payload_json,'$.message.role')='toolResult'`).all(sessionId)
         .map(row => ({ message: object(JSON.parse(String(row.payload_json))).message ?? null }))
-      const projected = privateQqHistoryEntries([...receipts, ...legacy.map(target => ({ message: target.message }))]).slice(receipts.length)
+      const projected = privateToolHistoryEntries([...receipts, ...legacy.map(target => ({ message: target.message }))],
+        modelHistoryReceipts(this.database, sessionId)).slice(receipts.length)
       legacy.forEach((target, index) => target.variants.push(object(projected[index]).message ?? target.message))
+      legacy.forEach(target => target.variants.push(legacyQqIdentity(target.message, receipts)))
     }
     return targets
   }

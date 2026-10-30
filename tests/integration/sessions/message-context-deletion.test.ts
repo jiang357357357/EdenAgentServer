@@ -37,6 +37,28 @@ function stored(repository: SessionRepository, sessionId: string): string {
   return String(repository.database.connection.prepare('SELECT checkpoint_json FROM runtime_checkpoints WHERE session_id=?').get(sessionId)?.checkpoint_json)
 }
 
+test('deleting a complete reply removes every tool-loop phase from the next real request, with audit intact', async t => {
+  const f = await fixture(t, [{ tool: 'fixture_echo', input: { text: 'GROUP_ARGUMENT' } }, { text: 'GROUP_FINAL' }, { text: 'AFTER_GROUP' }])
+  let executions = 0
+  const runtime = f.runtime(undefined, [{ name: 'fixture_echo', description: 'fixture', revision: '1',
+    parameters: { type: 'object', properties: { text: { type: 'string' } } },
+    async execute() { executions++; return 'GROUP_RESULT' },
+  }])
+  await runtime.prompt('GROUP_USER')
+  const answers = f.answers(), last = answers.at(-1)!
+  const reply = f.deletion.readReply(f.session.id, messageId(last))
+  assert.deepEqual(reply.messageIds, answers.map(messageId)); assert.equal(reply.text, 'GROUP_FINAL')
+  f.deletion.remove(f.session.id, messageId(last), 'reply')
+  const checkpoint = f.repository.checkpoint(f.session.id)!
+  assertRuntimeCheckpoint(checkpoint, f.session.id)
+  assert.doesNotMatch(JSON.stringify(checkpoint), /GROUP_ARGUMENT|GROUP_RESULT|GROUP_FINAL/)
+  assert.match(JSON.stringify(checkpoint), /GROUP_USER/)
+  await f.runtime(checkpoint).prompt('NEXT_USER')
+  assert.doesNotMatch(JSON.stringify(f.model.requests.at(-1)?.messages), /GROUP_ARGUMENT|GROUP_RESULT|GROUP_FINAL/)
+  assert.equal(executions, 1)
+  assert.match(String(f.database.connection.prepare('SELECT result_json FROM tool_operations').get()!.result_json), /GROUP_RESULT/)
+})
+
 test('deletion commits model context before broadcasting and the next real request preserves user input and other answers', async t => {
   const f = await fixture(t, [{ text: 'REMOVED_ANSWER', thinking: 'REMOVED_THINKING' }, { text: 'RETAINED_ANSWER' }, { text: 'NEXT_ANSWER' }])
   const first = f.runtime()
@@ -259,7 +281,7 @@ test('pre-link answers remain deletable after QQ privacy projection has changed 
   const answer = f.answers().at(-1)!
   f.database.connection.prepare("UPDATE events SET payload_json=json_remove(payload_json,'$.contextEntryId') WHERE id=?").run(answer.id)
   const privateSnapshot = f.repository.checkpoint(f.session.id)!
-  assert.doesNotMatch(JSON.stringify(privateSnapshot), /native-legacy-tid/)
+  assert.match(JSON.stringify(privateSnapshot), /native-legacy-tid/)
   f.repository.saveCheckpoint(publicHistoryCheckpoint(f.session.id, [{ role: 'user', text: 'LEGACY_PRIVATE_USER' },
     { role: 'assistant', text: `LEGACY_PRIVATE_REPLY ${qqIdentifierHidden}` }], privateSnapshot), randomUUID())
   f.deletion.remove(f.session.id, messageId(answer))

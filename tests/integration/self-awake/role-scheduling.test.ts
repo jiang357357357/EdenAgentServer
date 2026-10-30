@@ -23,6 +23,7 @@ function fixture(t: test.TestContext) {
   writeFileSync(path.join(root, 'session-protocol.json'), JSON.stringify({ protocolVersion: 2, sessionScopes: true, roleScopes: true, expiresAt: Date.now() + 60000 }))
   const repo = new SelfAwakeRepository(db, state, true)
   const account = (user = '2') => ({ coreBaseUrl: 'http://127.0.0.1:1', userId: user, key: accountKey('http://127.0.0.1:1', user) })
+  db.connection.prepare("INSERT INTO realm_meta(key,value) VALUES('account_key',?)").run(account().key)
   const create = (characterId = 4, user = '2', purpose: 'self_awake' | 'user_chat' = 'self_awake') => withAccount(account(user), () => sessions.create('fixture',
     [{ assistantId: characterId, characterId }], { sessionPurpose: purpose, selfAwakeUserId: user }, { purpose, sourceChannel: purpose === 'self_awake' ? 'internal' : 'app' }))
   const plan = (id: string, dueAt = Date.now() + 60000, reason = 'fixture', kind = 'self_awake') => jobs.schedule({ kind, sessionId: id,
@@ -148,11 +149,13 @@ test('role deadlines and published activations use actual starts from every memb
   assert.equal(f.db.connection.prepare('SELECT count(*) AS n FROM self_awake_activations').get()?.n, 1)
 })
 
-test('merged notes are explicitly historical model context, with original times and no internal identifiers', () => {
+test('merged plans remain in the audit request without becoming diary-writing context', () => {
   const notes = [{ plannedAt: '2026-10-15T12:00:00Z', reason: '核对服务' }]
-  const view = selfAwakePromptContext({ merged_plans: notes, job_id: 'private', trigger: { type: 'scheduled', reason: '旧命令' } })
-  assert.deepEqual(view.inheritedWakeNotes, notes)
-  assert.doesNotMatch(JSON.stringify(view), /private|旧命令/)
+  const request = { merged_plans: notes, job_id: 'private', trigger: { type: 'scheduled', reason: '旧命令' } }
+  const view = selfAwakePromptContext(request)
+  assert.equal('inheritedWakeNotes' in view, false)
+  assert.doesNotMatch(JSON.stringify(view), /private|旧命令|核对服务/)
+  assert.deepEqual(request.merged_plans, notes)
 })
 
 test('actual v1 bridge joins the existing role clock across startup/fallback requests and isolates a changed current character', async t => {

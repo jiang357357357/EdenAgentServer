@@ -11,7 +11,7 @@ import type { JsonValue } from '@eden/api'
 const runtimePolicy = process.env.EDEN_TEST_COMPILED_RUNTIME === '1'
   ? { entry: new URL('../../../../dist/server/runtime-process.mjs', import.meta.url) } : {}
 
-test('real child model sees no platform receipt IDs, can delete by reference and restores legacy history privately', async t => {
+test('real child model keeps QQ business IDs through deletion, restart and compaction while omitting metadata', async t => {
   const f = qqResultFixture(); t.after(() => f.close())
   const deletion = { tool: 'execute_qq_action', input: { bot_id: '42', action: 'delete_qzone_msg', params: { tid: 'pending' } } }
   const model = await recordedModel([
@@ -31,8 +31,8 @@ test('real child model sees no platform receipt IDs, can delete by reference and
   t.after(() => runtime.dispose())
   await runtime.prompt(input.text)
   assert.equal(model.requests.length, 3)
-  for (const request of model.requests) assert.doesNotMatch(JSON.stringify(request), new RegExp(rawTid))
-  assert.match(JSON.stringify(model.requests[1]), /qqref:qzone:/)
+  for (const request of model.requests.slice(1)) assert.match(JSON.stringify(request), new RegExp(rawTid))
+  assert.doesNotMatch(JSON.stringify(model.requests[1]), /qqref:qzone:/)
   assert.equal(f.sent.find(item => item.action === 'delete_qzone_msg')!.params.tid, rawTid)
   const audit = f.database.connection.prepare('SELECT result_json FROM tool_operations WHERE tool_name=?').all('execute_qq_action')
   assert.ok(audit.some(row => String(row.result_json).includes(rawTid)))
@@ -46,11 +46,16 @@ test('real child model sees no platform receipt IDs, can delete by reference and
     if (value.message?.role === 'assistant') value.message.content.push({ type: 'text', text: `说说ID：${rawTid}` })
   }
   f.sessions.saveCheckpoint(legacy, f.turnId)
+  // Inject an old persisted checkpoint to exercise metadata reduction during legacy recovery.
+  f.database.connection.prepare('UPDATE runtime_checkpoints SET checkpoint_json=? WHERE session_id=?')
+    .run(JSON.stringify(legacy), f.session.id)
   const stored = f.database.connection.prepare('SELECT checkpoint_json FROM runtime_checkpoints WHERE session_id=?').get(f.session.id)!
   assert.match(String(stored.checkpoint_json), new RegExp(rawTid))
   const actorCheckpoints = new ActorCheckpointRepository(f.sessions)
   actorCheckpoints.save(f.session.id, 1, f.turnId, legacy)
-  assert.doesNotMatch(JSON.stringify(actorCheckpoints.read(f.session.id, 1)), new RegExp(rawTid))
+  f.database.connection.prepare('UPDATE actor_checkpoints SET checkpoint_json=? WHERE session_id=?')
+    .run(JSON.stringify(legacy), f.session.id)
+  assert.match(JSON.stringify(actorCheckpoints.read(f.session.id, 1)), new RegExp(rawTid))
   const actorStored = f.database.connection.prepare('SELECT checkpoint_json FROM actor_checkpoints WHERE session_id=?').get(f.session.id)!
   assert.match(String(actorStored.checkpoint_json), new RegExp(rawTid))
   const restored = createIsolatedRuntime({ sessionId: f.session.id, systemPrompt: 'fixture', model: model.config,
@@ -58,24 +63,27 @@ test('real child model sees no platform receipt IDs, can delete by reference and
   t.after(() => restored.dispose())
   await restored.prompt('继续')
   assert.equal(model.requests.length, 4)
-  assert.doesNotMatch(JSON.stringify(model.requests[3]), new RegExp(`${rawTid}|legacy-trace`))
+  assert.match(JSON.stringify(model.requests[3]), new RegExp(rawTid))
+  assert.doesNotMatch(JSON.stringify(model.requests[3]), /legacy-trace/)
   await restored.compact()
   assert.equal(model.requests.length, 5)
-  assert.doesNotMatch(JSON.stringify(model.requests[4]), new RegExp(`${rawTid}|legacy-trace`))
+  assert.match(JSON.stringify(model.requests[4]), new RegExp(rawTid))
+  assert.doesNotMatch(JSON.stringify(model.requests[4]), /legacy-trace/)
 })
 
-test('failed model projection stops the child after durable raw audit, without another model request or platform write', async t => {
+test('real child continues when an unused legacy alias table cannot be written', async t => {
   const f = qqResultFixture(); t.after(() => f.close())
   f.database.connection.exec("CREATE TRIGGER reject_qq_reference BEFORE INSERT ON qq_action_references BEGIN SELECT RAISE(ABORT,'fixture failure'); END")
   const model = await recordedModel([{ tool: 'execute_qq_action', input: { bot_id: '42', action: 'send_qzone_msg', params: { content: '正文' } } },
-    { text: 'must not reach the model again' }])
+    { text: 'business result received' }])
   t.after(() => model.close())
   const audit: JsonValue[] = []
   const runtime = createIsolatedRuntime({ sessionId: f.session.id, systemPrompt: 'fixture', model: model.config, tools: f.tools,
     callbacks: { ...callbacks().handlers, afterTool: async (_callId, result) => { audit.push(result) } } }, runtimePolicy)
   t.after(() => runtime.dispose())
-  await assert.rejects(runtime.prompt('publish'), /保存失败|persistence|fixture failure/)
-  assert.equal(model.requests.length, 1)
+  await runtime.prompt('publish')
+  assert.equal(model.requests.length, 2)
+  assert.match(JSON.stringify(model.requests[1]), new RegExp(rawTid))
   assert.equal(f.sent.filter(item => item.action === 'send_qzone_msg').length, 1)
   assert.match(JSON.stringify(audit), new RegExp(rawTid))
 })

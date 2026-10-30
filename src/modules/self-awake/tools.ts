@@ -28,6 +28,7 @@ export function selfAwakeTools(repository: SelfAwakeRepository, jobs: JobReposit
     parameters: toJson(z.toJSONSchema(selfAwakeToolTimerSchema, { io: 'input' })) as Record<string, JsonValue>,
     async execute(raw, context) {
       const input = selfAwakeToolTimerSchema.parse(raw)
+      repository.control.assertEnabled()
       repository.timerPublication.assertAvailable(true)
       const requestedAt = input.at ?? Date.now() + input.afterMinutes! * 60000
       if (requestedAt <= Date.now() || requestedAt > Date.now() + 10080 * 60000) throw new Error('自醒时间必须在未来七天以内')
@@ -38,6 +39,7 @@ export function selfAwakeTools(repository: SelfAwakeRepository, jobs: JobReposit
       context.signal.throwIfAborted()
       const target = roleSessions ? await roleSessions.timerTarget(sessionId, turnId, actorId, context.signal) : repository.roles.target(sessionId)
       context.signal.throwIfAborted()
+      repository.control.assertEnabled()
       const deadline = repository.deadline(Date.now(), target)
       const dueAt = Math.max(Date.now() + 1000, Math.min(requestedAt, deadline))
       const job = jobs.schedule({ kind: 'self_awake', sessionId: target, dueAt,

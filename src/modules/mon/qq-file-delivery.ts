@@ -4,9 +4,10 @@ import { toJson, QQ_FILE_TRANSFER_TIMEOUT_MS } from '@eden/api'
 import { MonHttpError, type MonClient } from '@eden/integrations'
 import type { EdenDatabase } from '@eden/store'
 import { ContactNotDeliveredError } from './contact-error.ts'
-import { ownerQqTarget } from './qq-contact.ts'
+import { ownerQqTarget, assertQqOnline } from './qq-contact.ts'
 import { QqFileDeliveryRepository } from './qq-file-repository.ts'
 import { QqFileDeliveryUnknown } from './qq-file-error.ts'
+import { contactFailureReason } from './contact-failure-reason.ts'
 
 export interface OwnerQqFile { target: { bot: string; number: string }; filename: string; bytes: Buffer; requestId: string }
 const receiptSchema = z.object({ success: z.literal(true), data: z.object({
@@ -14,6 +15,11 @@ const receiptSchema = z.object({ success: z.literal(true), data: z.object({
   target_qq_number: z.string(), filename: z.string(), byte_length: z.number().int(), sha256: z.string(),
   file_id: z.string().optional(),
 }) })
+
+function confirmFileReceipt(parsed: z.infer<typeof receiptSchema>['data'], input: OwnerQqFile, number: string, sha256: string) {
+  if (parsed.request_id !== input.requestId || parsed.target_qq_number !== number || parsed.filename !== input.filename
+    || parsed.byte_length !== input.bytes.length || parsed.sha256 !== sha256) throw new Error('QQ file receipt does not match the approved file')
+}
 
 export async function deliverOwnerQqFile(database: EdenDatabase, client: MonClient, sessionId: string, input: OwnerQqFile, signal: AbortSignal) {
   signal.throwIfAborted()
@@ -28,21 +34,23 @@ export async function deliverOwnerQqFile(database: EdenDatabase, client: MonClie
   const previous = repository.begin(sessionId, input.requestId, JSON.stringify(metadata))
   if (previous !== undefined) return toJson(previous)
   try {
+    assertQqOnline(current)
     const raw = await client.post(`/api/devices/qq_bot/${current.bot}/send-file/`, toJson({
       target_type: 'user', target_qq_number: current.number, filename: input.filename,
       byte_length: input.bytes.length, sha256, content_base64: input.bytes.toString('base64'), request_id: input.requestId,
     }), signal, QQ_FILE_TRANSFER_TIMEOUT_MS + 60_000)
     const parsed = receiptSchema.parse(raw).data
-    if (parsed.request_id !== input.requestId || parsed.target_qq_number !== current.number || parsed.filename !== input.filename
-      || parsed.byte_length !== input.bytes.length || parsed.sha256 !== sha256) throw new Error('QQ file receipt does not match the approved file')
+    confirmFileReceipt(parsed, input, current.number, sha256)
     const receipt = { channel: 'qq', status: 'sent', confirmed: true, requestId: input.requestId,
       filename: input.filename, byteLength: input.bytes.length, ...(parsed.file_id ? { fileId: parsed.file_id } : {}) }
     repository.confirm(input.requestId, receipt)
     return toJson(receipt)
   } catch (error) {
-    const rejected = error instanceof MonHttpError && [400, 401, 403, 404, 413, 422].includes(error.status)
-    repository.fail(input.requestId, rejected)
-    if (rejected) throw new ContactNotDeliveredError('Core rejected the QQ file; check the bot, recipient permissions and Core version')
+    const rejected = error instanceof ContactNotDeliveredError || error instanceof MonHttpError && [400, 401, 403, 404, 413, 422].includes(error.status)
+    const reason = contactFailureReason(error)
+    repository.fail(input.requestId, rejected, reason)
+    if (error instanceof ContactNotDeliveredError) throw error
+    if (rejected) throw new ContactNotDeliveredError(`Core rejected the QQ file${reason ? `：${reason}` : '; check the bot, recipient permissions and Core version'}`)
     throw new QqFileDeliveryUnknown()
   }
 }

@@ -7,7 +7,7 @@ import { EventReadCache } from './event-read-cache.ts'
 import { SessionModelHeads } from './session-model-heads.ts'
 import { projectionSequences, latestKindRecord } from './event-kind-queries.ts'
 import { withMessageTurnTiming } from './message-turn-timing.ts'
-import { messageNotDeletedSql } from './history/message-visibility.ts'
+import { chatMessageNotDeletedSql } from './history/message-visibility.ts'
 import { setImmediate as yieldToEventLoop } from 'node:timers/promises'
 import { randomUUID } from 'node:crypto'
 import type { JsonValue, DurableEvent } from '@eden/api'
@@ -184,15 +184,15 @@ export class SessionEvents {
     new SessionOwnership(this.database).assert(sessionId)
     let beforeSeq = 9223372036854775807n
     if (before) {
-      const cursor = this.database.connection.prepare("SELECT seq FROM events WHERE session_id=? AND id=? AND kind='agent.message_end'")
+      const cursor = this.database.connection.prepare("SELECT seq FROM events WHERE session_id=? AND id=? AND kind IN ('agent.message_end','character.sticker.sent')")
       cursor.setReadBigInts(true)
       const row = cursor.get(sessionId, before)
       if (!row) throw new Error('Message cursor not found in session')
       beforeSeq = BigInt(row.seq as bigint)
     }
     const statement = this.database.connection.prepare(`SELECT candidate.* FROM events AS candidate
-      WHERE candidate.session_id=? AND candidate.kind='agent.message_end' AND candidate.seq<?
-      AND ${messageNotDeletedSql}
+      WHERE candidate.session_id=? AND candidate.kind IN ('agent.message_end','character.sticker.sent') AND candidate.seq<?
+      AND ${chatMessageNotDeletedSql}
       ORDER BY candidate.seq DESC LIMIT ?`)
     statement.setReadBigInts(true)
     const rows = statement.all(sessionId, beforeSeq, Math.min(limit, 100) + 1)

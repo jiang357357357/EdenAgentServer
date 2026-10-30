@@ -32,7 +32,7 @@ test('unconfigured nullable QQ bot returns a useful error rather than a schema d
   await assert.rejects(ownerQqTarget(client, new AbortController().signal), /尚未配置 QQ 机器人/)
 })
 
-test('private QQ contact tools keep acceptance and dialogue while hiding transport and Core history IDs', async () => {
+test('QQ contact tools keep acceptance, dialogue and business message IDs while omitting transport metadata', async () => {
   const mon = {
     async contactOwnerByQq() { return { status: 'accepted', requestId: 'private-request' } },
     async readContactHistory() { return { channel: 'qq', rounds: [{ messages: [{ id: 'private-core-message', role: 'user', content: '老师你好' }] }] } },
@@ -43,6 +43,7 @@ test('private QQ contact tools keep acceptance and dialogue while hiding transpo
   const sent = sender.modelResult!(await sender.execute({ message: '你好' }, context))
   const history = reader.modelResult!(await reader.execute({}, context))
   assert.equal((sent as { status: string }).status, 'accepted')
-  assert.doesNotMatch(JSON.stringify([sent, history]), /private-request|private-core-message/)
+  assert.doesNotMatch(JSON.stringify([sent, history]), /private-request/)
+  assert.match(JSON.stringify(history), /private-core-message/)
   assert.match(JSON.stringify(history), /老师你好/)
 })

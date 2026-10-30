@@ -5,6 +5,7 @@ import { z } from 'zod'
 
 const savedSchema = z.object({ version: z.literal(1), accountKey: z.string(), path: z.string().min(1), revision: z.string().uuid() }).strict()
 export interface SharedDirectorySnapshot { path: string; revision: string; status: 'unselected' | 'ready' | 'invalid'; error: string | null }
+export type SharedDirectoryAccess = Pick<SharedDirectorySelection, 'read' | 'select' | 'assert' | 'seedExisting'>
 
 /** Account-private selection. It never reads or writes a session's workspace settings. */
 export class SharedDirectorySelection {

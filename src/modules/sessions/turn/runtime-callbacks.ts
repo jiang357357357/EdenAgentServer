@@ -3,8 +3,7 @@ import { requestContext } from './request-context.ts'
 import { randomUUID } from 'node:crypto'
 import { RuntimePersistenceError, type RuntimeCallbacks } from '@eden/runtime-pi'
 import { toJson } from '@eden/api'
-import { privateMemoryPayload, privateMemoryCheckpoint } from '../../tool-results/index.ts'
-import { MemoryRepository } from '../../memories/index.ts'
+import { privateMemoryPayload } from '../../tool-results/index.ts'
 import type { JsonValue, RuntimeCheckpoint } from '@eden/api'
 import type { SessionInput } from '../contracts.ts'
 import type { SessionRepository } from '../session-repository.ts'
@@ -59,7 +58,7 @@ export function runtimeCallbacks(repository: SessionRepository, input: SessionIn
         if (scope.checkpoint) await scope.checkpoint(snapshot)
         else repository.saveCheckpoint(snapshot, input.turnId)
         contextEntryId = checkpointEntryId(snapshot)
-        return privateMemoryCheckpoint(snapshot, new MemoryRepository(repository.database).credentialValues())
+        return repository.modelCheckpoint(snapshot, scope.actor === undefined ? undefined : String(scope.actor.assistantID))
       } catch (error) { throw new RuntimePersistenceError('会话检查点提交失败', error) }
     },
     async event(kind, payload, delivery) {

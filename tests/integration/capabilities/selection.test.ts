@@ -9,7 +9,7 @@ import { SkillRepository } from '../../../src/modules/skills/index.ts'
 import { SessionCapabilities } from '../../../src/modules/capabilities/index.ts'
 import { capabilityFixture, fixtureTool } from './fixture.ts'
 
-test('skills and professional tools stay deferred until loaded, then unload independently', async t => {
+test('skill and professional tool descriptions stay deferred until loaded, then unload independently', async t => {
   const f = await capabilityFixture(); t.after(() => f.close())
   const tool = fixtureTool(); f.setTools([tool]); f.install('echo-skill', '使用 echo_skill 和 special_action。', ['special_action'])
   const names = () => f.capabilities().tools().map(item => item.name)
@@ -52,20 +52,20 @@ test('actor, workspace and revisions isolate selections and stale definitions ca
   assert.equal(f.capabilities().discover({ query: '', offset: 0, limit: 20 }).selections.find(item => item.kind === 'skill')!.status, 'stale')
 })
 
-test('generic forwarding must resolve to a loaded final target', async t => {
+test('generic forwarding resolves registered final targets independently of description loading', async t => {
   const f = await capabilityFixture(); t.after(() => f.close())
   f.install()
   const generic = f.capabilities().discover({ query: 'run_skill_tool', offset: 0, limit: 20 }).tools[0]!
   f.capabilities().loadTools([generic])
   const dispatcher = () => f.capabilities().tools().find(tool => tool.name === 'run_skill_tool')!
   const input = { name: 'echo-skill', tool: 'echo_skill', arguments: { text: 'hello' } }
-  assert.throws(() => dispatcher().resolveCall!(input), /not loaded/)
+  assert.equal(dispatcher().resolveCall!(input).tool.name, 'echo_skill')
   f.capabilities().loadSkill('echo-skill'); f.exposeEcho()
   assert.equal(dispatcher().resolveCall!(input).tool.name, 'echo_skill')
   f.capabilities().unloadSkill('echo-skill')
   assert.equal(dispatcher().resolveCall!(input).tool.name, 'echo_skill')
   f.capabilities().unloadTools(['skill:echo-skill:echo_skill'])
-  assert.throws(() => dispatcher().resolveCall!(input), /not loaded/)
+  assert.equal(dispatcher().resolveCall!(input).tool.name, 'echo_skill')
 })
 
 test('manual selections survive database reopening and do not restore changed versions', async t => {
@@ -89,4 +89,9 @@ test('manual selections survive database reopening and do not restore changed ve
   tool.revision = '2'
   assert.ok(!restored.tools().some(item => item.name === tool.name))
   assert.equal(restored.discover({ query: '', offset: 0, limit: 20 }).selections[0]!.status, 'stale')
+  const current = restored.registeredTools().find(item => item.name === tool.name)!
+  const resolved = current.resolveCall!({})
+  assert.equal(current.exposure, 'deferred')
+  assert.equal(resolved.tool.revision, '2')
+  assert.deepEqual(await resolved.tool.execute(resolved.input, { callId: 'restored', signal: new AbortController().signal }), { ok: true })
 })

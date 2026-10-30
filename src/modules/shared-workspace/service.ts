@@ -1,4 +1,5 @@
 import path from 'node:path'
+import type { SharedHostDeploymentInput, SharedSshTarget } from '@eden/api'
 import { accountKey, type Account } from '../accounts/index.ts'
 import type { WorkspaceService } from '../workspace/index.ts'
 import { discoverSharedWorkspace, type SharedInstallation } from './discovery.ts'
@@ -6,8 +7,12 @@ import { loadSharedWorkspace } from './loader.ts'
 import { SharedLanOwner } from './lan-owner.ts'
 import { SharedFolderRegistry, type SharedFolder } from './folder-registry.ts'
 import { logDiagnostic } from '../logging/index.ts'
-import { SharedDirectorySelection, type SharedDirectorySnapshot } from './directory-selection.ts'
+import type { SharedDirectoryAccess, SharedDirectorySnapshot } from './directory-selection.ts'
+import { SharedPostureDirectories } from './posture-directories.ts'
 import { SharedRestoreRetry } from './restore-retry.ts'
+import { createHostDeployment } from './host-deployment.ts'
+import { probeSshHost } from './host-ssh.ts'
+import type { SharedPosture } from './posture-selection.ts'
 import type { CredentialLease, SharedClient, SharedClientFactory, SharedStatus, SharedRemote, SharedLanRuntime } from './contracts.ts'
 
 interface Options {
@@ -24,7 +29,7 @@ interface Options {
   lanOwner?: SharedLanOwner
   lan?: SharedLanRuntime
   identityCheck?: () => Promise<void>
-  selection?: SharedDirectorySelection
+  selection?: SharedDirectoryAccess
   assertSession?: (sessionId: string) => void
 }
 
@@ -47,17 +52,19 @@ export class SharedWorkspaceService {
   private restoreTimer: ReturnType<typeof setTimeout> | undefined
   private readonly restoreRetry = new SharedRestoreRetry()
   private readonly restoreFaults = new Map<string, { root: string; error: string }>()
-  private readonly selection: SharedDirectorySelection
+  private readonly selection: SharedDirectoryAccess
   private readonly reads = new Map<string, Map<string, string>>()
 
   constructor(private readonly options: Options) {
-    this.selection = options.selection ?? new SharedDirectorySelection(path.join(options.dataRoot, 'shared-workspace-lan', 'selected-directory.json'), options.account?.key ?? '')
     this.registry = options.registry ?? (options.account && options.workspace.forSession
       ? new SharedFolderRegistry(path.join(options.dataRoot, 'shared-workspace-lan', 'folders.json'), options.account.key) : undefined)
     this.lanOwner = options.lanOwner ?? new SharedLanOwner({ dataRoot: path.join(options.dataRoot, 'shared-workspace-lan'),
+      accountKey: options.account?.key ?? '',
       active: () => this.hasCredentials(), canPublish: () => !!this.installation().entry,
+      runtimeBundleRoot: () => { const entry = this.installation().entry; return entry ? path.join(path.dirname(entry), 'Runtime') : undefined },
       load: options.load ?? loadSharedWorkspace, ...(options.lan ? { runtime: options.lan } : {}) })
     this.remote = this.lanOwner.remote
+    this.selection = options.selection ?? new SharedPostureDirectories(path.join(options.dataRoot, 'shared-workspace-lan'), options.account?.key ?? '', this.lanOwner.posture)
   }
 
   forSession(sessionId?: string): SharedWorkspaceService {
@@ -73,6 +80,36 @@ export class SharedWorkspaceService {
   }
 
   directory(sessionId: string) { this.options.assertSession?.(sessionId); this.requireAccount(); return this.selection.read() }
+  posture(sessionId: string) {
+    this.options.assertSession?.(sessionId); this.requireAccount()
+    return this.lanOwner.posture.read()
+  }
+  async selectPosture(sessionId: string, mode: SharedPosture, expectedRevision: string) {
+    this.options.assertSession?.(sessionId); this.requireAccount(); await this.localIdentity()
+    const selected = await this.lanOwner.selectPosture(mode, expectedRevision, () => this.quiescePosture())
+    await this.resumePostureClients()
+    return selected
+  }
+  private async quiescePosture(): Promise<void> {
+    this.controller.abort(new Error('共享姿态已切换'))
+    await this.opening?.catch(() => undefined)
+    await this.client?.suspend()
+    await Promise.all([...this.folders.values()].map(service => service.quiescePosture()))
+  }
+  private async resumeClient(client: SharedClient) {
+    const space = client.status().spaceId
+    if ((!space || (await this.lanOwner.ensure()).acceptsSpace(space)) && this.hasCredentials()) {
+      if (this.controller.signal.aborted) this.controller = new AbortController()
+      client.start()
+    }
+    else await client.suspend()
+  }
+  private async resumePostureClients(): Promise<void> {
+    // Account operations need a fresh signal even when no folder sync client exists.
+    if (this.hasCredentials() && this.controller.signal.aborted) this.controller = new AbortController()
+    if (this.client) await this.resumeClient(this.client)
+    await Promise.all([...this.folders.values()].map(service => service.resumePostureClients()))
+  }
   selectDirectory(sessionId: string, root: string, revision: string) {
     this.options.assertSession?.(sessionId); this.requireAccount()
     return this.selection.select(root, revision)
@@ -143,7 +180,7 @@ export class SharedWorkspaceService {
     this.leases.set(id, lease)
     {
       const services = [...this.folders.values()]
-      for (const service of services) void service.withActivity(async () => { const client = await service.ensure(); if (service.hasCredentials()) client.start() })
+      for (const service of services) void service.withActivity(async () => { const client = await service.ensure(); if (service.hasCredentials()) await service.resumeClient(client) })
         .catch(error => { service.fault = message(error) })
       this.queueRestoration()
     }
@@ -190,7 +227,7 @@ export class SharedWorkspaceService {
       try {
         if (!this.hasCredentials()) return
         const workspace = this.options.workspace.restorePinned!({ kind: 'external', root: folder.root }), service = this.folderService(workspace, folder)
-        await service.withActivity(async () => { const client = await service.ensure(); if (service.hasCredentials()) client.start() })
+        await service.withActivity(async () => { const client = await service.ensure(); if (service.hasCredentials()) await service.resumeClient(client) })
         this.restoreFaults.delete(folder.workspaceKey)
         this.restoreRetry.succeeded(retryKey)
       } catch (error) {
@@ -222,7 +259,12 @@ export class SharedWorkspaceService {
         return this.statusValue(empty, publishing, selected.status === 'unselected', selected.error)
       } catch (error) { return this.statusValue(empty, publishing, false, message(error)) }
     }
-    try { return { ...(await this.ensure()).status(), ...publishing, available: true, reason: null } }
+    try {
+      const status = (await this.ensure()).status()
+      if (status.spaceId && !(await this.lanOwner.ensure()).acceptsSpace(status.spaceId))
+        return { ...empty, ...publishing, available: true, reason: null, error: '当前目录属于另一共享姿态，请选择独立的同步目录' }
+      return { ...status, ...publishing, available: true, reason: null }
+    }
     catch (error) { return { ...empty, ...publishing, error: message(error), available: false, reason: message(error) } }
   }
 
@@ -236,6 +278,8 @@ export class SharedWorkspaceService {
     return this.withActivity(async () => {
       this.assertWorkspace(expectedPath)
       const client = await this.ensure()
+      const bound = client.status().spaceId
+      if (bound && !(await this.lanOwner.ensure()).acceptsSpace(bound)) throw new Error('当前目录属于另一共享姿态，请选择独立的同步目录')
       this.assertWorkspace(expectedPath)
       const result = await work(client)
       this.assertWorkspace(expectedPath)
@@ -255,20 +299,73 @@ export class SharedWorkspaceService {
     }
     return this.perform(expectedPath, client => this.mutateFiles(expectedPath, this.controller.signal, () => client.bind(spaceId)))
   }
-  async create(expectedPath: string, name: string) {
+  async create(expectedPath: string, name: string, hostDeviceId?: string, sourceDirectory?: string) {
     this.requirePublishing()
-    return this.accountOperation(expectedPath, () => this.remote.request('POST', 'spaces', { name }))
+    if (sourceDirectory) {
+      if (!hostDeviceId) throw new Error('请选择云主机后绑定云端源目录')
+      return this.cloudSourceRequest(expectedPath, hostDeviceId, 'POST', 'spaces', { name, sourceDirectory, confirmSource: true })
+    }
+    return this.accountOperation(expectedPath, async () => hostDeviceId
+      ? (await this.lanOwner.ensure()).hostRequest(hostDeviceId, 'POST', 'spaces', { name })
+      : this.remote.request('POST', 'spaces', { name }))
   }
-  async devices(expectedPath: string) {
-    return this.accountOperation(expectedPath, () => this.remote.request('GET', 'devices'))
+  cloudSourceRequest(expectedPath: string, hostDeviceId: string, method: string, route: string, body?: unknown) {
+    if (method === 'POST' && (route.endsWith('/source') || route === 'directories/create')) this.requirePublishing()
+    return this.accountOperation(expectedPath, async () => {
+      if (this.lanOwner.posture.read().mode !== 'cloud') throw new Error('请切换到云主机共享后操作云端源目录')
+      const runtime = await this.lanOwner.ensure()
+      const host = (await runtime.hosts()).hosts.find(item => item.deviceId === hostDeviceId)
+      if (!host?.dedicated || host.local || !host.canManage || !host.reachable) throw new Error('只能管理当前已连接且已授权的云主机目录')
+      if (!route.endsWith('/members') && host.directorySources !== true)
+        throw new Error('云主机共享服务需要更新，当前版本不支持云端源目录；现有资料和同步不会被改写')
+      if (route === 'directories/create' && host.directoryCreate !== true)
+        throw new Error('云主机共享服务需要更新，当前版本尚不支持新建文件夹；请选择已有文件夹或更新共享服务')
+      return runtime.hostRequest(hostDeviceId, method, route, body)
+    })
   }
-  async revokeDevice(expectedPath: string, deviceId: string) {
-    await this.accountOperation(expectedPath, () => this.remote.request('DELETE', `devices/${deviceId}`))
+  async devices(expectedPath: string, hostDeviceId?: string) {
+    return this.accountOperation(expectedPath, async () => hostDeviceId
+      ? (await this.lanOwner.ensure()).hostRequest(hostDeviceId, 'GET', 'devices') : this.remote.request('GET', 'devices'))
+  }
+  async revokeDevice(expectedPath: string, deviceId: string, hostDeviceId?: string) {
+    await this.accountOperation(expectedPath, async () => hostDeviceId
+      ? (await this.lanOwner.ensure()).hostRequest(hostDeviceId, 'DELETE', `devices/${deviceId}`) : this.remote.request('DELETE', `devices/${deviceId}`))
     return { revoked: true as const }
   }
   async network(expectedPath: string) { return this.accountOperation(expectedPath, async () => (await this.lanOwner.ensure()).network()) }
-  async invitePairing(expectedPath: string) { return this.accountOperation(expectedPath, async () => (await this.lanOwner.ensure()).invite()) }
+  async invitePairing(expectedPath: string, hostDeviceId?: string) {
+    return this.accountOperation(expectedPath, async () => {
+      const runtime = await this.lanOwner.ensure()
+      if (!hostDeviceId || hostDeviceId === runtime.network().deviceId) return runtime.invite()
+      this.requirePublishing()
+      return runtime.hostRequest(hostDeviceId, 'POST', 'pairing/invite')
+    })
+  }
   async pairDevice(expectedPath: string, code: string, address?: string) { return this.accountOperation(expectedPath, async () => (await this.lanOwner.ensure()).pair(code, address)) }
+  async connectHost(expectedPath: string, code: string, address?: string) {
+    return this.accountOperation(expectedPath, async () => (await this.lanOwner.ensure()).connectHost(code, address))
+  }
+  async hosts(expectedPath: string) { return this.accountOperation(expectedPath, async () => (await this.lanOwner.ensure()).hosts()) }
+  async exportHost(expectedPath: string) {
+    this.requirePublishing()
+    return this.accountOperation(expectedPath, async () => {
+      const runtime = await this.lanOwner.ensure()
+      const result = await createHostDeployment(runtime.deploymentIdentity())
+      this.requirePublishing()
+      return result
+    })
+  }
+  sshProbe(expectedPath: string, target: SharedSshTarget) {
+    this.requirePublishing()
+    return this.accountOperation(expectedPath, () => probeSshHost(target, this.controller.signal))
+  }
+  deployHost(expectedPath: string, input: SharedHostDeploymentInput) {
+    this.requirePublishing()
+    return this.accountOperation(expectedPath, async () => this.lanOwner.deployments.start(input))
+  }
+  deploymentStatus(expectedPath: string, id?: string, cancel = false) {
+    return this.accountOperation(expectedPath, async () => cancel && id ? this.lanOwner.deployments.cancel(id) : this.lanOwner.deployments.status(id))
+  }
   private accountOperation<T>(expectedPath: string, work: () => Promise<T>): Promise<T> {
     return this.withActivity(async () => {
       this.requireAccount(); await this.localIdentity(); this.assertWorkspace(expectedPath)
@@ -334,11 +431,11 @@ export class SharedWorkspaceService {
     await this.localIdentity()
     await this.stopping
     if (!this.hasCredentials()) throw new Error('共享资料库账号连接已关闭')
-    if (this.controller.signal.aborted) {
+    const resume = this.controller.signal.aborted
+    if (resume) {
       this.controller = new AbortController()
-      this.client?.start()
     }
-    if (this.client) return this.client
+    if (this.client) { if (resume) await this.resumeClient(this.client); return this.client }
     if (this.opening) return this.opening
     const pending = this.open()
     this.opening = pending
@@ -366,7 +463,7 @@ export class SharedWorkspaceService {
     })
     this.fault = null
     await this.rememberBinding(this.client)
-    if (this.options.lanOwner && this.hasCredentials()) this.client.start()
+    if (this.options.lanOwner && this.hasCredentials()) await this.resumeClient(this.client)
     return this.client
   }
   private async rememberBinding(client: SharedClient) {

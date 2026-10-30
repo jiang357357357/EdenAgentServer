@@ -1,6 +1,9 @@
 import { AccountAuthentication } from "../modules/accounts/index.ts"
 import { recoverSessionOwners } from "../modules/accounts/index.ts"
 import { UiPreferenceRepository } from "../modules/ui-preferences/index.ts"
+import { PromptModeRepository } from "../modules/prompt-mode/index.ts"
+import { promptModeRoutes } from "../transport/rpc/prompt-mode.routes.ts"
+import { desktopRoutes } from "../transport/rpc/desktop.routes.ts"
 import { uiPreferenceRoutes } from "../transport/rpc/ui-preferences.routes.ts"
 import { operationRoutes } from "../transport/rpc/operation.routes.ts"
 import { commandRoutes } from "../transport/rpc/command.routes.ts"
@@ -34,6 +37,7 @@ import { createServices } from "./services.ts"
 import { BlobHttp } from "../transport/http/blobs.ts"
 import { healthHandler } from "../transport/http/health.ts"
 import { memoryExtractionRoutes } from "../transport/rpc/memory-extraction.routes.ts"
+import { memoryModelRoutes } from "../transport/rpc/memory-model.routes.ts"
 
 export async function openRuntime(config: ServerConfig) {
   const releaseProcessLock = acquireProcessLock(config.dataRoot)
@@ -90,10 +94,12 @@ export async function openRuntime(config: ServerConfig) {
     services.pluginHooks.close()
     services.selfAwake.close()
     return Promise.allSettled([
+      Promise.resolve().then(() => services.desktop.close()),
       services.browser.close(),
       services.sharedWorkspace.close(),
       services.mcpResults.close(),
       services.mcp.close(),
+      services.video.close(),
       services.connectorLifecycle.close(),
       services.speech.close(),
       services.voice.close(),
@@ -108,6 +114,8 @@ export async function openRuntime(config: ServerConfig) {
       blobHttp.close(),
       plugins.close(),
       sessions.close(),
+      services.localMemory?.close(),
+      services.memoryModel?.close(),
       mon.close(),
       companion.close(),
       Promise.resolve().then(() => services.media.close()),
@@ -136,6 +144,7 @@ export async function openRuntime(config: ServerConfig) {
       automaticExecution: true,
     })),
     ...operationRoutes(services.repository),
+    ...desktopRoutes(services.desktop),
     ...commandRoutes(services.commands),
     ...mcpRoutes(services.mcp, database, services.mcpResults),
     ...connectorRoutes(
@@ -149,8 +158,10 @@ export async function openRuntime(config: ServerConfig) {
     ...voiceRoutes(services.voiceConfig, services.voice, services.speech),
     ...subagentRoutes(services.subagents),
     ...memoryExtractionRoutes(memoryExtractions),
+    ...memoryModelRoutes(services.memoryModel),
     ...memoRoutes(services.memos, services.memoNotifications),
     ...uiPreferenceRoutes(new UiPreferenceRepository(database)),
+    ...promptModeRoutes(new PromptModeRepository(database)),
     ...notificationRoutes(services.desktopReminders),
     ...selfAwakeRoutes(services.selfAwake.repository, services.selfAwakeActions, services.selfAwake),
     ...directorRoutes(directors),

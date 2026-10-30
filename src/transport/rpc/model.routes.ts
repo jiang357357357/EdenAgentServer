@@ -7,6 +7,16 @@ import type { MonBindingService } from '../../modules/mon/index.ts'
 
 export function modelRoutes(models: ModelService, sessions: SessionService, mon?: MonBindingService): Record<string, (value: JsonValue) => JsonValue | Promise<JsonValue>> {
   return {
+    'model.context.read': contractHandler(rpcMethods['model.context.read'], input => {
+      sessions.repository.read(input.sessionId)
+      return models.contextInfo(input.sessionId)
+    }),
+    'model.context.set': contractHandler(rpcMethods['model.context.set'], input => sessions.configureWhileIdle(input.sessionId, async () => {
+      const session = sessions.repository.read(input.sessionId)
+      if (session.status !== 'active') throw new Error('请在活动会话中修改上下文上限。')
+      if (session.executionStatus !== 'idle') throw new Error('请等待当前会话的回答及排队消息结束后再保存。')
+      return models.setContextLimit(input.sessionId, input.contextWindow, input.expectedModelKey, input.expectedRevision)
+    })),
     ...(mon ? {
       'model.mon.children.list': contractHandler(rpcMethods['model.mon.children.list'], input => mon.childProfiles(input.sessionId)),
       'model.mon.children.catalog': contractHandler(rpcMethods['model.mon.children.catalog'], input => mon.childCatalog(input.sessionId)),

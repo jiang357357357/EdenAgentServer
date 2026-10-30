@@ -11,12 +11,16 @@ export function actorTurnInstruction(userText: string, plan: DirectorPlan, beatI
 
 /** Rewrite only our stored actor instruction; preserve its user text and director plan. */
 export function projectActorTurnHistory(content: string, project: (history: JsonValue[]) => JsonValue[]): string {
+  return projectActorTurnContent(content, value => ({ ...value, recentConversation: project(value.recentConversation as JsonValue[]) }))
+}
+
+/** The wrapper and director schema belong to the host; redact only the decoded payload. */
+export function projectActorTurnContent(content: string, project: (value: Record<string, JsonValue>) => JsonValue): string {
   if (!content.startsWith(ACTOR_TURN_PREFIX)) return content
   const value = JSON.parse(content.slice(ACTOR_TURN_PREFIX.length)) as Record<string, JsonValue>
   if (!value || typeof value !== 'object' || Array.isArray(value) || !Array.isArray(value.recentConversation)) {
     throw new Error('Stored actor instruction has invalid conversation history')
   }
-  const recentConversation = project(value.recentConversation)
-  return JSON.stringify(recentConversation) === JSON.stringify(value.recentConversation)
-    ? content : ACTOR_TURN_PREFIX + JSON.stringify({ ...value, recentConversation })
+  const next = project(value)
+  return JSON.stringify(next) === JSON.stringify(value) ? content : ACTOR_TURN_PREFIX + JSON.stringify(next)
 }

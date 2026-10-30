@@ -42,6 +42,7 @@ async function readMonCatalog(client: MonClient, assistantId?: string | number, 
   if (visionDetail && String(visionDetail.entityId) !== String(vision?.id)) throw new Error('Mon vision detail identity does not match the selected entity')
   return {
     binding: detail, visionBinding: visionDetail,
+    voiceBinding: { assistantId: assistant.id, ttsConfigId: assistant.character.tts_config_id, sttConfigId: assistant.character.stt_config_id },
     catalog: { source: 'core', serviceType: 'ai', vendors,
       assistant: { id: assistant.id, name: assistant.name }, character: { id: assistant.character.id, name: assistant.character.name },
       current: selected ? modelOption(selected, selected.id, vendors) : null, vision: vision ? modelOption(vision, undefined, vendors) : null,

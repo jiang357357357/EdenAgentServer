@@ -9,6 +9,7 @@ import type { ModelPricingTarget } from '@eden/api'
 import { childModel } from './child-model.ts'
 import type { ChildModelOptions } from './child-model.ts'
 import type { LocalChildModels } from './local-child-models.ts'
+import type { ModelContextLimitRepository } from './context-limit-repository.ts'
 
 export class ModelService {
   private readonly configured: RuntimeModel | undefined
@@ -17,7 +18,7 @@ export class ModelService {
   private readonly visionEntities = new Map<string, string | number>()
   private readonly directors = new Map<string, RuntimeModel>()
   private readonly actors = new Map<string, Map<string, ActorModelBinding>>()
-  constructor(private readonly origin: RuntimeOrigin, configured?: RuntimeModel, private readonly storage?: ModelBindingRepository, readonly pricing?: ModelPricingRepository, private readonly localChildren?: LocalChildModels) {
+  constructor(private readonly origin: RuntimeOrigin, configured?: RuntimeModel, private readonly storage?: ModelBindingRepository, readonly pricing?: ModelPricingRepository, private readonly localChildren?: LocalChildModels, private readonly contextLimits?: ModelContextLimitRepository) {
     if (origin === 'mon' && configured) throw new Error('Mon models must be bound through the Mon integration')
     this.configured = configured ? configuredModelSchema.parse(configured) : undefined
     if (origin === 'local' && storage) throw new Error('Local models cannot restore Mon bindings')
@@ -85,7 +86,7 @@ export class ModelService {
 
   resolve(sessionId: string): RuntimeModel | undefined {
     this.refresh(sessionId)
-    return this.withRates(this.origin === 'local' ? this.localChildren?.resolve(sessionId, this.configured) ?? this.configured : this.bindings.get(sessionId)?.model)
+    return this.withContext(sessionId, this.origin === 'local' ? this.localChildren?.resolve(sessionId, this.configured) ?? this.configured : this.bindings.get(sessionId)?.model)
   }
   activateChildSnapshotInTransaction(sessionId: string, snapshot: ReturnType<ModelService['childSnapshot']>): void {
     if (snapshot.origin !== this.origin) throw new Error('Recovered model belongs to another world')
@@ -142,20 +143,20 @@ export class ModelService {
 
   resolveDirector(sessionId: string): RuntimeModel | undefined {
     this.refresh(sessionId)
-    return this.withRates(this.origin === 'local' ? this.configured : this.directors.get(sessionId))
+    return this.withContext(sessionId, this.origin === 'local' ? this.configured : this.directors.get(sessionId))
   }
 
   resolveActor(sessionId: string, assistantId: string | number): ActorModelBinding | undefined {
     this.refresh(sessionId)
     const actor = this.actors.get(sessionId)?.get(String(assistantId))
     return actor ? {
-      ...actor, main: { ...actor.main, model: this.withRates(actor.main.model)! },
+      ...actor, main: { ...actor.main, model: this.withContext(sessionId, actor.main.model)! },
       ...(actor.vision ? { vision: { ...actor.vision, model: this.withRates(actor.vision.model)! } } : {})
     } : undefined
   }
 
   resolveActorModel(sessionId: string, assistantId: string | number): RuntimeModel | undefined {
-    return this.origin === 'local' ? this.withRates(this.configured) : this.resolveActor(sessionId, assistantId)?.main.model
+    return this.origin === 'local' ? this.withContext(sessionId, this.configured) : this.resolveActor(sessionId, assistantId)?.main.model
   }
 
   bindVision(sessionId: string, model: RuntimeModel | undefined, entityId?: string | number | null): void {
@@ -171,6 +172,28 @@ export class ModelService {
   resolveVision(sessionId: string): RuntimeModel | undefined { this.refresh(sessionId); return this.withRates(this.visionBindings.get(sessionId)) }
 
   private withRates(model: RuntimeModel | undefined) { return this.pricing ? this.pricing.apply(model) : model }
+
+  private withContext(sessionId: string, model: RuntimeModel | undefined) {
+    return this.withRates(this.contextLimits ? this.contextLimits.apply(sessionId, model) : model)
+  }
+
+  private contextModels(sessionId: string): RuntimeModel[] {
+    this.refresh(sessionId)
+    const models = this.origin === 'local' ? [this.localChildren?.resolve(sessionId, this.configured) ?? this.configured] :
+      this.actors.has(sessionId) ? [this.directors.get(sessionId), ...[...this.actors.get(sessionId)!.values()].map(actor => actor.main.model)] :
+        [this.bindings.get(sessionId)?.model]
+    return models.filter((model): model is RuntimeModel => Boolean(model))
+  }
+
+  contextInfo(sessionId: string) {
+    if (!this.contextLimits) throw new Error('上下文设置存储不可用。')
+    return this.contextLimits.read(sessionId, this.contextModels(sessionId))
+  }
+
+  setContextLimit(sessionId: string, limit: number | null, expectedModelKey: string, expectedRevision: string | null) {
+    if (!this.contextLimits) throw new Error('上下文设置存储不可用。')
+    return this.contextLimits.set(sessionId, this.contextModels(sessionId), limit, expectedModelKey, expectedRevision)
+  }
 
   pricingModel(selection: ModelPricingTarget): RuntimeModel {
     const model = selection.target === 'main' ? this.resolve(selection.sessionId) : selection.target === 'director' ? this.resolveDirector(selection.sessionId) :
@@ -220,7 +243,7 @@ export class ModelService {
   read(sessionId?: string, participants?: JsonValue[]) {
     this.refresh(sessionId ?? 'default')
     const binding = this.bindings.get(sessionId ?? 'default')
-    const model = this.origin === 'local' ? sessionId ? this.resolve(sessionId) : this.configured : binding?.model
+    const model = sessionId ? this.resolve(sessionId) : this.origin === 'local' ? this.configured : binding?.model
     const roster = participants ?? [...(this.actors.get(sessionId ?? '')?.values() ?? [])].map(actor => ({ assistantId: actor.assistantId }))
     if (!sessionId || roster.length < 2) return modelStatus(this.origin, model, binding)
     const actors = roster.map(participant => {

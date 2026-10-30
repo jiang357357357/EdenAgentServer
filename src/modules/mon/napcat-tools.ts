@@ -9,6 +9,7 @@ import type { NapcatResult } from './napcat-transport.ts'
 import { qqBotIdDescription } from '../../model-prompts/qq-targets.ts'
 import { qqModelResult } from '../tool-results/index.ts'
 import { qqReferenceDescription } from '../../model-prompts/qq-results.ts'
+import { napcatOutcome } from './napcat-outcome.ts'
 
 const action = z.string().regex(/^_?[a-z][a-z0-9_]{0,79}$/)
 const bot = z.string().regex(/^[1-9]\d{0,19}$/).optional().describe(qqBotIdDescription)
@@ -35,13 +36,13 @@ export function napcatTools(client: NapcatClient, permissions: PermissionService
     await permissions.request({ ...context, sessionId, turnId }, capability, resource, toJson(details))
     context.signal.throwIfAborted()
   }
-  const resolve = async (context: ToolContext, botId?: string) => {
+  const resolve = async (context: ToolContext, botId?: string, requireOnline = false) => {
     const target = client.target(sessionId, botId)
     if (target.discovery) await approve(context, 'qq.napcat.read', target.resource, { channel: 'qq_bot_discovery' })
-    return client.resolve(target, context.signal)
+    return client.resolve(target, context.signal, requireOnline)
   }
-  return [{ name: 'list_qq_capabilities', revision: 'eden.qq.actions.v1', executionMode: 'sequential',
-    description: toolDescription('list_qq_capabilities'), modelResult,
+  return [{ name: 'list_qq_capabilities', revision: 'eden.qq.actions.v3', executionMode: 'sequential',
+    description: toolDescription('list_qq_capabilities'), modelResult, outcome: napcatOutcome,
     parameters: toJson(z.toJSONSchema(capabilityInput)) as Record<string, JsonValue>,
     async execute(raw, context) {
       const input = capabilityInput.parse(raw), resolved = await resolve(context, input.bot_id)
@@ -51,8 +52,8 @@ export function napcatTools(client: NapcatClient, permissions: PermissionService
         { ...input, bot: target.qqContext?.bot_qq ?? target.botId })
       return reply(target, await client.capabilities(target, `${turnId}:${context.callId}`, context.signal, input.action))
     },
-  }, { name: 'list_qq_events', revision: 'eden.qq.actions.v1', executionMode: 'sequential',
-    description: toolDescription('list_qq_events'), modelResult,
+  }, { name: 'list_qq_events', revision: 'eden.qq.actions.v3', executionMode: 'sequential',
+    description: toolDescription('list_qq_events'), modelResult, outcome: napcatOutcome,
     parameters: toJson(z.toJSONSchema(eventInput)) as Record<string, JsonValue>,
     async execute(raw, context) {
       const input = eventInput.parse(raw), resolved = await resolve(context, input.bot_id)
@@ -65,11 +66,11 @@ export function napcatTools(client: NapcatClient, permissions: PermissionService
       return reply(target, await client.events(target, params, `${turnId}:${context.callId}`, context.signal))
     },
   }, ...(['read', 'write'] as const).map(mode => ({
-    name: mode === 'read' ? 'read_qq_action' : 'execute_qq_action', revision: 'eden.qq.actions.v1', executionMode: 'sequential' as const,
-    description: toolDescription(mode === 'read' ? 'read_qq_action' : 'execute_qq_action'), modelResult,
+    name: mode === 'read' ? 'read_qq_action' : 'execute_qq_action', revision: 'eden.qq.actions.v3', executionMode: 'sequential' as const,
+    description: toolDescription(mode === 'read' ? 'read_qq_action' : 'execute_qq_action'), modelResult, outcome: napcatOutcome,
     parameters: toJson(z.toJSONSchema(actionInput)) as Record<string, JsonValue>,
     async execute(raw: Record<string, unknown>, context: ToolContext) {
-      const input = actionInput.parse(raw), resolved = await resolve(context, input.bot_id)
+      const input = actionInput.parse(raw), resolved = await resolve(context, input.bot_id, true)
       if (!('target' in resolved)) return toJson(resolved)
       const { target } = resolved
       const params = client.groupParams(target, client.resolveParams(target, input.params), mode)

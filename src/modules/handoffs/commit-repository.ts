@@ -33,7 +33,7 @@ export class HandoffCommitRepository {
         this.sessions.events.insert(session.id, null, 'model.bound', { model, assistantId: job.participant.assistantId, assistantHandoff: true })]
       if (this.bindings) this.bindings.saveInTransaction(session.id, snapshot!)
       if (session.participants.length > 1) {
-        const history = conversationWindow(this.sessions.events.messages(session.id, undefined, 100).items.map(event => event.payload))
+        const history = conversationWindow(this.sessions.modelHistory(this.sessions.events.messages(session.id, undefined, 100).items.map(event => event.payload), session.id))
         const checkpoint = publicHistoryCheckpoint(session.id, history, this.sessions.checkpoint(session.id))
         db.prepare(`INSERT INTO runtime_checkpoints VALUES (?, ?, ?)
           ON CONFLICT(session_id) DO UPDATE SET checkpoint_json=excluded.checkpoint_json, updated_at=excluded.updated_at`)

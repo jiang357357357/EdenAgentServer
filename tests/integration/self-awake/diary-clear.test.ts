@@ -31,18 +31,24 @@ function beforeDiaryMigration(current: EdenDatabase): DatabaseSync {
   } catch (error) { legacy.close(); throw error }
 }
 
-test('clearing diaries covers unloaded pages, isolates accounts and preserves executions and future writing', () => {
+test('clearing diaries covers unloaded pages, isolates account databases and preserves executions and future writing', () => {
   const db = new EdenDatabase(':memory:', 'mon')
+  const otherDb = new EdenDatabase(':memory:', 'mon')
   try {
     const repo = new SelfAwakeRepository(db), sessions = new SessionRepository(db, 'mon')
     const bridge = new SelfAwakeBridgeRepository(db, new JobRepository(db))
+    const otherRepo = new SelfAwakeRepository(otherDb), otherSessions = new SessionRepository(otherDb, 'mon')
+    const otherBridge = new SelfAwakeBridgeRepository(otherDb, new JobRepository(otherDb))
     const account = (userId: string) => ({ key: userId, userId, coreBaseUrl: 'http://localhost/' })
+    db.connection.prepare("INSERT INTO realm_meta(key,value) VALUES('account_key','a')").run()
+    otherDb.connection.prepare("INSERT INTO realm_meta(key,value) VALUES('account_key','b')").run()
     const create = (userId: string, key: string, content: string) => withAccount(account(userId), () => {
-      const session = sessions.create(key)
-      const job = bridge.submit(userId, key, key, { kind: 'self_awake', sessionId: session.id, dueAt: Date.now(), payload: {}, key, causationId: '', depth: 0 })
-      const id = repo.begin(job, { topic: 'request-only' }, { characterId: key })
-      db.connection.prepare("UPDATE self_awake_runs SET state='running' WHERE id=?").run(id)
-      if (content) repo.finish(id, content)
+      const store = userId === 'a' ? { db, sessions, repo, bridge } : { db: otherDb, sessions: otherSessions, repo: otherRepo, bridge: otherBridge }
+      const session = store.sessions.create(key)
+      const job = store.bridge.submit(userId, key, key, { kind: 'self_awake', sessionId: session.id, dueAt: Date.now(), payload: {}, key, causationId: '', depth: 0 })
+      const id = store.repo.begin(job, { topic: 'request-only' }, { characterId: key })
+      store.db.connection.prepare("UPDATE self_awake_runs SET state='running' WHERE id=?").run(id)
+      if (content) store.repo.finish(id, content)
       return id
     })
     const first = create('a', 'first', '今天看见一只猫。')
@@ -73,7 +79,8 @@ test('clearing diaries covers unloaded pages, isolates accounts and preserves ex
       assert.equal(repo.read(first).diaries.length, 0)
       assert.equal(repo.clearDiaries().deleted, 0)
     })
-    withAccount(account('b'), () => { assert.equal(repo.read(other).diaries.length, 1); assert.equal(repo.read(other).diaryCleared, false) })
+    withAccount(account('b'), () => { assert.equal(otherRepo.read(other).diaries.length, 1); assert.equal(otherRepo.read(other).diaryCleared, false) })
+    withAccount(account('a'), () => assert.throws(() => repo.read(other), /not found/))
     const fresh = create('a', 'fresh', '新的一天。')
     withAccount(account('a'), () => {
       assert.equal(repo.read(fresh).diaries[0]!.content, '新的一天。')
@@ -86,10 +93,10 @@ test('clearing diaries covers unloaded pages, isolates accounts and preserves ex
       assert.equal(repo.clearHistory().deleted, 0)
       assert.deepEqual(repo.wakeSchedule(), schedule)
     })
-    withAccount(account('b'), () => assert.equal(repo.read(other).diaries.length, 1))
+    withAccount(account('b'), () => assert.equal(otherRepo.read(other).diaries.length, 1))
     const afterHistory = create('a', 'after-history', '清理之后的新日记。')
     withAccount(account('a'), () => assert.equal(repo.read(afterHistory).diaries.length, 1))
-  } finally { db.close() }
+  } finally { db.close(); otherDb.close() }
 })
 
 test('diary clearing requires explicit confirmation and rejects a caller-supplied account scope', () => {

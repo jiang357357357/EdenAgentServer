@@ -1,13 +1,16 @@
 import { build } from 'esbuild'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import path from 'node:path'
 
-const root = fileURLToPath(new URL('../../', import.meta.url))
+export async function buildTui(root = fileURLToPath(new URL('../../', import.meta.url)), output = 'dist/server/tui.mjs') {
 await build({
   absWorkingDir: root,
   entryPoints: ['Server/tui/main.ts'],
-  outfile: 'dist/server/tui.mjs',
+  outfile: path.resolve(root, output),
   bundle: true,
   platform: 'node', target: 'node22', format: 'esm', sourcemap: true,
   external: ['@earendil-works/*', 'ws', 'zod', 'typebox'],
 })
-process.stdout.write('Built dist/server/tui.mjs\n')
+process.stdout.write('Built TUI bundle\n')
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await buildTui()

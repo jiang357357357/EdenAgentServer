@@ -39,7 +39,8 @@ export class ConnectorEventRepository {
         if (settings.selfAwakeOnEvent === true) {
           const previous = db.prepare('SELECT MAX(created_at) AS at FROM connector_events WHERE connector_id=? AND job_id IS NOT NULL').get(connectorId)
           const pending = db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE session_id=? AND kind='self_awake' AND state IN ('queued','running','dispatched')").get(bound)
-          if (Number(pending?.count) >= 8 || (previous?.at != null && now - Number(previous.at) < 10000)) suppression = 'self_awake_rate_limited'
+          if (!this.jobs.canSelfAwake()) suppression = 'self_awake_disabled'
+          else if (Number(pending?.count) >= 8 || (previous?.at != null && now - Number(previous.at) < 10000)) suppression = 'self_awake_rate_limited'
           else jobId = this.jobs.scheduleInTransaction({
             kind: 'self_awake', sessionId: bound, dueAt: now,
             key: `connector-event:${id}`, causationId: id, depth: 0, payload: {

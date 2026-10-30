@@ -6,6 +6,7 @@ import type { SQLOutputValue } from 'node:sqlite'
 import { assertScopedScheduler, selfAwakeScopeState } from './scope-paths.ts'
 import { SelfAwakeRoleRepository } from './role-repository.ts'
 import { publishRoleCoordinator } from './role-publication.ts'
+import { SelfAwakeControlRepository } from './control-repository.ts'
 
 /** Session revisions are a durable outbox; MonOs owns actual timed activation. */
 export class SelfAwakeTimerPublication {
@@ -48,7 +49,7 @@ export class SelfAwakeTimerPublication {
     catch (error) { this.error = `Self-awake timer saved, MonOs delivery pending: ${error instanceof Error ? error.message : String(error)}`; throw new Error(this.error) }
   }
   private deliver(sessionId?: string): void {
-    const rows = this.database.connection.prepare(`SELECT s.*,j.due_at,j.payload_json FROM self_awake_session_schedules s
+    const rows = this.database.connection.prepare(`SELECT s.*,j.due_at,j.payload_json,j.state AS job_state FROM self_awake_session_schedules s
       LEFT JOIN jobs j ON j.id=s.job_id WHERE s.published_revision<s.revision AND (? IS NULL OR s.session_id=?)
       AND (? IS NOT NULL OR s.session_id>?) ORDER BY s.session_id LIMIT 32`).all(sessionId ?? null, sessionId ?? null, sessionId ?? null, this.publicationCursor)
     if (!sessionId) this.publicationCursor = rows.length < 32 ? '' : String(rows.at(-1)!.session_id)
@@ -73,13 +74,15 @@ export class SelfAwakeTimerPublication {
     mkdirSync(directory, { recursive: true, mode: 0o700 })
     const filename = path.join(directory, `${row.revision}.json`), temporary = `${filename}.tmp`
     const payload = row.payload_json ? JSON.parse(String(row.payload_json)) : {}
+    const enabled = new SelfAwakeControlRepository(this.database).read().enabled
+    const scheduled = enabled && row.job_state === 'queued' && kind !== 'retired'
     const request = { schema_version: 'self-awake.schedule.v2', scope_kind: kind, session_id: row.session_id, revision: row.revision,
       legacy_request_id: row.legacy_request_id,
-      action: row.job_id ? 'schedule' : kind === 'role' ? 'watchdog' : 'cancel', request_id: row.job_id ?? `cancel:${row.session_id}:${row.revision}`, job_id: row.job_id,
+      action: scheduled ? 'schedule' : enabled && kind === 'role' ? 'watchdog' : 'cancel', request_id: scheduled ? row.job_id : `control:${row.session_id}:${row.revision}`, job_id: scheduled ? row.job_id : null,
       requested_by: 'eden-agent', requested_at: new Date(Number(row.revision)).toISOString(),
-      next_wake_at: row.job_id ? new Date(Number(row.due_at)).toISOString() : null,
-      after_minutes: row.job_id ? Math.max(1, Math.ceil((Number(row.due_at) - Date.now()) / 60000)) : null,
-      reason: payload.trigger?.reason ?? payload.prompt ?? 'Agent session self-awake timer' }
+      next_wake_at: scheduled ? new Date(Number(row.due_at)).toISOString() : null,
+      after_minutes: scheduled ? Math.max(1, Math.ceil((Number(row.due_at) - Date.now()) / 60000)) : null,
+      reason: enabled ? payload.trigger?.reason ?? payload.prompt ?? 'Agent session self-awake timer' : '用户已关闭自醒；待执行计划保留' }
     try { writeFileSync(temporary, JSON.stringify(request), { mode: 0o600 }); renameSync(temporary, filename) }
     finally { rmSync(temporary, { force: true }) }
   }

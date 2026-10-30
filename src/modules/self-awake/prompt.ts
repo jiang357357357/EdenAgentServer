@@ -2,6 +2,7 @@ import { modelParticipant } from '@eden/api'
 import type { JsonValue, JobInfo } from '@eden/api'
 import { selfAwakeInstruction } from '../../model-prompts/self-awake.ts'
 import { modelEnvironmentContext } from '../../model-prompts/environment.ts'
+import { conversationResult } from '../tool-results/index.ts'
 
 export function selfAwakeRequest(job: JobInfo, author: JsonValue, environment: JsonValue) {
   const payload = job.payload && typeof job.payload === 'object' && !Array.isArray(job.payload) ? job.payload : {}
@@ -19,9 +20,9 @@ export function selfAwakePromptContext(request: JsonValue) {
   const { reason, wake_reason, ...activation } = trigger
   const schedule = object(value.wakeSchedule)
   const scheduled = trigger.type === 'scheduled'
+  const topics = conversationResult({ rounds: value.recent_conversation ?? [] }) as Record<string, JsonValue>
   return { current_time: value.current_time ?? null, trigger: scheduled ? activation : trigger,
-    ...(Array.isArray(value.merged_plans) && value.merged_plans.length ? { inheritedWakeNotes: value.merged_plans } : {}),
-    environment: modelEnvironmentContext(value.environment), recent_conversation: value.recent_conversation ?? [], wakeSchedule: schedule ? { status: schedule.status ?? null, nextWakeAt: schedule.nextWakeAt ?? null, source: schedule.source ?? 'unknown',
+    environment: modelEnvironmentContext(value.environment), recent_conversation: topics.rounds ?? [], wakeSchedule: schedule ? { status: schedule.status ?? null, nextWakeAt: schedule.nextWakeAt ?? null, source: schedule.source ?? 'unknown',
       ...(schedule.status !== 'scheduled' ? { reason: schedule.reason ?? null } : {}) } : null }
 }
 

@@ -38,7 +38,7 @@ test('shared sync engines bind canonical folders, deduplicate explicit sharing a
   try {
     const detach = service.attach(async () => ({ accountKey: account.key, coreBaseUrl, token: 'temporary-fixture-token' }))
     assert.equal(loaded.length, 0, 'Account credentials alone must not choose a global directory')
-    service.selectDirectory(a.id, aRoot, '0')
+    service.selectDirectory(a.id, aRoot, service.directorySnapshot().revision)
     const first = service.forSession(a.id)
     assert.equal((await first.status()).root, aRoot)
     assert.equal(service.forSession(b.id), first, 'Different project workspaces do not select different shared directories')
@@ -93,7 +93,7 @@ test('navigation retires idle unbound folders while retaining active operations 
   let pending: Promise<void> | undefined
   try {
     service.attach(async () => ({ accountKey: account.key, coreBaseUrl, token: 'temporary-fixture-token' }))
-    service.selectDirectory(a.id, aRoot, '0')
+    service.selectDirectory(a.id, aRoot, service.directorySnapshot().revision)
     const active = service.forSession(a.id)
     await active.status()
     let entered!: () => void

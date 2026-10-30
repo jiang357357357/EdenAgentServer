@@ -48,6 +48,8 @@ test("Mon binds its health socket before a slow legacy account recovery finishes
     MON_CORE_BASE_URL: coreUrl,
   })
   let settled = false
+  assert.equal(config.os, undefined, 'An external temporary realm must not acquire the source installation MCP listener')
+  assert.equal(config.monIdentity, undefined, 'Temporary account recovery cannot borrow source service credentials')
   const starting = startServer(config).finally(() => {
     settled = true
   })

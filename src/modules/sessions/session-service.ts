@@ -1,5 +1,6 @@
 import { logDiagnostic } from '../logging/index.ts'
 import { UiPreferenceRepository } from "../ui-preferences/index.ts"
+import { PromptModeRepository } from '../prompt-mode/index.ts'
 import { withAccount } from '../accounts/index.ts'
 import { randomUUID } from 'node:crypto'
 import { toJson, QQ_FILE_MAX_INPUT_BYTES } from '@eden/api'
@@ -18,7 +19,7 @@ import { InputAdmissions } from './input/admissions.ts'
 import { InputResubmissionRepository } from './input/resubmission-repository.ts'
 import type { MemoryRecall } from '../memories/index.ts'
 import { SessionTitleService } from './session-title-service.ts'
-import { runtimeStopReason, transientTurnInput, turnRecallQuery } from './turn/single-turn-context.ts'
+import { isStandaloneSelfAwakeTurn, runtimeStopReason, transientTurnInput, turnRecallQuery } from './turn/single-turn-context.ts'
 import { SessionFaults, sessionFailureReason } from './session-faults.ts'
 import { recoverSessionStorage } from './session-storage-recovery.ts'
 
@@ -130,7 +131,8 @@ export class SessionService {
       const id = String(value.characterId ?? value.characterID ?? '')
       return [id, preferences.replyLength(id).length]
     }))
-    return { replyLengths, participants: session.participants, environment: environment === undefined ? session.environment : environment,
+    return { replyLengths, promptMode: new PromptModeRepository(this.repository.database).snapshot(),
+      participants: session.participants, environment: environment === undefined ? session.environment : environment,
       ...(session.sourceChannel === 'qq' ? { sourceChannel: 'qq' } : {}), ...this.executionSnapshot(sessionId, session.participants) }
   }
 
@@ -236,14 +238,15 @@ export class SessionService {
     if (!model) throw new Error('No model configured for this session')
     assertModelSnapshot(input.metadata, model)
     const transientInput = transientTurnInput(input.metadata)
-    const checkpoint = this.repository.checkpoint(input.sessionId)
+    const checkpoint = isStandaloneSelfAwakeTurn(input) ? undefined : this.repository.checkpoint(input.sessionId)
     const images = await this.imagesFor(input)
     this.controllers.get(input.sessionId)?.signal.throwIfAborted()
     const context = sessionPromptContent(input.metadata ?? {})
     const recallQuery = turnRecallQuery(input)
-    const memory = this.memoryRecall?.prompt(input.sessionId, input.turnId, recallQuery) ?? ''
+    const memory = input.kind === 'compact' ? '' : await this.memoryRecall?.prompt(input.sessionId, input.turnId, recallQuery, undefined, this.controllers.get(input.sessionId)?.signal) ?? ''
+    this.controllers.get(input.sessionId)?.signal.throwIfAborted()
     const runtime = createRuntime({
-      sessionId: input.sessionId, systemPrompt: context.prompt + memory,
+      sessionId: input.sessionId, systemPrompt: context.prompt, turnContext: memory,
       contextSources: toJson([...context.sources, { kind: 'memory', title: '召回记忆', content: memory }]) as JsonValue[],
       model, tools: this.tools(input.sessionId, input.turnId), refreshTools: () => this.tools(input.sessionId, input.turnId), transientInput,
       callbacks: runtimeCallbacks(this.repository, input, { privateUserInput: transientInput }),

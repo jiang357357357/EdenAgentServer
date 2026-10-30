@@ -1,9 +1,13 @@
 import type { EdenDatabase } from '@eden/store'
 import type { JobRepository } from '../jobs/index.ts'
 import type { JobSchedule } from '@eden/api'
+import { SelfAwakeControlRepository } from './control-repository.ts'
 
 export class SelfAwakeBridgeRepository {
-  constructor(private readonly database: EdenDatabase, private readonly jobs: JobRepository) {}
+  readonly control: SelfAwakeControlRepository
+  constructor(private readonly database: EdenDatabase, private readonly jobs: JobRepository) {
+    this.control = new SelfAwakeControlRepository(database)
+  }
   consumeNonce(nonce: string, expiresAt: number): void {
     this.database.transaction(() => {
       this.database.connection.prepare('DELETE FROM service_nonces WHERE expires_at<?').run(Date.now())
@@ -48,6 +52,7 @@ export class SelfAwakeBridgeRepository {
     })
   }
   activate(user: string, key: string, hash: string, sessionId: string, jobId: string) {
+    this.control.assertEnabled()
     return this.database.transaction(() => {
       const existing = this.existing(user, key, hash)
       if (existing) {
@@ -69,6 +74,7 @@ export class SelfAwakeBridgeRepository {
     })
   }
   submit(user: string, key: string, hash: string, input: JobSchedule) {
+    this.control.assertEnabled()
     return this.database.transaction(() => {
       const existing = this.existing(user, key, hash)
       if (existing) return existing
@@ -82,15 +88,20 @@ export class SelfAwakeBridgeRepository {
     const job = this.jobs.read(id)
     const run = this.database.connection.prepare(`SELECT r.id,r.state,r.decision_json,r.last_error,a.started_at,r.updated_at
       FROM self_awake_runs r LEFT JOIN self_awake_activations a ON a.run_id=r.id WHERE r.job_id=?`).get(id)
-    const state = job.state === 'failed' ? 'failed' : String(run?.state ?? job.state)
-    // MonOs polls only pending/running; exposing queued would finish the wake prematurely.
-    const status = ['queued', 'preparing'].includes(state) ? 'pending'
-      : ['running', 'dispatched', 'awaiting_action', 'action_running'].includes(state) ? 'running'
-      : state === 'completed' ? 'completed' : 'failed'
+    const state = ['failed', 'unknown'].includes(job.state) ? job.state : String(run?.state ?? job.state)
+    const status = pollingStatus(state)
     const diary = run && state === 'completed' ? this.database.connection.prepare('SELECT title,content FROM self_awake_diaries WHERE run_id=?').get(run.id!) : undefined
     return { id: run ? String(run.id) : id, status,
       started_at: run?.started_at == null ? null : new Date(Number(run.started_at)).toISOString(),
       decision_payload: run?.decision_json ? JSON.parse(String(run.decision_json)) : diary ? { diary: { title: String(diary.title), content: String(diary.content) } } : null,
       error: run?.last_error ?? job.error, updated_at: new Date(Number(run?.updated_at ?? job.updatedAt)).toISOString() }
   }
+}
+
+/** Preserve uncertainty; queued work still requires polling rather than another submission. */
+function pollingStatus(state: string): string {
+  if (['unknown', 'action_interrupted'].includes(state)) return state
+  if (['queued', 'preparing'].includes(state)) return 'pending'
+  if (['running', 'dispatched', 'awaiting_action', 'action_running'].includes(state)) return 'running'
+  return state === 'completed' ? 'completed' : 'failed'
 }

@@ -20,6 +20,7 @@ export function selfAwakeHistoryFixture(t: TestContext) {
   const activity = new SelfAwakeContext(awake, sessions)
   const alice: Account = { key: accountKey('http://127.0.0.1:1', 'alice'), coreBaseUrl: 'http://127.0.0.1:1', userId: 'alice' }
   const bob: Account = { ...alice, key: accountKey(alice.coreBaseUrl, 'bob'), userId: 'bob' }
+  db.connection.prepare("INSERT INTO realm_meta(key,value) VALUES('account_key',?)").run(alice.key)
   const actor = { assistantId: 4, characterId: 4, name: '普拉娜' }
   writeFileSync(stateFile, JSON.stringify({ enabled: true, next_wake_at: null }))
   writeFileSync(join(root, 'session-protocol.json'), JSON.stringify({ protocolVersion: 2, sessionScopes: true, expiresAt: Date.now() + 60000 }))
@@ -42,11 +43,13 @@ export function selfAwakeHistoryFixture(t: TestContext) {
   const plan = (sessionId: string, dueAt: number, confirmed = true, owner = alice) => withAccount(owner, () => {
     const job = jobs.schedule({ kind: 'self_awake', sessionId, dueAt, key: randomUUID(), causationId: '', depth: 0,
       payload: { prompt: '老师，稍后再见。', scheduleScope: 'session' } })
-    awake.timerPublication.publish(sessionId)
+    // Foreign rows simulate pre-partition history; this account must never publish their plans.
+    if (owner.key === alice.key) awake.timerPublication.publish(sessionId)
     if (confirmed) {
       const directory = join(root, 'sessions', sessionId)
       mkdirSync(directory, { recursive: true })
       writeFileSync(join(directory, 'state.json'), JSON.stringify({ session_id: sessionId, enabled: true,
+        revision: Number(db.connection.prepare('SELECT revision FROM self_awake_session_schedules WHERE session_id=?').get(sessionId)?.revision ?? 0),
         next_wake_at: new Date(dueAt).toISOString(), next_wake_source: 'agent', next_wake_reason: '历史计划说明' }))
     }
     return job

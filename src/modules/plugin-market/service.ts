@@ -10,7 +10,20 @@ export class MarketService {
   private readonly abort = new AbortController()
   private readonly pending = new Map<string, Promise<ReturnType<MarketRepository['read']>>>()
   private readonly downloads = new Set<Promise<unknown>>()
+  private readonly modelPreviews = new Map<string, { previewID: string; expiresAt: number }>()
   constructor(readonly repository: MarketRepository, readonly previews: PackagePreviewRepository, readonly installed: InstalledPackageRepository, readonly recovery?: PackageRecoveryRepository) {}
+  rememberModelPreview(scope: string, preview: { id: string; previewID: string; expiresAt: number }) {
+    for (const [key, value] of this.modelPreviews) if (value.expiresAt <= Date.now()) this.modelPreviews.delete(key)
+    this.modelPreviews.set(JSON.stringify([scope, preview.id]), { previewID: preview.previewID, expiresAt: preview.expiresAt })
+  }
+  modelPreview(scope: string, id: string) {
+    const preview = this.modelPreviews.get(JSON.stringify([scope, id]))
+    if (!preview || preview.expiresAt <= Date.now()) throw new Error('请在当前回合重新检查该连接器包后安装')
+    const current = this.previews.read(preview.previewID)
+    if (current.manifest.id !== id) throw new Error('连接器包预览身份不匹配')
+    return current
+  }
+  forgetModelPreview(scope: string, id: string) { this.modelPreviews.delete(JSON.stringify([scope, id])) }
   async inspectRecovered(sourceId: string) {
     if (!this.recovery) throw new Error('Plugin recovery is unavailable')
     const expected = await this.recovery.source(sourceId)
@@ -53,7 +66,7 @@ export class MarketService {
     void task.finally(() => this.pending.delete(id)).catch(() => {})
     return task
   }
-  async close() { this.abort.abort(); await Promise.allSettled([...this.pending.values(), ...this.downloads]) }
+  async close() { this.abort.abort(); this.modelPreviews.clear(); await Promise.allSettled([...this.pending.values(), ...this.downloads]) }
   private async fetchIndex(id: string) {
     const source = this.repository.raw(id), epoch = String(source.epoch)
     try {

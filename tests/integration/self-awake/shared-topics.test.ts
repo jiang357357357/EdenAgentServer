@@ -72,3 +72,20 @@ test('only latest chat contributes three user/reply rounds, without tool output 
   assert.deepEqual(result.map(r => [r.userText, r.assistantText]), [['question-1', 'reply-1'], ['question-2', 'reply-2'], ['question-3', 'reply-3']])
   assert.ok(result.every(r => r.sessionId === latest.id && r.replyAvailable))
 })
+
+for (const origin of ['local', 'mon'] as const) test(`${origin} unowned background context only shares eligible unowned local dialogue`, t => {
+  const db = new EdenDatabase(':memory:', origin); t.after(() => db.close())
+  const sessions = new SessionRepository(db, origin), inputs = new InputRepository(db, sessions.events)
+  const actor = { characterId: 27 }
+  const current = sessions.create('background', [actor], { sessionPurpose: 'self_awake' }, { purpose: 'self_awake', sourceChannel: 'internal' })
+  const add = (text: string, owned: boolean) => {
+    const make = () => sessions.create(text, [actor])
+    const chat = owned ? withAccount({ key: accountKey('http://localhost/', 'other'), userId: 'other', coreBaseUrl: 'http://localhost/' }, make) : make()
+    inputs.enqueue(chat.id, text, randomUUID(), { participants: [actor] })
+    inputs.finish(inputs.claim(chat.id)!)
+  }
+  add('LOCAL_DIALOGUE', false)
+  add('OWNED_ACCOUNT_DIALOGUE', true)
+  const topics = recentSharedTopics(db, current.id, actor)
+  assert.deepEqual(topics.map(topic => topic.userText), origin === 'local' ? ['LOCAL_DIALOGUE'] : [])
+})

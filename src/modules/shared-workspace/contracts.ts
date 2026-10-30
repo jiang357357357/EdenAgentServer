@@ -41,10 +41,17 @@ export interface SharedLanRuntime {
   network(): SharedNetwork
   invite(): { code: string; expiresAt: number }
   pair(code: string, address?: string): Promise<{ paired: true }>
+  connectHost(code: string, address?: string): Promise<{ paired: true; deviceId: string }>
+  hosts(): Promise<{ hosts: SharedHost[] }>
+  hostRequest<T>(hostDeviceId: string, method: string, path: string, body?: unknown): Promise<T>
+  deploymentIdentity(): HostAdministrator
+  acceptsSpace(spaceId: string): boolean
   revoke(deviceId: string): void
 }
 export type SharedClientFactory = ((options: SharedClientOptions) => SharedClient) & {
-  createLanRuntime?: (options: { dataRoot: string; active(): boolean; canPublish(): boolean }) => Promise<SharedLanRuntime>
+  createLanRuntime?: (options: { dataRoot: string; active(): boolean; canPublish(): boolean; discovery?: boolean; host?: string; connectionPosture?: 'lan' | 'cloud' }) => Promise<SharedLanRuntime>
 }
 export interface SharedCredential { accountKey: string; coreBaseUrl: string; token: string }
 export type CredentialLease = () => Promise<SharedCredential>
+import type { HostAdministrator, SharedHost } from '@eden/shared-workspace'
+export type { HostAdministrator, SharedHost } from '@eden/shared-workspace'

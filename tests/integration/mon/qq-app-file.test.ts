@@ -27,14 +27,17 @@ async function fixture() {
   const workspace = new WorkspaceService(database, [], first)
   const controller = new AbortController()
   const requests: Record<string, unknown>[] = []
-  let target: string | null = '987654321', outcome = 'sent'
+  let target: string | null = '987654321', outcome = 'sent', connected = true
   const server = createServer(async (request, response) => {
     response.setHeader('Content-Type', 'application/json')
     assert.equal(request.headers.authorization, 'Token test-token')
     if (request.url === '/api/devices/qq_bot/management/') {
-      response.end(JSON.stringify({ success: true, data: { bot_id: target ? 42 : null,
+      response.end(JSON.stringify({ success: true, data: { bot_id: target ? 42 : null, access: { botcore_connected: connected },
         default_send_target: target ? { target_type: 'user', target_qq_number: target } : null } }))
       return
+    }
+    if (request.url === '/api/devices/qq_bot/?summary=true') {
+      response.end(JSON.stringify({ data: [{ id: '42', status: 'online' }] })); return
     }
     assert.equal(request.url, '/api/devices/qq_bot/42/send-file/')
     assert.equal(request.method, 'POST')
@@ -70,7 +73,7 @@ async function fixture() {
   const retry = () => deliverOwnerQqFile(database, client, session.id, { target: { bot: '42', number: '987654321' },
     filename: '报告.md', bytes: Buffer.from('老师，这是文件。'), requestId: `${session.id}:file-call` }, controller.signal)
   return { first, second, database, requests, workspace, permissions, tool, execute, pending, approved, retry,
-    target(value: string | null) { target = value }, outcome(value: string) { outcome = value },
+    target(value: string | null) { target = value }, outcome(value: string) { outcome = value }, connection(value: boolean) { connected = value },
     async close() { controller.abort(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); database.close(); rmSync(directory, { recursive: true, force: true }) } }
 }
 
@@ -85,15 +88,17 @@ test('App sends workspace bytes to the configured private owner after scoped app
     f.permissions.resolve(approval.id, true)
     const receipt = await running
     assert.equal((receipt as { status: string }).status, 'sent')
-    const visible = f.tool.modelResult!(receipt) as { status: string; confirmed: boolean; filename: string }
+    const visible = f.tool.modelResult!(receipt) as { status: string; confirmed: boolean; filename: string; fileId: string }
     assert.equal(visible.status, 'sent'); assert.equal(visible.confirmed, true); assert.equal(visible.filename, '报告.md')
-    assert.doesNotMatch(JSON.stringify(visible), /requestId|request_id|file-123/)
+    assert.equal(visible.fileId, 'file-123')
+    assert.doesNotMatch(JSON.stringify(visible), /requestId|request_id|sha256/)
     assert.equal(f.requests.length, 1)
     assert.equal(Buffer.from(String(f.requests[0]!.content_base64), 'base64').toString(), '老师，这是文件。')
     const saved = f.database.connection.prepare('SELECT * FROM mon_contact_deliveries').get()!
     assert.equal(saved.state, 'accepted')
     assert.ok(!String(saved.payload_json).includes('content_base64'))
     assert.equal(f.database.connection.prepare("SELECT COUNT(*) AS n FROM events WHERE kind='qq.file_requested'").get()?.n, 0)
+    f.connection(false)
     assert.deepEqual(await f.retry(), receipt)
     assert.equal(f.requests.length, 1)
   } finally { await f.close() }
@@ -107,6 +112,19 @@ test('denied file approval never uploads bytes or creates a delivery intent', as
     await running
     assert.equal(f.requests.length, 0)
     assert.equal(f.database.connection.prepare('SELECT COUNT(*) AS n FROM mon_contact_deliveries').get()?.n, 0)
+  } finally { await f.close() }
+})
+
+test('offline QQ blocks an approved file before upload and persists its diagnostic reason', async () => {
+  const f = await fixture()
+  try {
+    f.connection(false)
+    await assert.rejects(f.approved(), /QQBot 未在线/)
+    assert.equal(f.requests.length, 0)
+    const row = f.database.connection.prepare('SELECT state,error FROM mon_contact_deliveries').get()
+    assert.equal(row?.state, 'failed'); assert.match(String(row?.error), /QQBot 未在线/)
+    await assert.rejects(f.retry(), /no automatic resend/)
+    assert.equal(f.requests.length, 0)
   } finally { await f.close() }
 })
 
@@ -172,7 +190,8 @@ test('an interrupted upload leaves a durable unknown intent and a replay cannot 
   const controller = new AbortController()
   let uploads = 0
   const client = {
-    async get() { return { data: { bot_id: 42, default_send_target: { target_type: 'user', target_qq_number: '987654321' } } } },
+    async get(url: string) { return url.includes('?summary=true') ? { data: [{ id: '42', status: 'online' }] }
+      : { data: { bot_id: 42, access: { botcore_connected: true }, default_send_target: { target_type: 'user', target_qq_number: '987654321' } } } },
     async post(_path: string, _body: unknown, signal: AbortSignal, timeout: number) {
       uploads++
       assert.equal(timeout, QQ_FILE_TRANSFER_TIMEOUT_MS + 60_000)

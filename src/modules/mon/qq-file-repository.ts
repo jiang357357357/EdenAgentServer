@@ -26,8 +26,8 @@ export class QqFileDeliveryRepository {
       .run(JSON.stringify(receipt), Date.now(), requestId)
   }
 
-  fail(requestId: string, rejected: boolean) {
+  fail(requestId: string, rejected: boolean, reason?: string) {
     this.database.connection.prepare("UPDATE mon_contact_deliveries SET state=?,error=?,updated_at=? WHERE request_id=? AND state='running'")
-      .run(rejected ? 'failed' : 'unknown', rejected ? 'Core rejected QQ file delivery' : 'QQ file outcome unknown; do not automatically resend', Date.now(), requestId)
+      .run(rejected ? 'failed' : 'unknown', rejected ? `Core rejected QQ file delivery${reason ? `：${reason}` : ''}` : 'QQ file outcome unknown; do not automatically resend', Date.now(), requestId)
   }
 }

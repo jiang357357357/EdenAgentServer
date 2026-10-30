@@ -6,7 +6,7 @@ import { DirectorPlanningService } from './planning-service.ts'
 import { DirectorRunRepository } from './run-repository.ts'
 import { directorRoster } from './roster.ts'
 import { conversationWindow } from '../sessions/index.ts'
-import { inputAttachments, attachmentMessage, type AttachmentService } from '../attachments/index.ts'
+import { inputAttachments, modelAttachments, attachmentMessage, type AttachmentService } from '../attachments/index.ts'
 import type { MemoryRecall } from '../memories/index.ts'
 
 export interface CompanionTurnRequest {
@@ -59,12 +59,12 @@ export class CompanionTurnCoordinator {
       if (!model) throw new Error(`No model bound for actor ${actor.assistantId}`)
       return [String(actor.assistantId), structuredClone(model)] as const
     }))
-    const conversation = conversationWindow(this.sessions.events.messages(input.sessionId, undefined, 100).items.map(event => event.payload))
+    const conversation = conversationWindow(this.sessions.modelHistory(this.sessions.events.messages(input.sessionId, undefined, 100).items.map(event => event.payload), input.sessionId))
     this.sessions.events.append(input.sessionId, input.turnId, 'agent.message_end', attachmentMessage({
       type: 'message_end', messageId: input.id, message: { role: 'user', content: [{ type: 'text', text: input.text }], timestamp: Date.now() },
     }, input.metadata))
     const plan = await this.planner.plan({ sessionId: input.sessionId, turnId: input.turnId, userText: input.text,
-      participants: request.participants, model: request.directorModel, conversation: JSON.stringify(conversation), attachments: snapshots.length ? JSON.stringify(snapshots) : '', signal, userMessageID: input.id })
+      participants: request.participants, model: request.directorModel, conversation: JSON.stringify(conversation), attachments: snapshots.length ? JSON.stringify(modelAttachments(snapshots)) : '', signal, userMessageID: input.id })
     try {
       let progress = plan
       for (const [beatIndex, beat] of plan.beats.entries()) {
@@ -77,7 +77,7 @@ export class CompanionTurnCoordinator {
           tools: request.tools(beat.assistantID), refreshTools: () => request.tools(beat.assistantID), conversation, signal, images })
         signal.throwIfAborted()
         progress = this.runs.completeBeat(plan.planID, beatIndex)
-        const latest = conversationWindow(this.sessions.events.messages(input.sessionId, undefined, 100).items.map(event => event.payload))
+        const latest = conversationWindow(this.sessions.modelHistory(this.sessions.events.messages(input.sessionId, undefined, 100).items.map(event => event.payload), input.sessionId))
         conversation.splice(0, conversation.length, ...latest)
       }
       return progress

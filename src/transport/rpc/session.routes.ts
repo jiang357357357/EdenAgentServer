@@ -40,6 +40,8 @@ export function sessionRoutes(service: SessionService, signal?: AbortSignal): Re
     'session.rename': value => { const params = sessionTitleSchema.parse(value); return toJson(summary(repository.rename(params.sessionId, params.title))) },
     'session.set_archived': contractHandler(rpcMethods['session.set_archived'], input =>
       toJson(summary(repository.setArchived(input.sessionId, input.archived)))),
+    'session.set_pinned': contractHandler(rpcMethods['session.set_pinned'], input =>
+      toJson(summary(repository.setPinned(input.sessionId, input.pinned)))),
     'session.set_participants': async value => {
       const params = sessionParticipantsSchema.parse(value)
       return toJson(summary(await service.setParticipants(params.sessionId, params.participants)))
@@ -76,8 +78,12 @@ export function sessionRoutes(service: SessionService, signal?: AbortSignal): Re
       return { ...page, items: page.items.map(wireEvent) }
     },
     'message.delete': value => {
-      const { sessionId, messageId } = rpcMethods['message.delete'].params.parse(value)
-      return service.configureWhileIdle(sessionId, async () => new MessageDeletion(repository).remove(sessionId, messageId)).then(toJson)
+      const { sessionId, messageId, scope } = rpcMethods['message.delete'].params.parse(value)
+      return service.configureWhileIdle(sessionId, async () => new MessageDeletion(repository).remove(sessionId, messageId, scope)).then(toJson)
+    },
+    'message.reply.read': value => {
+      const { sessionId, messageId } = rpcMethods['message.reply.read'].params.parse(value)
+      return toJson(new MessageDeletion(repository).readReply(sessionId, messageId))
     },
   }
   return { ...inputRecoveryRoutes(repository, service), ...Object.fromEntries(Object.entries(handlers).map(([method, handler]) => {

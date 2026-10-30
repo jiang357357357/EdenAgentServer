@@ -6,6 +6,7 @@ import { resolveLegacySync } from './legacy-sync-review.ts'
 import { prepareLegacyIdentity } from './legacy-identity.ts'
 import { readOwnerQqHistory } from './contact-history.ts'
 import { deliverOwnerQq, ownerQqTarget } from './qq-contact.ts'
+import { qqChannelReadiness } from './qq-bot-readiness.ts'
 import { deliverOwnerQqFile, type OwnerQqFile } from './qq-file-delivery.ts'
 import { deliverOwnerEmail } from './email-contact.ts'
 import { MonSyncStatus } from './sync-status.ts'
@@ -33,6 +34,7 @@ import { monDestination } from './destination.ts'
 import type { MonServiceIdentity } from '@eden/integrations'
 import type { Account } from '../accounts/index.ts'
 import { resumeProjection } from './projection-recovery.ts'
+import { refreshParticipantVoiceBindings } from './participant-voice-bindings.ts'
 
 interface CatalogRequest { coreBaseUrl: string; coreToken: string; sessionId?: string | null | undefined; serviceCredential?: boolean }
 
@@ -171,6 +173,7 @@ export class MonBindingService {
       commitMonModels(this.models, this.sessions.repository, sessionId, { mode: 'multi', director: result.directorBinding.model,
         actors: result.bindings.map(actor => ({ ...actor, vision: actor.vision ?? null })) },
       'session.actor_models.bound', toJson({ actors: result.actors, director: result.catalog.director }), saveConnection)
+      refreshParticipantVoiceBindings(this.sessions.repository, sessionId, result.voiceBindings)
       return toJson(result.catalog)
     }
     const result = await loadMonCatalog(new MonClient(params.coreBaseUrl, params.coreToken), this.assistantId(sessionId), signal)
@@ -179,6 +182,7 @@ export class MonBindingService {
       vision: result.visionBinding?.model ?? null, visionEntityId: result.visionBinding?.entityId ?? null }, 'model.bound', {
       entityId: result.binding?.entityId ?? null, model: result.binding?.model.id ?? null, provider: result.binding?.model.provider ?? null,
     }, saveConnection)
+    if (sessionId) refreshParticipantVoiceBindings(this.sessions.repository, sessionId, [result.voiceBinding])
     return toJson(result.catalog)
   }
 
@@ -206,7 +210,7 @@ export class MonBindingService {
     signal.throwIfAborted()
     const email = results[1].status === 'fulfilled' && results[1].value && typeof results[1].value === 'object'
       && !Array.isArray(results[1].value) ? results[1].value as Record<string, unknown> : {}
-    return toJson({ qq: { available: results[0].status === 'fulfilled', availabilityMeaning: 'configured_owner_target', replyTool: 'read_qq_messages' },
+    return toJson({ qq: qqChannelReadiness(results[0]),
       email: { statusAvailable: results[1].status === 'fulfilled', available: email.ready === true && Boolean(email.default_to), replyReadable: false },
       desktop: { available: true, availabilityMeaning: 'persistent_queue_requires_running_desktop', deliveryTool: 'show_desktop_reminder', statusTool: 'get_desktop_reminder' },
       device: { availability: 'requires_device_discovery', discoveryTool: 'list_esp32_devices', statusTool: 'get_esp32_command_status', replyReadable: false } })
@@ -262,12 +266,38 @@ export class MonBindingService {
     return resolveAssistantTarget(this.assistantClient(sessionId), target, signal)
   }
 
-  private assistantClient(sessionId: string): MonClient {
+  retrieveMemories(sessionId: string, body: JsonValue, signal?: AbortSignal): Promise<JsonValue> {
+    return this.assistantClient(sessionId).post('/api/agent/memories/retrieve/', body, signal)
+  }
+
+  private assistantClient(sessionId: string, credentialUpdated?: (token: string) => void): MonClient {
     if (this.closed) throw new Error('Mon integration is shutting down')
     this.sessions.repository.read(sessionId)
     const connection = this.connections?.read(sessionId)
     if (!connection) throw new Error('Refresh this session model catalogue to bind Mon credentials')
-    return this.clients.create(sessionId, connection)
+    return this.clients.create(sessionId, connection, credentialUpdated)
+  }
+
+  characterContext(sessionId: string, actorId?: string | number) {
+    let expectedToken: string | undefined
+    const client = this.assistantClient(sessionId, token => { expectedToken = token })
+    const select = () => {
+      const session = this.sessions.repository.read(sessionId)
+      if (session.status !== 'active') throw new Error('Sticker operations require an active session')
+      return session.participants.find(value => value && typeof value === 'object' && !Array.isArray(value)
+        && (actorId === undefined ? session.participants.length === 1 : String(value.assistantId) === String(actorId)))
+    }
+    const actor = select()
+    if (!actor || typeof actor !== 'object' || Array.isArray(actor) || !/^[1-9]\d*$/.test(String(actor.characterId)))
+      throw new Error('Current acting character is not bound')
+    const characterId = Number(actor.characterId), connection = this.connections!.read(sessionId)!
+    expectedToken ??= connection.coreToken
+    return { characterId, client, assertCurrent: () => {
+      const current = select(), active = this.connections!.read(sessionId)
+      if (this.closed || !current || typeof current !== 'object' || Array.isArray(current)
+        || String(current.characterId) !== String(characterId) || active?.coreBaseUrl !== connection.coreBaseUrl
+        || active?.coreToken !== expectedToken) throw new Error('Character or Core connection changed during sticker operation')
+    } }
   }
 
   async prepareHandoff(sessionId: string, assistantId: string | number, signal: AbortSignal) {

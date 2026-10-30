@@ -1,5 +1,6 @@
 import type { EdenDatabase } from '@eden/store'
 import { memoryScopeSchema } from '@eden/api'
+import { modelAssistantText } from '../tool-results/index.ts'
 
 function object(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
@@ -36,7 +37,7 @@ function assistantReply(database: EdenDatabase, sessionId: string, turnId: strin
     assistantText = typeof content === 'string' ? content : Array.isArray(content) ? content.map(object).filter(block => block.type === 'text').map(block => String(block.text ?? '')).join('\n') : ''
     if (assistantText.trim()) break
   }
-  return assistantText
+  return modelAssistantText(database, sessionId, assistantText, turnId)
 }
 
 export function extractionSource(database: EdenDatabase, inputId: string, actorId?: string | number) {

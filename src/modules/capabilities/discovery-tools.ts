@@ -18,7 +18,7 @@ export function discoveryTools(session: DiscoveryActions): RuntimeTool[] {
     { name: 'list_tools', schema: list, run: (raw: unknown) => session.discover(list.parse(raw)) },
     { name: 'load_tools', schema: load, run: (raw: unknown) => session.loadTools(load.parse(raw).tools) },
     { name: 'unload_tools', schema: unload, run: (raw: unknown) => session.unloadTools(unload.parse(raw).ids) },
-  ].map(definition => ({ name: definition.name, revision: 'eden.capabilities.v1', executionMode: 'sequential',
+  ].map(definition => ({ name: definition.name, revision: 'eden.capabilities.v2', executionMode: 'sequential',
     description: CAPABILITY_DESCRIPTIONS[definition.name as keyof typeof CAPABILITY_DESCRIPTIONS],
     parameters: toJson(z.toJSONSchema(definition.schema, { io: 'input' })) as Record<string, JsonValue>,
     async execute(raw, context) { context.signal.throwIfAborted(); return toJson(definition.run(raw)) },

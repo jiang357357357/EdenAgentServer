@@ -9,6 +9,7 @@ import type { SessionService } from '../sessions/index.ts'
 import { SELF_AWAKE_RECOVERY_INSTRUCTION } from '../../model-prompts/self-awake.ts'
 import { SessionOwnership } from '../accounts/index.ts'
 import { SelfAwakeRoleRepository } from './role-repository.ts'
+import { SelfAwakeControlRepository } from './control-repository.ts'
 
 const payloadSchema = z.object({
   prompt: z.string().optional(), trigger: jsonValue.optional(),
@@ -47,6 +48,7 @@ export class SelfAwakeJobRecovery {
   }
 
   resubmit(id: string, fingerprint: string, note: string): JobInfo {
+    new SelfAwakeControlRepository(this.database).assertEnabled()
     return this.database.transaction(() => {
       const db = this.database.connection
       const previous = db.prepare('SELECT * FROM self_awake_job_resubmissions WHERE source_job_id=?').get(id)

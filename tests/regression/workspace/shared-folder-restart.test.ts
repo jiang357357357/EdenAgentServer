@@ -52,7 +52,7 @@ test('restart resumes registered shared directories at their recorded roots rega
   const f = fixture(t), first = f.host()
   first.workspace.forSession(f.b.id).switch(f.external)
   await f.attach(first.service)
-  first.service.selectDirectory(f.a.id, f.original, '0')
+  first.service.selectDirectory(f.a.id, f.original, first.service.directorySnapshot().revision)
   await first.service.forSession(f.a.id).perform(f.original, client => client.bind('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'))
   first.service.selectDirectory(f.b.id, f.external, first.service.directory(f.b.id).revision)
   await first.service.forSession(f.b.id).perform(f.external, client => client.bind('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'))

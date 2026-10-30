@@ -12,13 +12,26 @@ import type { EdenDatabase } from '@eden/store'
 import { selfAwakeListSchema, selfAwakeExecutionSchema, selfAwakeDiaryWriteSchema, toJson } from '@eden/api'
 import type { JobInfo, JsonValue } from '@eden/api'
 import { SelfAwakeRoleRepository } from './role-repository.ts'
+import { SelfAwakeControlRepository } from './control-repository.ts'
+import { executionSchedule } from './execution-schedule.ts'
 
 export class SelfAwakeRepository {
   readonly timerPublication: SelfAwakeTimerPublication
   readonly roles: SelfAwakeRoleRepository
+  readonly control: SelfAwakeControlRepository
   constructor(readonly database: EdenDatabase, private readonly scheduleStateFile?: string, private readonly externalScheduler = Boolean(scheduleStateFile)) {
     this.timerPublication = new SelfAwakeTimerPublication(database, scheduleStateFile, externalScheduler)
     this.roles = new SelfAwakeRoleRepository(database)
+    this.control = new SelfAwakeControlRepository(database)
+  }
+  controlState() {
+    return { ...this.control.read(), publicationError: this.timerPublication.fault ?? null, schedule: this.wakeSchedule() }
+  }
+  updateControl(enabled: boolean, expectedUpdatedAt: number) {
+    this.control.update(enabled, expectedUpdatedAt)
+    try { this.timerPublication.publish() }
+    catch { /* The saved switch already gates Agent execution; delivery errors remain visible and retry via the outbox. */ }
+    return this.controlState()
   }
   deadline(now = Date.now(), sessionId?: string) { return wakeDeadline(this.database, this.scheduleStateFile, now, sessionId ? this.roles.target(sessionId) : undefined) }
   runReview(runId: string) { this.read(runId); return previewRunReview(this.database, runId) }
@@ -92,8 +105,6 @@ export class SelfAwakeRepository {
           '自醒日记', text, '', '{}', now)
       this.database.connection.prepare("UPDATE self_awake_runs SET state='completed',decision_json=NULL,completed_at=?,updated_at=? WHERE id=?")
         .run(now, now, id)
-      this.database.connection.prepare(`UPDATE self_awake_merged_plans SET reviewed_at=? WHERE reviewed_at IS NULL AND merged_at<=?
-        AND scope_key IN (SELECT scope_key FROM self_awake_role_members WHERE session_id=?)`).run(now, run.createdAt, run.sessionId)
     })
   }
 
@@ -142,24 +153,29 @@ export class SelfAwakeRepository {
   }
 
   wakeSchedule(sessionId?: string) {
-    if (!sessionId) {
-      const role = this.database.connection.prepare(`SELECT r.session_id FROM self_awake_role_scopes r JOIN sessions s ON s.id=r.session_id
-        LEFT JOIN jobs j ON j.session_id=r.session_id AND j.kind='self_awake' AND j.state='queued'
-        WHERE s.status='active' AND ${accountFilter(this.database, 'r.session_id')} ORDER BY j.due_at IS NULL,j.due_at,r.scope_key LIMIT 1`).get()
-      if (role) sessionId = String(role.session_id)
-    }
-    if (sessionId) sessionId = this.roles.target(sessionId)
+    sessionId = this.scheduleTarget(sessionId)
+    if (!this.control.read().enabled) return { status: 'disabled' as const, nextWakeAt: null, reason: '当前世界的自醒已关闭，待执行计划保留；已提交的回合继续完成' }
     const next = this.database.connection.prepare(`SELECT due_at,payload_json FROM jobs WHERE ${accountFilter(this.database, "session_id")} AND (? IS NULL OR session_id=?) AND kind='self_awake' AND state='queued' ORDER BY due_at LIMIT 1`).get(sessionId ?? null, sessionId ?? null)
     const external = this.externalScheduler ? this.externalSchedule(sessionId) : null
     const local = next ? { status: 'scheduled', source: 'tool', nextWakeAt: new Date(Number(next.due_at)).toISOString(), reason: String(object(JSON.parse(String(next.payload_json))).prompt ?? '') } : null
     const ownsSchedule = Boolean(sessionId) || !currentAccount() || Boolean(this.database.connection.prepare(`SELECT 1 FROM self_awake_submissions s JOIN jobs j ON j.id=s.job_id WHERE ${accountFilter(this.database, 'j.session_id')} LIMIT 1`).get())
-    return this.externalScheduler ? (ownsSchedule || external?.status === 'unavailable' ? external : null) : local
+    const plan = this.externalScheduler ? (ownsSchedule || external?.status === 'unavailable' ? external : null) : local
+    return executionSchedule(this.database, sessionId, plan)
+  }
+
+  private scheduleTarget(sessionId?: string): string | undefined {
+    if (sessionId) return this.roles.target(sessionId)
+    const role = this.database.connection.prepare(`SELECT r.session_id FROM self_awake_role_scopes r JOIN sessions s ON s.id=r.session_id
+      LEFT JOIN jobs j ON j.session_id=r.session_id AND j.kind='self_awake' AND j.state='queued'
+      WHERE s.status='active' AND ${accountFilter(this.database, 'r.session_id')} ORDER BY j.due_at IS NULL,j.due_at,r.scope_key LIMIT 1`).get()
+    return role ? this.roles.target(String(role.session_id)) : undefined
   }
 
   private externalSchedule(sessionId?: string) {
     try {
       this.timerPublication.assertAvailable()
-      return readExternalSchedule(this.scheduleStateFile, sessionId)
+      const revision = sessionId ? Number(this.database.connection.prepare('SELECT revision FROM self_awake_session_schedules WHERE session_id=?').get(sessionId)?.revision ?? 0) : 0
+      return readExternalSchedule(this.scheduleStateFile, sessionId, revision)
     } catch (error) {
       return { status: 'unavailable' as const, nextWakeAt: null,
         reason: error instanceof Error ? error.message : '无法读取当前安装的自醒调度状态' }

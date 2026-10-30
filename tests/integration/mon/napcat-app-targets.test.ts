@@ -43,6 +43,14 @@ function fixture(records: unknown[] = [bot()]) {
 }
 const tick = () => new Promise<void>(resolve => setImmediate(resolve))
 
+test('a unique offline bot is blocked before action schema or execution, while its catalog remains readable', async t => {
+  const f = fixture([bot('42', { status: 'offline' })]); t.after(() => f.close()); f.permissions.setMode('full_access')
+  await assert.rejects(f.tool('read_qq_action').execute({ action: 'get_group_list', params: {} }, f.context), /QQBot 未在线/)
+  assert.equal(f.calls.length, 1); assert.equal(f.calls[0]!.method, 'GET')
+  await f.tool('list_qq_capabilities').execute({}, f.context)
+  assert.equal(f.calls.at(-1)!.body.action, '__capabilities__')
+})
+
 test('empty App capability call discovers a unique bot using its Core record ID, not its QQ account', async t => {
   const f = fixture(); t.after(() => f.close()); f.permissions.setMode('full_access')
   const result = await f.tool('list_qq_capabilities').execute({}, f.context) as { status: string; bot_id: string; result: { actions: unknown } }

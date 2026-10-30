@@ -79,7 +79,7 @@ function historicalPrompt(data: Record<string, JsonValue>) {
     if (!decoded || Array.isArray(decoded) || typeof decoded !== 'object') return undefined
     context = decoded
   } catch { return undefined }
-  if (identity && identity !== contextIdentity(context)) return undefined
+  if (!matchesContextIdentity(identity, context)) return undefined
   return { context, tail: newline < 0 ? '' : remaining.slice(newline), header, identity }
 }
 
@@ -87,8 +87,16 @@ function historicalIdentityBoundary(text: string): number {
   return historicalHeaders.map(header => text.indexOf('\n\n' + header)).find(index => index >= 0) ?? -1
 }
 
-function contextIdentity(context: Record<string, JsonValue>): string {
-  if (context.participant) return characterIdentity(context.participant)
-  if (Array.isArray(context.participants) && context.participants.length === 1) return characterIdentity(context.participants[0]!)
-  return ''
+function matchesContextIdentity(identity: string, context: Record<string, JsonValue>): boolean {
+  const expected = contextIdentity(context)
+  return !identity || expected === undefined || identity === expected
+}
+
+function contextIdentity(context: Record<string, JsonValue>): string | undefined {
+  const participant = context.participant ?? (Array.isArray(context.participants) && context.participants.length === 1 ? context.participants[0] : undefined)
+  if (!participant) return ''
+  const value = object(participant), profile = object(value.profile), character = object(profile.character ?? value.character)
+  // Current model-facing JSON omits identity prose already present before the host header.
+  const prompt = character.system_prompt ?? character.systemPrompt ?? profile.system_prompt ?? profile.systemPrompt
+  return typeof prompt === 'string' ? characterIdentity(participant) : undefined
 }

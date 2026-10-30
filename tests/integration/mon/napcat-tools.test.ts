@@ -7,6 +7,8 @@ import { PermissionService } from '../../../src/modules/permissions/index.ts'
 import { MonConnectionRepository } from '../../../src/modules/mon/connection-repository.ts'
 import { NapcatClient } from '../../../src/modules/mon/napcat-client.ts'
 import { napcatTools } from '../../../src/modules/mon/napcat-tools.ts'
+import { createRuntime, type ToolOutcome } from '@eden/runtime-pi'
+import { recordedModel } from '@eden/runtime-pi/testing'
 
 const identity = { coreBaseUrl: 'https://core.example', userId: '77', secret: 'test-only-secret' }
 const catalog = { protocol: 'napcat-action.v1', actions: {
@@ -47,6 +49,24 @@ function receipt(call: SentRequest, result: unknown, status = 'success') {
     status, result, code: '', message: '' } }, { status: status === 'unknown' ? 202 : 200 })
 }
 async function tick() { await new Promise<void>(resolve => setImmediate(resolve)) }
+
+test('business failure and unknown receipts reach the public runtime audit as failed and unknown', async t => {
+  for (const status of ['failed', 'unknown', 'success']) {
+    const f = fixture(true, call => call.body.action === '__capabilities__' ? receipt(call, catalog) : receipt(call, {}, status))
+    t.after(() => f.close()); f.allow()
+    const model = await recordedModel([{ tool: 'read_qq_action', input: { action: 'get_group_list', params: {} } }, { text: '已核对结果' }])
+    t.after(() => model.close())
+    const audits: { failed: boolean; outcome: ToolOutcome | undefined }[] = []
+    const runtime = createRuntime({ sessionId: f.session.id, systemPrompt: '', model: model.config,
+      tools: [f.tool('read_qq_action')], maxModelRequests: 3,
+      callbacks: { async checkpoint() {}, async event() {}, async request() {},
+        async afterTool(_id, _result, failed, outcome) { audits.push({ failed, outcome }) } } })
+    t.after(() => runtime.dispose?.())
+    await runtime.prompt('读取群列表并核对状态')
+    assert.deepEqual(audits, [{ failed: status !== 'success', outcome: status === 'success' ? 'completed' : status }])
+    assert.equal(model.requests.length, 2)
+  }
+})
 
 test('QQ catalog exposes full schema and signs persistent contact identity instead of mutable environment', async t => {
   const f = fixture(); t.after(() => f.close()); f.allow()

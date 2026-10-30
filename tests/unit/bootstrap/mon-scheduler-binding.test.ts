@@ -31,7 +31,9 @@ for (const portable of [false, true]) {
   test(`${portable ? 'portable' : 'source'} startup derives identity and future MonOs path without creating state`, t => {
     const f = fixture(t, portable), config = loadConfig(f.env, f.agent)
     const state = path.join(f.root, portable ? 'Data/Os/SelfAwake/state.json' : 'BaseOs/Data/SelfAwake/state.json')
-    assert.equal(config.monIdentity?.userId, '2'); assert.equal(config.selfAwakeScheduleFile, state)
+    assert.equal(config.monIdentity?.userId, '2')
+    assert.ok(config.selfAwakeScheduleFile!.startsWith(path.join(path.dirname(state), 'accounts') + path.sep))
+    assert.match(config.selfAwakeScheduleFile!, /accounts[\\/][a-f0-9]{64}[\\/]state\.json$/)
     assert.equal(loadConfig({ ...f.env, EDEN_AGENT_RUNTIME_ORIGIN: 'local' }, f.agent).selfAwakeScheduleFile, undefined)
     assert.throws(() => readFileSync(state), /ENOENT/, 'Only MonOs may initialize its state')
   })
@@ -54,7 +56,8 @@ test('relocating a portable installation recalculates its scheduler and ignores 
   const moved = path.join(f.temporary, '移动后的便携包'); renameSync(f.root, moved)
   const env = { ...f.env, MON_SERVICE_SHARED_SECRET: 'fixture-only-secret', MON_SERVICE_USER_ID: '2' }
   const config = loadConfig(env, path.join(moved, 'runtime/agent'))
-  assert.equal(config.selfAwakeScheduleFile, path.join(moved, 'Data/Os/SelfAwake/state.json'))
+  assert.ok(config.selfAwakeScheduleFile!.startsWith(path.join(moved, 'Data/Os/SelfAwake/accounts') + path.sep))
+  assert.ok(!config.selfAwakeScheduleFile!.startsWith(f.root + path.sep))
   assert.equal(config.monIdentity?.coreBaseUrl, 'http://127.0.0.1:40011')
 })
 

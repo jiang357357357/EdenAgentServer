@@ -11,8 +11,15 @@ import type { RuntimeModel } from '@eden/runtime-pi'
 import { configuredExternalCommandSandbox } from '@eden/execution'
 import { webConfig, type WebConfig } from '../modules/web/index.ts'
 import { workspaceIdentity } from './workspace-identity.ts'
+import { osConfig, workspaceForLocalCapabilities } from './os-config.ts'
+import { defaultMemoryModelPath } from '../modules/os/index.ts'
+import type { OsConfig } from '../modules/os/index.ts'
 
 export interface ServerConfig {
+  memoryModelPath?: string
+  videoRuntimeRoot?: string | undefined
+  desktopBrokerRoot?: string | undefined
+  os?: OsConfig | undefined
   monWorkspaceRoot?: string
   workspaceId?: string
   account?: import('../modules/accounts/index.ts').Account
@@ -42,13 +49,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
   const port = z.coerce.number().int().min(0).max(65535).parse(env.EDEN_AGENT_PORT ?? defaultPort)
   const dataRoot = path.resolve(env.EDEN_AGENT_DATA_ROOT ?? path.join(cwd, 'Data', 'realms', origin))
   const workspace = workspaceIdentity(env, cwd)
-  const monConfig = monServiceConfig(origin, dataRoot, env, workspace.monWorkspaceRoot)
+  const ownWorkspace = workspaceForLocalCapabilities(workspace.monWorkspaceRoot, dataRoot, env)
+  const monConfig = monServiceConfig(origin, dataRoot, env, ownWorkspace)
+  const identity = monServiceIdentity(origin, monConfig.env)
+  const os = origin === 'mon' && !monConfig.externalDeployment ? osConfig(workspace.monWorkspaceRoot, dataRoot, identity, env) : undefined
   const token = capabilityToken(env)
   const allowedOrigins = (env.EDEN_AGENT_ALLOWED_ORIGINS ?? 'http://127.0.0.1:40091,http://localhost:40091,edenagent://app').split(',').map(value => value.trim()).filter(Boolean)
   return {
+    memoryModelPath: memoryModelPath(env, dataRoot),
+    videoRuntimeRoot: optionalAbsolutePath(env.EDEN_AGENT_VIDEO_RUNTIME_ROOT),
+    os,
+    desktopBrokerRoot: optionalAbsolutePath(env.EDEN_AGENT_DESKTOP_BROKER_ROOT),
     ...workspace,
     origin, host: '127.0.0.1', port, dataRoot, databasePath: path.join(dataRoot, 'eden-agent.db'), token,
-    allowedOrigins, coreBaseUrl: origin === 'mon' ? monConfig.env.MON_CORE_BASE_URL ?? 'http://127.0.0.1:40011' : undefined, monIdentity: monServiceIdentity(origin, monConfig.env), selfAwakeScheduleFile: monConfig.scheduleStateFile, maxBlobBytes: z.coerce.number().int().min(1).max(1024 * 1024 * 1024).parse(env.EDEN_AGENT_MAX_BLOB_BYTES ?? 32 * 1024 * 1024),
+    allowedOrigins, coreBaseUrl: origin === 'mon' ? monConfig.env.MON_CORE_BASE_URL ?? 'http://127.0.0.1:40011' : undefined, monIdentity: identity, selfAwakeScheduleFile: os ? path.join(os.wakeDir, 'state.json') : monConfig.scheduleStateFile, maxBlobBytes: z.coerce.number().int().min(1).max(1024 * 1024 * 1024).parse(env.EDEN_AGENT_MAX_BLOB_BYTES ?? 32 * 1024 * 1024),
     externalCommandSandbox: configuredExternalCommandSandbox(env, origin),
     terminalSettingsPath: path.resolve(cwd, env.EDEN_AGENT_TERMINAL_SETTINGS_PATH ?? path.join('Data', 'terminal-settings.json')),
     systemSkillRoots: z.array(z.string().min(1).max(4096).refine(value => path.isAbsolute(value), 'System skill roots must be absolute')).max(16)
@@ -56,6 +70,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
     model: origin === 'local' ? localModel(env) : undefined,
     web: webConfig(env, cwd),
   }
+}
+
+function optionalAbsolutePath(value: string | undefined) { return value ? path.resolve(value) : undefined }
+
+function memoryModelPath(env: NodeJS.ProcessEnv, dataRoot: string) {
+  return path.resolve(env.EDEN_AGENT_MEMORY_MODEL_PATH ?? defaultMemoryModelPath(dataRoot))
 }
 
 function capabilityToken(env: NodeJS.ProcessEnv) {
@@ -74,7 +94,7 @@ function localModel(env: NodeJS.ProcessEnv): RuntimeModel | undefined {
   if (!baseUrl) throw new Error('Set EDEN_AGENT_BASE_URL explicitly for a non-OpenAI provider')
   return configuredModelSchema.parse({
     provider, id, baseUrl,
-    contextWindow: z.coerce.number().int().positive().parse(env.EDEN_AGENT_CONTEXT_WINDOW ?? 32768),
+    contextWindow: z.coerce.number().int().positive().parse(env.EDEN_AGENT_CONTEXT_WINDOW ?? 262144),
     maxTokens: z.coerce.number().int().positive().parse(env.EDEN_AGENT_MAX_TOKENS ?? 4096),
     ...(env.EDEN_AGENT_MODEL_COST ? { cost: JSON.parse(env.EDEN_AGENT_MODEL_COST) } : {}),
     ...(apiKey ? { apiKey } : {}),

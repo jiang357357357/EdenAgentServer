@@ -39,6 +39,7 @@ export class SelfAwakeBridge {
     selfAwakeStage('owner_identity', () => { if (input.user_id !== this.identity.userId) throw new Error('Self-awake user mismatch') })
     const task = this.tail.then(async () => {
       selfAwakeStage('service_availability', () => this.abort.signal.throwIfAborted())
+      selfAwakeStage('self_awake_control', () => this.repository.control.assertEnabled())
       const hash = createHash('sha256').update(JSON.stringify(input)).digest('hex')
       let job = selfAwakeStage('idempotency', () => this.repository.existing(input.user_id, input.idempotency_key, hash))
       if (!job) {
@@ -60,6 +61,7 @@ export class SelfAwakeBridge {
         try {
           if (!target) await selfAwakeStageAsync('model_catalog', () => this.mon.catalog({ sessionId: session.id, coreBaseUrl: this.identity.coreBaseUrl, coreToken: token, serviceCredential: true }))
           selfAwakeStage('service_availability', () => this.abort.signal.throwIfAborted())
+          selfAwakeStage('self_awake_control', () => this.repository.control.assertEnabled())
           const canonical = withAccount(account, () => roles.register(this.sessions.repository, session.id))
           if (canonical !== session.id) {
             if (!target) await this.sessions.endSession(session.id, 'closed')

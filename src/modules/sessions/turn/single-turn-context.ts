@@ -9,6 +9,11 @@ export function transientTurnInput(metadata: JsonValue | undefined): boolean {
   return metadataRecord(metadata).internalHandoff === true
 }
 
+/** A new diary round uses current conversation excerpts, not previous autonomous transcripts. */
+export function isStandaloneSelfAwakeTurn(input: SessionInput): boolean {
+  return input.kind !== 'compact' && metadataRecord(metadataRecord(input.metadata).job).kind === 'self_awake'
+}
+
 export function turnRecallQuery(input: SessionInput): string {
   const metadata = metadataRecord(input.metadata)
   const job = metadataRecord(metadata.job)

@@ -32,7 +32,7 @@ export class NapcatClient {
 
   modelReceipt(target: NapcatSessionTarget, result: NapcatResult): JsonValue {
     this.assertCurrent(target)
-    return this.results.result(target, toJson({ ...result, ...(target.botId ? { bot_id: target.botId } : {}) }))
+    return this.results.result(toJson({ ...result, ...(target.botId ? { bot_id: target.botId } : {}) }))
   }
 
   resolveParams(target: NapcatSessionTarget, params: Record<string, unknown>): Record<string, unknown> {
@@ -53,13 +53,14 @@ export class NapcatClient {
         : { botId, path: `/api/devices/qq_bot/${botId}/actions/execute/`, resource: `qq-bot:${botId}` }) }
   }
 
-  async resolve(target: NapcatSessionTarget, signal: AbortSignal): Promise<{ target: NapcatSessionTarget } | QqBotSelection> {
+  async resolve(target: NapcatSessionTarget, signal: AbortSignal, requireOnline = false): Promise<{ target: NapcatSessionTarget } | QqBotSelection> {
     signal.throwIfAborted()
     this.assertCurrent(target)
     if (!target.discovery) return { target }
     const bots = await listNapcatBots(target, signal, this.fetcher)
     this.assertCurrent(target)
     if (bots.length !== 1) return qqBotSelection(bots)
+    if (requireOnline && bots[0]!.status !== 'online') throw new Error('QQBot 未在线，未执行操作；请先恢复机器人连接，不要反复调用其他 QQ 动作确认同一离线状态')
     return { target: this.target(target.sessionId, bots[0]!.bot_id) }
   }
 
@@ -117,13 +118,14 @@ export class NapcatClient {
   }
 
   async execute(target: NapcatSessionTarget, action: string, params: Record<string, unknown>, mode: 'read' | 'write',
-    requestId: string, signal: AbortSignal): Promise<NapcatResult> {
+    requestId: string, signal: AbortSignal, assertCurrent?: () => void): Promise<NapcatResult> {
     const catalogReply = await this.capabilities(target, `${requestId}:schema`, signal, action)
     if (catalogReply.status !== 'success') return { ...catalogReply, action, request_id: requestId }
     const entry = catalogSchema.parse(catalogReply.result).actions[action]
     if (!entry || entry.mutating !== (mode === 'write')) throw new Error('QQ action 读写类型不匹配；请使用对应工具。')
     if (entry.available === false) throw new Error('该 QQ 能力当前不可用')
     signal.throwIfAborted()
+    assertCurrent?.()
     this.assertCurrent(target)
     const scoped = this.groupParams(target, params, mode)
     return sendNapcatRequest(target, { action, params: scoped, mode, request_id: requestId }, signal, this.fetcher)

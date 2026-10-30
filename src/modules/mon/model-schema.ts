@@ -6,11 +6,12 @@ export const coreIdSchema = z.union([z.string().min(1).max(200), z.number().int(
 export const coreEntitySchema = z.object({
   id: coreIdSchema, ai_model: z.string().min(1), vendor: z.string().min(1), ai_name: z.string().default(''),
   status: z.string(), is_multimodal: z.boolean().default(false), is_choice_default: z.boolean().default(false), is_vision_default: z.boolean().default(false),
-  default_params: z.object({ context_window: z.coerce.number().int().positive().default(128000), max_tokens: z.coerce.number().int().positive().default(16384) }).passthrough().default({ context_window: 128000, max_tokens: 16384 }),
+  default_params: z.object({ context_window: z.coerce.number().int().positive().default(262144), max_tokens: z.coerce.number().int().positive().default(16384) }).passthrough().default({ context_window: 262144, max_tokens: 16384 }),
 }).passthrough()
 export const coreDetailSchema = coreEntitySchema.extend({ api_key: z.string().min(1), api_endpoint: z.string().min(1) })
 export const coreAssistantSchema = z.object({ id: coreIdSchema, name: z.string().default(''), character: z.object({
   id: coreIdSchema, name: z.string().default(''), ai_talk_entity_id: coreIdSchema.nullish(), vision_ai_entity_id: coreIdSchema.nullish(),
+  tts_config_id: z.number().int().positive().nullish(), stt_config_id: z.number().int().positive().nullish(),
 }).passthrough() }).passthrough()
 export const coreSettingsSchema = z.object({ default_model: z.preprocess(value => typeof value === 'string' && !value.trim() ? null : value, coreIdSchema.nullish()) }).passthrough()
 export type CoreEntity = z.infer<typeof coreEntitySchema>

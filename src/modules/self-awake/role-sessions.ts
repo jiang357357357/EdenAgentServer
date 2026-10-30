@@ -3,6 +3,7 @@ import type { SessionService } from '../sessions/index.ts'
 import type { MonBindingService } from '../mon/index.ts'
 import { SelfAwakeRoleRepository } from './role-repository.ts'
 import { wakeRoleIdentity } from './role-identity.ts'
+import { SelfAwakeControlRepository } from './control-repository.ts'
 
 /** A dedicated execution context is reused for a role; ordinary chat timers cannot grow new owners. */
 export class SelfAwakeRoleSessions {
@@ -15,6 +16,7 @@ export class SelfAwakeRoleSessions {
 
   async timerTarget(sourceId: string, turnId?: string, actorId?: string | number, signal?: AbortSignal): Promise<string> {
     signal?.throwIfAborted()
+    new SelfAwakeControlRepository(this.sessions.repository.database).assertEnabled()
     const identity = wakeRoleIdentity(this.sessions.repository, sourceId, turnId, actorId)
     if (!identity) return sourceId // Unbound local contexts have no global role identity.
     const work = async () => {
@@ -32,6 +34,7 @@ export class SelfAwakeRoleSessions {
       try {
         if (this.sessions.repository.origin === 'mon') await this.mon.backgroundCatalog(sourceId, target.id)
         signal?.throwIfAborted()
+        new SelfAwakeControlRepository(this.sessions.repository.database).assertEnabled()
         if (this.closed) throw new Error('角色自醒调度正在关闭')
         const canonical = this.roles.register(this.sessions.repository, target.id)
         if (canonical !== target.id) await this.sessions.endSession(target.id, 'closed')

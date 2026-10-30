@@ -51,6 +51,19 @@ export class MemoryRepository {
       ORDER BY updated_at DESC, id DESC LIMIT ?`).all(parsed.scopeType, parsed.scopeKey, query.trim(), limit).map(record)
   }
 
+  recallCandidates(scope: MemoryScope): MemoryRecord[] {
+    const parsed = memoryScopeSchema.parse(scope)
+    return this.database.connection.prepare(`SELECT * FROM memories WHERE ${recordFilter(this.database, 'memory', 'id')} AND scope_type=? AND scope_key=? ORDER BY id`)
+      .all(parsed.scopeType, parsed.scopeKey).map(record)
+  }
+
+  unchanged(scope: MemoryScope, snapshot: MemoryRecord): MemoryRecord | undefined {
+    const parsed = memoryScopeSchema.parse(scope)
+    const row = this.database.connection.prepare(`SELECT * FROM memories WHERE ${recordFilter(this.database, 'memory', 'id')} AND id=? AND scope_type=? AND scope_key=? AND updated_at=?`)
+      .get(snapshot.id, parsed.scopeType, parsed.scopeKey, snapshot.updatedAt)
+    return row ? record(row) : undefined
+  }
+
   update(scope: MemoryScope, id: number, expectedUpdatedAt: number, content: string, kind?: MemoryKind): MemoryRecord {
     const safe = memoryContent(content, this.credentialValues())
     if (kind !== undefined) memoryKindSchema.parse(kind)

@@ -3,7 +3,7 @@ import type { RuntimeTool } from '@eden/runtime-pi'
 const common = new Set(['request_user_input', 'read_attachment', 'list_skills', 'load_skill', 'unload_skill', 'read_skill_file',
   'list_tools', 'load_tools', 'unload_tools', 'search_memories',
   'query_shared_workspace'])
-const chat = new Set(['remember_memory', 'create_reminder', 'list_memos'])
+const chat = new Set(['remember_memory', 'create_reminder', 'list_memos', 'list_character_stickers', 'send_character_sticker', 'desktop_list_windows'])
 const workspace = new Set(['read_file', 'list_directory', 'search_files', 'write_file', 'edit_file', 'delete_file', 'rename_file', 'restore_file', 'exec_command'])
 const awake = new Set(['write_diary', 'get_self_awake_context', 'set_self_awake_timer', 'create_reminder', 'show_desktop_reminder',
   'list_contact_channels', 'read_recent_conversation', 'read_qq_messages', 'send_qq_message', 'send_external_email',

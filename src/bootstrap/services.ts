@@ -24,7 +24,7 @@ import type { ServerConfig } from './config.ts'
 import { WorkspaceService, workspaceTools } from '../modules/workspace/index.ts'
 import { SharedWorkspaceService, sharedWorkspaceTool, sharedLibraryFileTools } from '../modules/shared-workspace/index.ts'
 import { discoverSharedWorkspace } from '../modules/shared-workspace/discovery.ts'
-import { ModelService, ModelBindingRepository, ModelPricingRepository, LocalChildModels } from '../modules/models/index.ts'
+import { ModelService, ModelBindingRepository, ModelPricingRepository, LocalChildModels, ModelContextLimitRepository } from '../modules/models/index.ts'
 import { MonBindingService } from '../modules/mon/index.ts'
 import { DirectorRunRepository, CompanionTurnCoordinator, CompanionSessionExtension } from '../modules/director/index.ts'
 import type { RuntimeTool } from '@eden/runtime-pi'
@@ -32,18 +32,31 @@ import { toJson, QQ_FILE_MAX_BYTES } from '@eden/api'
 import { QuestionService, questionTool } from '../modules/questions/index.ts'
 import { BlobRepository, BlobService } from '../modules/blobs/index.ts'
 import { BrowserService, browserTools } from '../modules/browser/index.ts'
+import { DesktopService, desktopTools } from '../modules/desktop/index.ts'
 import { AttachmentService, AttachmentRepository, attachmentTool } from '../modules/attachments/index.ts'
-import { MemoryRepository, MemoryScopes, MemoryRecall, memoryTools, MemoryExtractionService } from '../modules/memories/index.ts'
+import { MemoryRepository, MemoryScopes, MemoryRecall, memoryTools, MemoryExtractionService, coreMemoryRetrieval, LocalMemoryRetrieval, LocalMemoryModel } from '../modules/memories/index.ts'
+import type { MemoryRetriever } from '../modules/memories/index.ts'
+import { defaultMemoryModelPath } from '../modules/os/index.ts'
 import { WebResourceRepository, WebService, webTools } from '../modules/web/index.ts'
 import { QqChannelBridge } from '../modules/qq-channel/bridge.ts'
 import { qqFileTool } from '../modules/qq-channel/file-tool.ts'
+import { stickerTools } from '../modules/stickers/index.ts'
+import { VideoService, VideoSources, VideoContextBackend, videoTools, defaultVideoRuntimeRoot } from '../modules/video/index.ts'
 import { logDiagnostic } from '../modules/logging/index.ts'
 
 function storedBlobLimit(config: ServerConfig): number {
   return Math.max(config.maxBlobBytes ?? 32 * 1024 * 1024, config.origin === 'mon' ? QQ_FILE_MAX_BYTES : 0)
 }
 
-export function createServices(database: EdenDatabase, config: ServerConfig) {
+function reportWorkspaceAvailability(workspace: WorkspaceService, origin: ServerConfig['origin']) {
+  const status = workspace.info()
+  if (!['ready', 'unselected'].includes(status.status)) logDiagnostic({
+    event: 'server.workspace.unavailable', origin, status: status.status,
+    path: status.path, message: status.error, recoverable: true,
+  }, 'warn')
+}
+
+export function createServices(database: EdenDatabase, config: ServerConfig, providers: { memoryRetrieval?: MemoryRetriever } = {}) {
   const privateDataRoots = config.privateDataRoots ?? [config.dataRoot, path.resolve('Data')]
   database.connection.prepare("UPDATE connector_operations SET state='unknown',error='Host restarted before connector result confirmation' WHERE state='running'").run()
   database.connection.prepare("UPDATE mcp_operations SET state='unknown',error='Host restarted before MCP result confirmation' WHERE state='running'").run()
@@ -62,6 +75,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
   const maxStoredBlobBytes = storedBlobLimit(config)
   const blobs = new BlobService(path.join(config.dataRoot, 'blobs'), new BlobRepository(database), maxStoredBlobBytes)
   const browser = new BrowserService(blobs)
+  const desktop = new DesktopService(database, repository, blobs, config.desktopBrokerRoot)
   const mcpResults = new McpResults(database, blobs)
   const realtimeVoice = new RealtimeVoiceService(repository, voiceConfig, sessionId => mon.realtimeSttUrl(sessionId))
   const voice = new VoiceService(blobs)
@@ -70,20 +84,23 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
   const attachments = new AttachmentService(blobs, maxStoredBlobBytes)
   const media = new MediaService(repository, attachments)
   const attachmentRepository = new AttachmentRepository(database)
+  const video = new VideoService(path.join(config.dataRoot, 'video-context'),
+    new VideoContextBackend(config.videoRuntimeRoot ?? defaultVideoRuntimeRoot()), new VideoSources(attachmentRepository, attachments))
   const selfAwakeRepository = new SelfAwakeRepository(database, config.selfAwakeScheduleFile, config.origin === 'mon' && Boolean(config.monIdentity || config.selfAwakeScheduleFile))
   const selfAwakeContext = new SelfAwakeContext(selfAwakeRepository, repository, config.monIdentity)
-  const jobs = new JobRepository(database, config.origin === 'mon' && Boolean(config.monIdentity || config.selfAwakeScheduleFile))
+  const jobs = new JobRepository(database, config.origin === 'mon' && Boolean(config.monIdentity || config.selfAwakeScheduleFile), () => selfAwakeRepository.control.read().enabled)
   const connectorEvents = new ConnectorEventRepository(repository, connectors, connectorCatalog, jobs)
   const connectorLifecycle = new ConnectorLifecycle(config.dataRoot, connectors, connectorCatalog, connectorPermissions, connectorEvents, connectorCredentials)
   const memos = new MemoRepository(database, jobs)
   const memoNotifications = new MemoNotifications(database)
   const memories = new MemoryRepository(database)
   const memoryScopes = new MemoryScopes(database)
-  const memoryRecall = new MemoryRecall(memories, memoryScopes)
+  const { localMemory, memoryModel, memoryRecall } = memoryServices(config, memories, memoryScopes, providers.memoryRetrieval,
+    input => coreMemoryRetrieval(input, (id, body, signal) => mon.retrieveMemories(id, body, signal)))
   const directors = new DirectorRunRepository(repository)
   directors.recoverInterrupted()
   const modelBindings = config.origin === 'mon' ? new ModelBindingRepository(database) : undefined
-  const models = new ModelService(config.origin, config.model, modelBindings, new ModelPricingRepository(database), config.origin === 'local' ? new LocalChildModels(database) : undefined)
+  const models = new ModelService(config.origin, config.model, modelBindings, new ModelPricingRepository(database), config.origin === 'local' ? new LocalChildModels(database) : undefined, new ModelContextLimitRepository(database))
   const plugins = new PluginService(database, privateDataRoots)
   const commands = new CommandService(database, privateDataRoots, config.externalCommandSandbox,
     { deviceSettingsPath: config.terminalSettingsPath, assertSession: sessionId => { repository.read(sessionId) } })
@@ -91,11 +108,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
   const sharedWorkspace = new SharedWorkspaceService({ dataRoot: config.dataRoot, account: config.account, workspace,
     assertSession: sessionId => { repository.readMetadata(sessionId) },
     ...(config.monWorkspaceRoot ? { discover: () => discoverSharedWorkspace([config.monWorkspaceRoot!], '', config.monWorkspaceRoot) } : {}) })
-  const workspaceStatus = workspace.info()
-  if (!['ready', 'unselected'].includes(workspaceStatus.status)) logDiagnostic({
-    event: 'server.workspace.unavailable', origin: config.origin, status: workspaceStatus.status,
-    path: workspaceStatus.path, message: workspaceStatus.error, recoverable: true,
-  }, 'warn')
+  reportWorkspaceAvailability(workspace, config.origin)
   const systemSkills = new SystemSkillCatalog(config.systemSkillRoots ?? [])
   const projectSkills = new SystemSkillCatalog(() => {
     const root = workspace.availableRoot()
@@ -124,18 +137,24 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
       load: (name, expected) => capabilitySession(sessionId, turnId, actorId).loadSkill(name, expected),
       unload: name => capabilitySession(sessionId, turnId, actorId).unloadSkill(name),
     }),
-    ...connectorPluginTools(pluginMarket, permissions, sessionId, turnId),
+    ...connectorPluginTools(pluginMarket, permissions, sessionId, turnId, actorId),
     ...pluginTools(plugins, permissions, sessionId, turnId, actorId, sessionWorkspace(sessionId)), ...workspaceTools(sessionWorkspace(sessionId), permissions, sessionId, turnId, commands, subagentPolicy(database, sessionId)?.sandboxMode === 'workspace-write', actorId),
     ...desktopReminderTools(desktopReminders, permissions, sessionId, turnId),
     ...selfAwakeTools(selfAwakeRepository, jobs, permissions, selfAwakeContext, sessionId, turnId, actorId, selfAwakeRoleSessions),
     questionTool(questions, sessionId, turnId), ...memoTools(memos, permissions, sessionId, turnId),
     attachmentTool(attachmentRepository, attachments, sessionId, turnId),
+    ...videoTools(video, permissions, sessionWorkspace(sessionId), { sessionId, turnId,
+      ...(actorId === undefined ? {} : { actorId }),
+      qq: sessionId !== '00000000-0000-4000-8000-000000000000' && repository.read(sessionId).sourceChannel === 'qq',
+      groupReadOnly: Boolean(database.connection.prepare('SELECT 1 FROM qq_group_sessions WHERE session_id=? AND allow_actions=0').get(sessionId)) }),
     ...(config.origin === 'mon' ? [sharedWorkspaceTool(sharedWorkspace, sessionId),
       ...sharedLibraryFileTools(sharedWorkspace, permissions, sessionId, turnId, actorId)] : []),
     ...(config.origin === 'mon' ? [qqFileTool(repository, blobs, sessionWorkspace(sessionId), permissions, sessionId, turnId, mon)] : []),
+    ...(config.origin === 'mon' ? stickerTools(mon, napcat, repository, permissions, attachmentRepository, attachments, sessionId, turnId, actorId) : []),
     ...memoryTools(memories, memoryScopes, permissions, { sessionId, turnId, ...(actorId === undefined ? {} : { actorId }) }),
     ...webTools(web, permissions, sessionId, turnId),
     ...browserTools(browser, permissions, sessionId, turnId),
+    ...desktopTools(desktop, permissions, sessionId, turnId, actorId),
     ...(config.origin === 'mon' ? [...contactTools(mon, permissions, sessionId, turnId),
       ...napcatTools(napcat, permissions, sessionId, turnId)] : []),
     ...(config.origin === 'mon' ? deviceTools(mon, permissions, sessionId, turnId) : []),
@@ -149,7 +168,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
     (tool, input, context) => permissions.request({ ...context, sessionId, turnId }, 'qq.tool.read', tool.name, toJson(input)))
   const tools = (sessionId: string, turnId: string, actorId?: string | number): RuntimeTool[] => {
     const scope = capabilitySession(sessionId, turnId, actorId)
-    if (sessionId !== '00000000-0000-4000-8000-000000000000') return scope.tools()
+    if (sessionId !== '00000000-0000-4000-8000-000000000000') return scope.registeredTools()
     return new ToolRegistry(scope.registry().tools).tools.map(tool => ({ ...tool,
       exposure: defaultTool(tool, 'user_chat', Boolean(workspace.availableRoot())) ? 'direct' : 'deferred' }))
   }
@@ -168,16 +187,24 @@ export function createServices(database: EdenDatabase, config: ServerConfig) {
   const subagents = new SubagentService(new SubagentRepository(database, jobs, sessionId => sessionId ? sessionWorkspace(sessionId).info().path : workspace.info().path), sessions, models, jobs, new SubagentMailbox(database), sessionId => sessionSkills(sessionId).repository)
   const subagentLifecycle = new SubagentLifecycle(subagents)
   sessions.setDescendantStop(sessionId => subagents.stopChildren(sessionId))
-  sessions.setEndCleanup(sessionId => skills.releaseWorkspace(sessionId))
+  sessions.setEndCleanup(async sessionId => { await Promise.all([skills.releaseWorkspace(sessionId), desktop.release(sessionId)]) })
   sessions.toolCatalog()
   const pluginHooks = new PluginHookService(new PluginHookRepository(database, jobs), pluginMarket.installed, sessions, jobs)
   const memoJobRecovery = new MemoJobRecovery(database, memos, memoNotifications, jobs, sessions)
   const scheduler = new JobScheduler(jobs, { 'subagent.turn': job => subagents.dispatch(job), 'plugin.hook': job => pluginHooks.dispatch(job), self_awake: job => selfAwake.dispatch(job), 'memo.reminder': memoDispatcher(database, memos, memoNotifications, jobs, sessions), 'memo.reminder.redelivery': job => memoJobRecovery.dispatch(job) })
-  return { browser, sharedWorkspace, memoJobRecovery, commands, repository, mcpResults, mcp, connectorCredentials, connectorLifecycle, connectorPermissions, connectorEvents, connectors, connectorCatalog, media, realtimeVoice, speech, voice, voiceConfig, subagentLifecycle, subagents, packageAssets, pluginHooks, pluginMarket, skills, plugins, permissions, sessions, workspace, models, mon, directors, companion, questions, handoffs, blobs, attachments, memories, memos, memoNotifications, jobs, scheduler, selfAwake, selfAwakeActions, selfAwakeBridge, qqChannelBridge, desktopReminders, memoryExtractions }
+  return { memoryModel, localMemory, video, desktop, browser, sharedWorkspace, memoJobRecovery, commands, repository, mcpResults, mcp, connectorCredentials, connectorLifecycle, connectorPermissions, connectorEvents, connectors, connectorCatalog, media, realtimeVoice, speech, voice, voiceConfig, subagentLifecycle, subagents, packageAssets, pluginHooks, pluginMarket, skills, plugins, permissions, sessions, workspace, models, mon, directors, companion, questions, handoffs, blobs, attachments, memories, memos, memoNotifications, jobs, scheduler, selfAwake, selfAwakeActions, selfAwakeBridge, qqChannelBridge, desktopReminders, memoryExtractions }
 }
 
 function skillProfile(environment: unknown): string {
   if (environment && typeof environment === 'object' && 'sessionPurpose' in environment && environment.sessionPurpose === 'subagent') return 'subagent'
   if (environment && typeof environment === 'object' && 'sessionPurpose' in environment && environment.sessionPurpose === 'self_awake') return 'self_awake'
   return 'user_chat'
+}
+
+function memoryServices(config: ServerConfig, memories: MemoryRepository, scopes: MemoryScopes,
+  provider: MemoryRetriever | undefined, core: MemoryRetriever) {
+  const modelPath = config.memoryModelPath ?? defaultMemoryModelPath(config.dataRoot)
+  const localMemory = config.origin === 'local' ? new LocalMemoryRetrieval(modelPath) : undefined
+  const memoryModel = localMemory ? new LocalMemoryModel(modelPath) : undefined
+  return { localMemory, memoryModel, memoryRecall: new MemoryRecall(memories, scopes, provider ?? (localMemory ? input => localMemory.retrieve(input) : core)) }
 }
