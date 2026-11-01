@@ -97,7 +97,7 @@ test('durable publication/cancel isolates scope paths and retries only the faile
   mkdirSync(f.scope(f.a.id), { recursive: true }); writeFileSync(path.join(f.scope(f.a.id), 'schedule_requests'), 'blocked')
   f.repo.timerPublication.publish(f.b.id)
   assert.equal(f.requests(f.b.id)[0].job_id, b.id)
-  assert.throws(() => f.repo.timerPublication.publish(f.a.id), /delivery pending/)
+  assert.throws(() => f.repo.timerPublication.publish(f.a.id), /设置已保存，调度同步未完成/)
   const pending = () => f.db.connection.prepare('SELECT session_id FROM self_awake_session_schedules WHERE published_revision<revision').all().map(row => row.session_id)
   assert.deepEqual(pending(), [f.a.id])
   rmSync(path.join(f.scope(f.a.id), 'schedule_requests')); f.repo.timerPublication.publish()
@@ -132,9 +132,9 @@ test('actual activation, deadline and context do not borrow the legacy or other-
 test('an old MonOs cannot accept isolated timers and a closed session cancellation survives recreation', t => {
   const f = fixture(t)
   writeFileSync(path.join(f.root, 'session-protocol.json'), JSON.stringify({ protocolVersion: 2, sessionScopes: true, expiresAt: Date.now() - 1 }))
-  assert.throws(() => f.repo.timerPublication.assertAvailable(true), /MonOs/)
+  assert.throws(() => f.repo.timerPublication.assertAvailable(true), /调度心跳已过期/)
   rmSync(path.join(f.root, 'session-protocol.json'))
-  assert.throws(() => f.repo.timerPublication.assertAvailable(true), /MonOs/)
+  assert.throws(() => f.repo.timerPublication.assertAvailable(true), /未发现有效心跳/)
   const a = f.plan(f.a.id), b = f.plan(f.b.id)
   f.db.connection.prepare("UPDATE sessions SET status='closed' WHERE id=?").run(f.a.id)
   const row = f.db.connection.prepare('SELECT job_id,revision,published_revision FROM self_awake_session_schedules WHERE session_id=?').get(f.a.id)!

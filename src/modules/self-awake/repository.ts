@@ -25,7 +25,7 @@ export class SelfAwakeRepository {
     this.control = new SelfAwakeControlRepository(database)
   }
   controlState() {
-    return { ...this.control.read(), publicationError: this.timerPublication.fault ?? null, schedule: this.wakeSchedule() }
+    return { ...this.control.read(), publicationError: this.timerPublication.fault ?? null, scheduler: this.timerPublication.status(), schedule: this.wakeSchedule() }
   }
   updateControl(enabled: boolean, expectedUpdatedAt: number) {
     this.control.update(enabled, expectedUpdatedAt)

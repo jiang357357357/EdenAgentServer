@@ -11,8 +11,9 @@ import { attachmentRefsSchema, QQ_FILE_MAX_BYTES, QQ_FILE_MAX_BASE64_LENGTH,
 import { loadMonCatalog } from '../mon/index.ts'
 import type { MonBindingService } from '../mon/index.ts'
 import { z } from 'zod'
-import { privateTurnStatus } from './reply-status.ts'
+import { qqTurnStatus } from './reply-status.ts'
 import { QqPrivateSessionBindings } from './private-session.ts'
+import { resolveQqPermission } from './permission-bridge.ts'
 import { isGroupChannelInput, QqGroupBridge } from './group-bridge.ts'
 
 const qq = z.string().regex(/^\d{5,20}$/)
@@ -20,7 +21,7 @@ const identity = { assistant_id: z.number().int().positive(), character_id: z.nu
 const submitInput = z.object({ schema_version: z.enum(['qq-turn.v2', 'qq-turn.v3']), user_id: z.string(), bot_qq: qq,
   contact_qq: qq, message_id: z.string().min(1).max(128), text: z.string().trim().min(1).max(4000),
   attachments: attachmentRefsSchema.default([]), ...identity }).strict()
-const fileInput = z.object({ user_id: z.string(), bot_qq: qq, contact_qq: qq,
+const fileInput = z.object({ user_id: z.string(), bot_qq: qq, contact_qq: qq, group_qq: qq.optional(),
   input_id: z.uuid(), blob_id: z.uuid() }).strict()
 const uploadInput = z.object({ user_id: z.string(), bot_qq: qq, contact_qq: qq,
   group_qq: qq.optional(),
@@ -32,9 +33,9 @@ const pendingLifetime = 30 * 60 * 1000
 const statusInput = z.object({ user_id: z.string(), bot_qq: qq, contact_qq: qq, input_id: z.uuid(),
   after_seq: z.string().regex(/^\d+$/).default('0') }).strict()
 const availabilityInput = z.object({ user_id: z.string().min(1), bot_qq: qq, contact_qq: qq, ...identity }).strict()
-const approvalInput = z.object({ user_id: z.string(), bot_qq: qq, contact_qq: qq,
+const approvalInput = z.object({ user_id: z.string(), bot_qq: qq, contact_qq: qq, group_qq: qq.optional(),
   request_id: z.uuid().optional(), decision: z.enum(['allow', 'deny']) }).strict()
-const permissionModeInput = z.object({ user_id: z.string(), bot_qq: qq, contact_qq: qq,
+const permissionModeInput = z.object({ user_id: z.string(), bot_qq: qq, contact_qq: qq, group_qq: qq.optional(),
   mode: z.enum(['restricted', 'full_access', 'takeover']).optional() }).strict()
 
 export class QqChannelBridge {
@@ -101,7 +102,11 @@ export class QqChannelBridge {
   async file(raw: unknown): Promise<unknown> {
     const input = fileInput.parse(raw)
     if (input.user_id !== this.identity.userId) throw new Error('QQ channel owner mismatch')
-    const row = this.database.connection.prepare(`SELECT i.session_id,i.turn_id FROM inputs i
+    const row = input.group_qq ? this.database.connection.prepare(`SELECT i.session_id,i.turn_id FROM inputs i
+      JOIN qq_group_sessions q ON q.session_id=i.session_id
+      WHERE i.id=? AND q.bot_qq=? AND q.group_qq=? AND q.operator_qq=?`)
+      .get(input.input_id, input.bot_qq, input.group_qq, input.contact_qq)
+      : this.database.connection.prepare(`SELECT i.session_id,i.turn_id FROM inputs i
       JOIN qq_channel_conversations q ON q.session_id=i.session_id
       WHERE i.id=? AND q.bot_qq=? AND q.contact_qq=?`).get(input.input_id, input.bot_qq, input.contact_qq)
     if (!row) throw new Error('QQ channel input not found')
@@ -137,7 +142,7 @@ export class QqChannelBridge {
     const token = await acquireMonServiceToken(this.identity, this.abort.signal)
     const result = await loadMonCatalog(new MonClient(this.identity.coreBaseUrl, token), input.assistant_id, this.abort.signal)
     if (String(result.catalog.character.id) !== String(input.character_id)) throw new Error('QQ bound character does not match assistant')
-    return { available: Boolean(result.binding), reason: result.binding ? null : 'NO_MODEL',
+    return { available: Boolean(result.binding), reason: result.binding ? null : 'NO_MODEL', qq_permission_protocol: 'conversation.v1',
       assistant_id: String(result.catalog.assistant.id) }
   }
 
@@ -204,7 +209,7 @@ export class QqChannelBridge {
     const account = { key: accountKey(this.identity.coreBaseUrl, input.user_id),
       userId: input.user_id, coreBaseUrl: this.identity.coreBaseUrl }
     withAccount(account, () => this.sessions.repository.ownership.assert(sessionId))
-    return privateTurnStatus(this.database, sessionId, turnId, row, input.after_seq)
+    return qqTurnStatus(this.database, sessionId, turnId, row, input.after_seq)
   }
 
   resolvePermission(raw: unknown): unknown {
@@ -212,30 +217,15 @@ export class QqChannelBridge {
     if (input.user_id !== this.identity.userId) throw new Error('QQ channel owner mismatch')
     const account = { key: accountKey(this.identity.coreBaseUrl, input.user_id),
       userId: input.user_id, coreBaseUrl: this.identity.coreBaseUrl }
-    const conversation = this.database.connection.prepare('SELECT session_id FROM qq_channel_conversations WHERE bot_qq=? AND contact_qq=?')
-      .get(input.bot_qq, input.contact_qq)
-    if (!conversation) return { resolved: false, reason: 'none' }
-    withAccount(account, () => this.sessions.repository.ownership.assert(String(conversation.session_id)))
-    const pending = this.database.connection.prepare(`SELECT p.id FROM permission_requests p
-      JOIN qq_channel_conversations q ON q.session_id=p.session_id
-      JOIN inputs i ON i.session_id=p.session_id AND i.turn_id=p.turn_id
-      JOIN session_classification c ON c.session_id=p.session_id AND c.source_channel='qq'
-      WHERE q.bot_qq=? AND q.contact_qq=? AND p.state='pending' AND i.state='running'
-      AND (? IS NULL OR p.id=?) ORDER BY p.created_at`).all(
-        input.bot_qq, input.contact_qq, input.request_id ?? null, input.request_id ?? null)
-    if (pending.length === 0) return { resolved: false, reason: 'none' }
-    if (pending.length > 1) return { resolved: false, reason: 'multiple' }
-    const requestId = String(pending[0]!.id)
-    withAccount(account, () => this.permissions.resolve(requestId, input.decision === 'allow'))
-    return { resolved: true, decision: input.decision }
+    return withAccount(account, () => resolveQqPermission(this.database, this.sessions.repository, this.permissions, input))
   }
 
   permissionMode(raw: unknown): unknown {
     const input = permissionModeInput.parse(raw)
     if (input.user_id !== this.identity.userId) throw new Error('QQ channel owner mismatch')
     const mode = input.mode === undefined
-      ? this.permissions.qqMode(input.bot_qq, input.contact_qq)
-      : this.permissions.setQqMode(input.bot_qq, input.contact_qq, input.mode)
+      ? this.permissions.qqMode(input.bot_qq, input.contact_qq, input.group_qq)
+      : this.permissions.setQqMode(input.bot_qq, input.contact_qq, input.mode, input.group_qq)
     return { mode }
   }
 }

@@ -27,12 +27,13 @@ export async function videoFixture(backend: VideoBackend = new VideoContextBacke
   if (channel === 'qq') db.connection.prepare('INSERT INTO qq_channel_conversations VALUES(?,?,?,?)').run('111111', '222222', session.id, Date.now())
   const permissions = new PermissionService(db, sessions.events)
   permissions.setMode('takeover'); permissions.setQqMode('111111', '222222', 'takeover')
+  if (channel === 'group') permissions.setQqMode('111111', '222222', 'takeover', '333333')
   const workspace = new WorkspaceService(db, [], workspaceRoot)
   const blobs = new BlobService(path.join(root, 'blobs'), new BlobRepository(db))
   const attachments = new AttachmentService(blobs), repository = new AttachmentRepository(db)
   const service = new VideoService(path.join(root, 'video'), backend, new VideoSources(repository, attachments))
   let active: ReturnType<InputRepository['claim']>
-  const scope = (actorId?: string | number) => ({ sessionId: session.id, turnId: active!.turnId, qq: channel !== 'app', groupReadOnly: channel === 'group', ...(actorId === undefined ? {} : { actorId }) })
+  const scope = (actorId?: string | number) => ({ sessionId: session.id, turnId: active!.turnId, qq: channel !== 'app', ...(actorId === undefined ? {} : { actorId }) })
   const tools = (actorId?: string | number) => videoTools(service, permissions, workspace, scope(actorId)).map(modelTool)
   return { root, db, sessions, session, inputs, workspace, workspaceRoot, blobs, attachments, permissions, service, tools,
     async accept(bytes: Buffer, filename = 'video.mp4', mime = 'video/mp4') {

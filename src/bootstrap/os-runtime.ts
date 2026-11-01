@@ -18,7 +18,8 @@ export async function openOsRuntime(config: OsConfig, target: OsTarget) {
       response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({
         status: model && schedule ? 'ok' : 'degraded', service: 'Agent.os', owner: 'eden-agent-ts', pid: process.pid,
         uptime_seconds: Math.floor((Date.now() - started) / 1000), calls_total: tools.calls, calls_failed: tools.failures,
-        model_runtime: model ? 'ok' : 'unavailable', model_backend: 'onnxruntime-node', scheduler: schedule ? 'ok' : 'degraded' })); return
+        model_runtime: model ? 'ok' : 'unavailable', model_backend: 'onnxruntime-node', scheduler: schedule ? 'ok' : 'degraded',
+        self_awake_state: scheduler.status })); return
     }
     response.writeHead(404).end()
   })

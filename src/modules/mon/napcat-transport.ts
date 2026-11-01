@@ -11,7 +11,6 @@ export interface NapcatTarget {
   token?: string
   identity?: MonServiceIdentity
   qqContext?: { session_id: string; bot_qq: string; contact_qq: string; group_qq?: string | undefined }
-  groupAllowActions?: boolean
 }
 export interface NapcatRequest {
   action: string

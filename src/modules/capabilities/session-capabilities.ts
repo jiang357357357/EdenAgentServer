@@ -21,13 +21,11 @@ export interface CapabilityScope { sessionId: string; owner: string; profile: st
 const qqTools = new Set(['web_search', 'web_fetch', 'web_find', 'read_file', 'list_directory', 'search_files',
   'write_file', 'edit_file', 'exec_command', 'list_memos', 'create_reminder',
   'list_contact_channels', 'send_external_email', 'read_attachment', 'send_qq_file',
+  'list_esp32_devices', 'control_esp32_device', 'get_esp32_command_status', 'show_desktop_reminder', 'get_desktop_reminder',
   'list_qq_capabilities', 'list_qq_events', 'read_qq_action', 'execute_qq_action',
   'list_character_stickers', 'remember_character_sticker', 'send_character_sticker', 'delete_character_sticker'])
 for (const name of ['inspect_video', 'prepare_video', 'read_video_timeline', 'get_video_frames', 'get_video_frame_previews', 'delete_video_job', 'video_context_doctor']) qqTools.add(name)
 const qqReadTools = new Set(['web_find', 'read_file', 'list_directory', 'search_files', 'list_memos'])
-const qqGroupTools = new Set(['list_qq_capabilities', 'read_qq_action', 'execute_qq_action', 'read_attachment',
-  'list_character_stickers', 'remember_character_sticker', 'send_character_sticker'])
-for (const name of ['inspect_video', 'prepare_video', 'read_video_timeline', 'get_video_frames', 'get_video_frame_previews', 'delete_video_job', 'video_context_doctor']) qqGroupTools.add(name)
 
 export class SessionCapabilities {
   private readonly selections: SelectionRepository
@@ -41,9 +39,6 @@ export class SessionCapabilities {
 
   registry(): ToolRegistry {
     const scope = this.scope
-    if (scope.sourceChannel === 'qq' && this.database.connection.prepare('SELECT 1 FROM qq_group_sessions WHERE session_id=?').get(scope.sessionId))
-      return new ToolRegistry(this.definitions().filter(tool =>
-        (tool.source === undefined || tool.source === 'builtin') && qqGroupTools.has(tool.name)).map(modelTool))
     if (scope.sourceChannel === 'qq') return new ToolRegistry(this.definitions().filter(tool =>
       (tool.source === undefined || tool.source === 'builtin') && qqTools.has(tool.name)).map(tool =>
       qqReadTools.has(tool.name) ? { ...tool, execute: async (input: Record<string, unknown>, context: Parameters<RuntimeTool['execute']>[1]) => {

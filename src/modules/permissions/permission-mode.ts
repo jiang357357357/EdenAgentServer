@@ -5,7 +5,9 @@ import type { EdenDatabase } from '@eden/store'
 export class PermissionModeStore {
   constructor(private readonly database: EdenDatabase) {}
 
-  private qqKey(botQq: string, contactQq: string): string { return `permission.qq.${botQq}.${contactQq}` }
+  private qqKey(botQq: string, contactQq: string, groupQq?: string): string {
+    return groupQq ? `permission.qq.group.${botQq}.${groupQq}` : `permission.qq.${botQq}.${contactQq}`
+  }
 
   read(): PermissionMode {
     const row = this.database.connection.prepare("SELECT value_json FROM runtime_settings WHERE key='permission.mode'").get()
@@ -32,18 +34,18 @@ export class PermissionModeStore {
     return this.modeAllows(this.read(), capability)
   }
 
-  qqMode(botQq: string, contactQq: string): PermissionMode {
+  qqMode(botQq: string, contactQq: string, groupQq?: string): PermissionMode {
     const row = this.database.connection.prepare('SELECT value_json FROM runtime_settings WHERE key=?')
-      .get(this.qqKey(botQq, contactQq))
+      .get(this.qqKey(botQq, contactQq, groupQq))
     return row ? permissionModeSchema.parse(JSON.parse(String(row.value_json))) : 'restricted'
   }
 
-  setQqMode(botQq: string, contactQq: string, value: PermissionMode): PermissionMode {
+  setQqMode(botQq: string, contactQq: string, value: PermissionMode, groupQq?: string): PermissionMode {
     const mode = permissionModeSchema.parse(value)
     return this.database.transaction(() => {
-      const previous = this.qqMode(botQq, contactQq)
+      const previous = this.qqMode(botQq, contactQq, groupQq)
       if (previous === mode) return mode
-      const key = this.qqKey(botQq, contactQq), now = Date.now()
+      const key = this.qqKey(botQq, contactQq, groupQq), now = Date.now()
       this.database.connection.prepare('INSERT OR REPLACE INTO runtime_settings VALUES (?, ?, ?)')
         .run(key, JSON.stringify(mode), now)
       this.database.connection.prepare('INSERT INTO runtime_setting_changes(key,previous_json,value_json,created_at) VALUES (?, ?, ?, ?)')
@@ -53,9 +55,8 @@ export class PermissionModeStore {
   }
 
   allowsQq(sessionId: string, capability: string): boolean {
-    const group = this.database.connection.prepare('SELECT allow_actions FROM qq_group_sessions WHERE session_id=?').get(sessionId)
-    if (group) return ['qq.napcat.group.read', 'character.sticker.read', 'video.process'].includes(capability)
-      || (['qq.napcat.group.write', 'character.sticker.write', 'video.network'].includes(capability) && group.allow_actions === 1)
+    const group = this.database.connection.prepare('SELECT bot_qq,group_qq,operator_qq FROM qq_group_sessions WHERE session_id=?').get(sessionId)
+    if (group) return this.modeAllows(this.qqMode(String(group.bot_qq), String(group.operator_qq), String(group.group_qq)), capability)
     const row = this.database.connection.prepare('SELECT bot_qq,contact_qq FROM qq_channel_conversations WHERE session_id=?')
       .get(sessionId)
     if (!row) return false

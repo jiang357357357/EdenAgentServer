@@ -20,7 +20,7 @@ const coreRoot = path.resolve('..', 'Core')
 const python = process.env.EDEN_TEST_CORE_PYTHON ?? path.join(coreRoot, '.venv/Scripts/python.exe')
 const script = path.join(coreRoot, 'Application/Dependencies/ServiceProvider/Recall/tests/run_vector_contracts.py')
 // Explicit public model fixture; production Local has no Core-model fallback.
-const modelPath = process.env.EDEN_TEST_MEMORY_MODEL_PATH ?? path.join(coreRoot, 'Resources/Models/bge-small-zh-v1.5')
+const modelPath = process.env.EDEN_TEST_MEMORY_MODEL_PATH ?? path.resolve(coreRoot, '../Data/Os/Models/bge-small-zh-v1.5')
 const available = existsSync(python) && existsSync(script) && existsSync(path.join(modelPath, 'model.safetensors'))
 
 function memory(id: number, content: string, metadata = {}): MemoryRecord {
@@ -28,11 +28,21 @@ function memory(id: number, content: string, metadata = {}): MemoryRecord {
 }
 
 test('Agent client → isolated actual Core HTTP/ORM/ONNX agrees with independent Local retrieval', { skip: !available }, async context => {
-  const child = spawn(python, ['-u', script, '--serve'], { cwd: os.tmpdir(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  const scratch = await mkdtemp(path.join(os.tmpdir(), 'eden-memory-http-'))
+  const child = spawn(python, ['-B', '-u', script, '--serve'], { cwd: os.tmpdir(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, MONCORE_TESTING: '1', MON_TEST_LOG_DIR: path.join(scratch, 'logs') } })
   const lines = createInterface({ input: child.stdout })
   let errors = ''
   child.stderr.on('data', data => { errors += data.toString() })
-  context.after(async () => { lines.close(); if (child.exitCode === null) { child.kill(); await once(child, 'exit') } })
+  context.after(async () => {
+    lines.close()
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = once(child, 'exit')
+      child.kill()
+      await exited
+    }
+    await rm(scratch, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+  })
   const port = await new Promise<number>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error(`Core fixture startup timeout: ${errors.slice(-500)}`)), 20000)
     child.once('error', error => { clearTimeout(timeout); reject(error) })

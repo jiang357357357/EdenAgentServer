@@ -21,7 +21,7 @@ function fixture(t: test.TestContext) {
   const request = (revision: number, extra: State = {}) => saveState(path.join(directory, 'schedule_requests', `${revision}.json`), {
     schema_version: 'self-awake.schedule.v2', scope_kind: 'session_task', session_id: session, revision, requested_at: iso(),
     action: 'schedule', next_wake_at: iso(0), job_id: randomUUID(), ...extra })
-  const target: OsTarget = { ready: () => true, async admitReminder() { return { memoId: 1 } }, async reminderDelivery() { return null },
+  const target: OsTarget = { ready: () => true, async control() { return { enabled: true, updatedAt: 0 } }, async admitReminder() { return { memoId: 1 } }, async reminderDelivery() { return null },
     async run(input) { calls.push(input as State); return { accepted: true, job_id: 'accepted-job' } },
     async status() { return { status: 'completed' } } }
   t.after(() => rmSync(root, { recursive: true, force: true }))

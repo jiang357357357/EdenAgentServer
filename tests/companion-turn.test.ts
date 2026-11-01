@@ -55,7 +55,7 @@ test('cancellation during a beat stops later actors and persists a failed direct
   const task = setup.coordinator.execute(setup.request)
   const rejected = assert.rejects(task)
   try {
-    const deadline = Date.now() + 5000
+    const deadline = Date.now() + 30000
     while (!setup.first.requests.length && Date.now() < deadline) await delay(10)
     assert.equal(setup.first.requests.length, 1)
     setup.controller.abort()

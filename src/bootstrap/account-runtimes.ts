@@ -25,6 +25,7 @@ export class AccountRuntimes {
   private readonly runtimes = new Map<string, Promise<RuntimeScope>>()
   private readonly privateDataRoots: string[] = []
   private readonly failedAccounts = new Set<string>()
+  private readonly readyAccounts = new Set<string>()
   private closed = false
   private started = false
   private local: RuntimeScope | undefined
@@ -154,6 +155,7 @@ export class AccountRuntimes {
     })
     try {
       await this.atStage("account.background", directory, () => runtime.start())
+      this.readyAccounts.add(account.key)
       this.stage("account.ready", directory)
     } catch (error) {
       this.failedAccounts.add(directory)
@@ -176,7 +178,8 @@ export class AccountRuntimes {
   private failure(stage: AccountStartupStage | "account.resume", directory: string, error: unknown): void {
     logDiagnostic(accountStartupFailure(this.config.origin, stage, directory, error), "error")
   }
-  ready(): boolean {
+  ready(account?: Account): boolean {
+    if (account) return !this.closed && this.readyAccounts.has(account.key)
     return this.started && !this.closed && this.failedAccounts.size === 0
   }
   defaultRuntime(): RuntimeScope {

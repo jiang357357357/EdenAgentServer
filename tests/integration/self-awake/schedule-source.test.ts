@@ -25,7 +25,7 @@ test('MonOs schedule overrides old queued handoff, reports retry/disabled and ne
     assert.equal(repo.list({}).schedule?.status, 'disabled')
     writeFileSync(file, '{')
     assert.equal(repo.list({}).schedule?.status, 'unavailable')
-    assert.match(repo.list({}).schedule?.reason ?? '', /无法读取 MonOs/)
+    assert.match(repo.list({}).schedule?.reason ?? '', /无法读取当前账号的自醒计划/)
   } finally { db.close(); rmSync(root, { recursive: true, force: true }) }
 })
 

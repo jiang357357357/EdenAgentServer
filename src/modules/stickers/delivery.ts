@@ -35,7 +35,7 @@ export class StickerDelivery {
     const group = target.qqContext.group_qq
     const action = group ? 'send_group_sticker' : 'send_private_sticker'
     await this.permissions.request({ ...context, sessionId: this.sessionId, turnId: this.turnId, assertCurrent },
-      group ? 'qq.napcat.group.write' : 'qq.napcat.write', `${target.resource}:${action}`,
+      'qq.napcat.write', `${target.resource}:${action}`,
       toJson({ channel: 'qq_action', action, bot: target.qqContext.bot_qq,
         params: { ...(group ? { group_id: group } : { user_id: target.qqContext.contact_qq }), sticker: sticker.name } }))
     context.signal.throwIfAborted(); assertCurrent(); this.napcat.assertCurrent(target)

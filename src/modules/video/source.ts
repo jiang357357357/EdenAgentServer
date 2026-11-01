@@ -12,14 +12,13 @@ function extension(filename: string) {
   if (!extensions.has(value)) throw new Error('视频格式需为 MP4、WebM、MOV、MKV、AVI、M4V 或 MPEG')
   return value
 }
-export interface VideoInputScope { sessionId: string; turnId: string; actorId?: string | number; qq: boolean; groupReadOnly: boolean }
+export interface VideoInputScope { sessionId: string; turnId: string; actorId?: string | number; qq: boolean }
 
 export class VideoSources {
   constructor(private readonly repository: AttachmentRepository, private readonly attachments: AttachmentService) {}
 
   capture(source: VideoSource, scope: VideoInputScope, workspace: WorkspaceService) {
     if ('youtubeUrl' in source) {
-      if (scope.groupReadOnly) throw new Error('此群未允许外部操作，不能下载在线视频')
       const url = new URL(source.youtubeUrl)
       if (url.protocol !== 'https:' || url.username || url.password || url.port || !['youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be'].includes(url.hostname))
         throw new Error('在线视频目前只支持 HTTPS YouTube 链接')

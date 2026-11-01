@@ -24,9 +24,9 @@ export class MemoRepository {
       if (input.relatedSessionId && !this.database.connection.prepare("SELECT 1 FROM sessions WHERE id=? AND status='active'").get(input.relatedSessionId)) throw new Error('Memo session is not active')
       const now = Date.now()
       const result = this.database.connection.prepare(`INSERT INTO memos
-        (title,content,kind,status,priority,remind_at,due_at,repeat_rule,related_session_id,metadata_json,completed_at,created_at,updated_at,operation_key,snoozed_until)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.title, input.content, input.kind, input.status, input.priority,
-          input.remindAt, input.dueAt, input.repeatRule, input.relatedSessionId, JSON.stringify(input.metadata), input.status === 'done' ? now : null, now, now, operationKey ?? null, input.snoozedUntil)
+        (title,content,kind,status,priority,remind_at,due_at,repeat_rule,related_session_id,metadata_json,completed_at,created_at,updated_at,operation_key,snoozed_until,delivery_json)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.title, input.content, input.kind, input.status, input.priority,
+          input.remindAt, input.dueAt, input.repeatRule, input.relatedSessionId, JSON.stringify(input.metadata), input.status === 'done' ? now : null, now, now, operationKey ?? null, input.snoozedUntil, JSON.stringify(input.delivery ?? { channel: 'auto' }))
       ownRecord(this.database, 'memo', Number(result.lastInsertRowid), input.relatedSessionId)
       const memo = this.read(Number(result.lastInsertRowid))
       scheduleMemo(this.jobs, memo)
@@ -65,9 +65,9 @@ export class MemoRepository {
       if (expectedUpdatedAt !== undefined && current.updatedAt !== expectedUpdatedAt) throw new Error('Memo changed during approval')
       const input = memoCreateSchema.parse({ ...pickInput(current), ...parsed })
       const now = Math.max(Date.now(), current.updatedAt + 1)
-      this.database.connection.prepare(`UPDATE memos SET title=?,content=?,kind=?,status=?,priority=?,remind_at=?,due_at=?,repeat_rule=?,metadata_json=?,completed_at=?,updated_at=?,snoozed_until=? WHERE id=?`)
+      this.database.connection.prepare(`UPDATE memos SET title=?,content=?,kind=?,status=?,priority=?,remind_at=?,due_at=?,repeat_rule=?,metadata_json=?,completed_at=?,updated_at=?,snoozed_until=?,delivery_json=? WHERE id=?`)
         .run(input.title, input.content, input.kind, input.status, input.priority, input.remindAt, input.dueAt, input.repeatRule,
-          JSON.stringify(input.metadata), input.status === 'done' ? current.completedAt ?? now : null, now, input.snoozedUntil, id)
+          JSON.stringify(input.metadata), input.status === 'done' ? current.completedAt ?? now : null, now, input.snoozedUntil, JSON.stringify(input.delivery ?? { channel: 'auto' }), id)
       const memo = this.read(id)
       scheduleMemo(this.jobs, memo)
       return memo
@@ -113,7 +113,7 @@ function pickInput(value: MemoInfo): MemoInput {
   return input
 }
 function fromRow(row: Record<string, SQLOutputValue>): MemoInfo {
-  return memoInfoSchema.parse({ id: row.id, title: row.title, content: row.content, kind: row.kind, status: row.status,
+  return memoInfoSchema.parse({ delivery: JSON.parse(String(row.delivery_json)), id: row.id, title: row.title, content: row.content, kind: row.kind, status: row.status,
     source: row.source, snoozedUntil: row.snoozed_until, priority: row.priority, remindAt: row.remind_at, dueAt: row.due_at, repeatRule: row.repeat_rule, relatedSessionId: row.related_session_id,
     lastTriggeredAt: row.last_triggered_at, completedAt: row.completed_at, metadata: JSON.parse(String(row.metadata_json)),
     createdAt: row.created_at, updatedAt: row.updated_at })

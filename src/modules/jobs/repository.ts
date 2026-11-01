@@ -8,7 +8,7 @@ import type { EdenDatabase } from '@eden/store'
 import type { SQLOutputValue } from 'node:sqlite'
 import { normalizeWakeOwnership } from './wake-ownership.ts'
 
-/** Jobs dispatch durable inputs/notifications only. External effects belong to turn operation ledgers. */
+/** Jobs dispatch durable inputs/notifications; external effects require a separate durable receipt ledger. */
 export class JobRepository {
   constructor(private readonly database: EdenDatabase, private readonly externalSelfAwake = false,
     private readonly selfAwakeEnabled: () => boolean = () => true) {}
@@ -31,6 +31,11 @@ export class JobRepository {
   }
 
   resolveOutcome(id: string, expectedUpdatedAt: number, decision: 'completed' | 'cancelled', note: string): JobInfo {
+    return this.database.transaction(() => this.resolveOutcomeInTransaction(id, expectedUpdatedAt, decision, note))
+  }
+
+  resolveOutcomeInTransaction(id: string, expectedUpdatedAt: number, decision: 'completed' | 'cancelled', note: string): JobInfo {
+    this.owningTransaction()
     this.read(id)
     resolveJobOutcome(this.database, id, expectedUpdatedAt, decision, note)
     return this.read(id)
@@ -117,6 +122,26 @@ export class JobRepository {
     if (result.changes !== 1) throw new Error('Job is no longer owned by this dispatcher')
   }
 
+  dispatchExternalInTransaction(id: string): void {
+    this.owningTransaction()
+    const result = this.database.connection.prepare("UPDATE jobs SET state='dispatched',input_id=NULL,error=NULL,updated_at=? WHERE id=? AND state='running'")
+      .run(Date.now(), id)
+    if (result.changes !== 1) throw new Error('External job is no longer owned by this dispatcher')
+  }
+
+  settleExternalInTransaction(id: string, state: 'completed' | 'failed' | 'unknown' | 'cancelled', error: string | null): void {
+    this.owningTransaction()
+    const result = this.database.connection.prepare("UPDATE jobs SET state=?,error=?,updated_at=? WHERE id=? AND state='dispatched'")
+      .run(state, error?.slice(0, 4000) ?? null, Date.now(), id)
+    if (result.changes !== 1) throw new Error('External job no longer awaits its channel receipt')
+  }
+
+  externalProgressInTransaction(id: string, error: string): void {
+    this.owningTransaction()
+    this.database.connection.prepare("UPDATE jobs SET error=?,updated_at=? WHERE id=? AND state='dispatched' AND input_id IS NULL")
+      .run(error.slice(0, 4000), Date.now(), id)
+  }
+
   defer(id: string, error: string, delayMs = 30000): void {
     this.database.transaction(() => {
       const current = this.read(id)
@@ -145,7 +170,8 @@ export class JobRepository {
       error=CASE (SELECT state FROM inputs WHERE id=jobs.input_id) WHEN 'completed' THEN NULL ELSE COALESCE(
         (SELECT t.error FROM turns t JOIN inputs i ON i.turn_id=t.id WHERE i.id=jobs.input_id),
         'Durable input ended: ' || (SELECT state FROM inputs WHERE id=jobs.input_id)) END,
-      updated_at=? WHERE state='dispatched' AND EXISTS(SELECT 1 FROM inputs WHERE id=jobs.input_id AND state IN ('completed','failed','interrupted','cancelled'))`).run(Date.now())
+      updated_at=? WHERE state='dispatched' AND NOT EXISTS(SELECT 1 FROM memo_channel_deliveries d WHERE d.job_id=jobs.id)
+      AND EXISTS(SELECT 1 FROM inputs WHERE id=jobs.input_id AND state IN ('completed','failed','interrupted','cancelled'))`).run(Date.now())
   }
 
   private owningTransaction(): void { if (!this.database.inTransaction) throw new Error('Job dispatch requires an owning transaction') }

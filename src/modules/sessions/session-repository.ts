@@ -22,6 +22,12 @@ interface SessionMetadata {
 }
 
 export class SessionRepository {
+  isRunningJobTurn(sessionId: string, turnId: string, kinds: readonly string[]): boolean {
+    this.ownership.assert(sessionId)
+    const row = this.database.connection.prepare(`SELECT j.kind FROM inputs i JOIN jobs j ON j.input_id=i.id
+      WHERE i.session_id=? AND i.turn_id=? AND i.state='running' AND j.state='dispatched'`).get(sessionId, turnId)
+    return Boolean(row && kinds.includes(String(row.kind)))
+  }
   readonly events: SessionEvents
   readonly ownership: SessionOwnership
   constructor(readonly database: EdenDatabase, readonly origin: RuntimeOrigin) {

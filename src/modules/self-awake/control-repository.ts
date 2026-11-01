@@ -5,6 +5,17 @@ import { currentAccount } from '../accounts/index.ts'
 export class SelfAwakeControlRepository {
   constructor(private readonly database: EdenDatabase) {}
 
+  /** Import the legacy installation preference once; persisted account control always wins. */
+  initialize(initialEnabled: boolean | undefined, ownsScheduler = true): void {
+    if (!ownsScheduler || initialEnabled === undefined) return
+    this.assertAccount()
+    this.database.transaction(() => {
+      const result = this.database.connection.prepare(`INSERT INTO runtime_settings(key,value_json,updated_at)
+        VALUES('self-awake.control',?,?) ON CONFLICT(key) DO NOTHING`).run(JSON.stringify(initialEnabled), Date.now())
+      if (result.changes) this.database.connection.prepare('UPDATE self_awake_session_schedules SET revision=MAX(revision+1,?)').run(Date.now())
+    })
+  }
+
   read() {
     this.assertAccount()
     const row = this.database.connection.prepare("SELECT value_json,updated_at FROM runtime_settings WHERE key='self-awake.control'").get()

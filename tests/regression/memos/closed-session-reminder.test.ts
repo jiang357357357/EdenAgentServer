@@ -21,17 +21,17 @@ function fixture(t: TestContext) {
   return { database, repository, jobs, memos, notifications, session, memo, original, dispatch, recovery, closeSession }
 }
 
-test('an overdue reminder for a closed session creates one durable notification without reopening it', t => {
+test('an overdue reminder for a closed session queues one role decision without reopening or claiming delivery', t => {
   const f = fixture(t)
   f.closeSession()
   const claimed = f.jobs.claim()!
   assert.equal(claimed?.id, f.original.id)
   f.dispatch(claimed)
-  assert.equal(f.jobs.read(claimed.id).state, 'completed')
+  assert.equal(f.jobs.read(claimed.id).state, 'dispatched')
   assert.equal(f.jobs.read(claimed.id).inputId, null)
   assert.equal(f.notifications.list().length, 1)
   assert.equal(f.notifications.list()[0]!.readAt, null)
-  assert.ok(f.memos.read(f.memo.id).lastTriggeredAt !== null)
+  assert.equal(f.memos.read(f.memo.id).lastTriggeredAt, null)
   assert.equal(f.repository.read(f.session.id).status, 'closed')
   assert.equal(f.database.connection.prepare('SELECT COUNT(*) AS n FROM inputs').get()?.n, 0)
   f.jobs.recover(); f.memos.recoverSchedules()
@@ -47,7 +47,7 @@ test('recovery dispatches an existing overdue reminder even when its session was
   assert.equal(claimed?.id, f.original.id)
   f.dispatch(claimed)
   assert.equal(f.notifications.list()[0]!.memo.id, f.memo.id)
-  assert.equal(f.jobs.read(claimed.id).state, 'completed')
+  assert.equal(f.jobs.read(claimed.id).state, 'dispatched')
 })
 
 test('a closed session never resumes self-awake or other execution jobs while its reminder can notify', t => {
@@ -77,7 +77,7 @@ test('explicit historical reminder redelivery can notify after the original sess
   assert.equal(replay.kind, 'memo.reminder.redelivery')
   assert.equal(f.jobs.claim()?.id, replay.id)
   f.recovery.dispatch(f.jobs.read(replay.id))
-  assert.equal(f.jobs.read(replay.id).state, 'completed')
+  assert.equal(f.jobs.read(replay.id).state, 'dispatched')
   assert.equal(f.notifications.list().length, 2)
   assert.equal(f.repository.read(f.session.id).status, 'closed')
   assert.equal(f.database.connection.prepare('SELECT COUNT(*) AS n FROM inputs').get()?.n, 0)

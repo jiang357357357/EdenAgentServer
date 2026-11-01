@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { test } from './fixtures/mon-test-account.ts'
 import { EdenDatabase } from '@eden/store'
 import { recordedModel } from '@eden/runtime-pi/testing'
 import { ModelService } from '../src/modules/models/index.ts'

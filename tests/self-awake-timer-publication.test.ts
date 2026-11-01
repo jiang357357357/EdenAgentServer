@@ -48,7 +48,7 @@ test('timer tool replaces its durable plan and publishes the MonOs protocol with
 test('publication failure retains one durable plan for recovery and does not report success', async context => {
   const f = fixture(context)
   writeFileSync(path.join(f.root, 'schedule_requests'), 'not a directory')
-  await assert.rejects(f.execute('one', 10), /delivery pending/)
+  await assert.rejects(f.execute('one', 10), /设置已保存，调度同步未完成/)
   assert.equal(f.jobs.list({ state: 'queued' }).length, 1)
   assert.equal(f.pending(), 1)
   rmSync(path.join(f.root, 'schedule_requests'))

@@ -10,7 +10,7 @@ import { McpClient, McpHttpChannel } from '@eden/integrations'
 test('same-process MCP retains all 14 tools, semantic memo data and the real native client contract', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'eden-os-'))
   const unavailable = async () => { throw new Error('unbound') }
-  const runtime = await openOsRuntime(osFixture(root), { ready: () => false, run: unavailable, status: unavailable, admitReminder: unavailable, reminderDelivery: unavailable })
+  const runtime = await openOsRuntime(osFixture(root), { ready: () => false, control: unavailable, run: unavailable, status: unavailable, admitReminder: unavailable, reminderDelivery: unavailable })
   let channel: McpHttpChannel | undefined
   try {
     const endpoint = `http://127.0.0.1:${runtime.port}`

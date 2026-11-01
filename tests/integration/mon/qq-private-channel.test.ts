@@ -39,6 +39,45 @@ async function fixture() {
     close: async () => { await bridge.close(); await sessions.close(); database.close(); await rm(root, { recursive: true, force: true }) } }
 }
 
+test('group permission commands, approval events and file export share the private channel mechanism', async t => {
+  const f = await fixture(); t.after(f.close)
+  const group = withAccount(account, () => f.repository.create('Group', [{ assistantId: 1, characterId: 2 }], null,
+    { purpose: 'user_chat', sourceChannel: 'qq' }))
+  f.database.connection.prepare('INSERT INTO qq_group_sessions VALUES(?,?,?,?,?,?)')
+    .run(group.id, contact.bot_qq, '333333', contact.contact_qq, 1, 0)
+  const target = { ...contact, group_qq: '333333' }
+  assert.deepEqual(f.bridge.permissionMode(target), { mode: 'restricted' })
+  f.bridge.permissionMode({ ...contact, mode: 'takeover' })
+  assert.deepEqual(f.bridge.permissionMode(target), { mode: 'restricted' })
+  const input = f.inputs.enqueue(group.id, '读取并发送文件', 'group-approval')
+  f.database.connection.prepare("UPDATE inputs SET state='running' WHERE id=?").run(input.inputId)
+  const pending = f.permissions.request({ sessionId: group.id, turnId: input.turnId,
+    callId: 'group-read', signal: new AbortController().signal }, 'workspace.read', 'result.txt', {})
+  await new Promise<void>(resolve => setImmediate(resolve))
+  const approval = f.permissions.list().find(item => item.state === 'pending')!
+  assert.ok(approval)
+  const status = f.bridge.status({ ...target, input_id: input.inputId }) as { updates: { kind: string; request_id?: string }[] }
+  assert.ok(status.updates.some(update => update.kind === 'approval' && update.request_id === approval.id))
+  assert.deepEqual(f.bridge.resolvePermission({ ...target, group_qq: '444444', request_id: approval.id, decision: 'allow' }),
+    { resolved: false, reason: 'none' })
+  assert.deepEqual(f.bridge.resolvePermission({ ...contact, request_id: approval.id, decision: 'allow' }),
+    { resolved: false, reason: 'none' })
+  // The authenticated group administrator may approve a different member's turn.
+  assert.deepEqual(f.bridge.resolvePermission({ ...target, contact_qq: '999999', request_id: approval.id, decision: 'allow' }),
+    { resolved: true, decision: 'allow' })
+  await pending
+  const blob = await withAccount(account, () => f.blobs.put(Buffer.from('group result'), 'text/plain'))
+  f.repository.events.append(group.id, input.turnId, 'qq.file_requested', { blobId: blob.id, filename: 'result.txt' })
+  const exported = await f.bridge.file({ ...target, input_id: input.inputId, blob_id: blob.id }) as { content_base64: string }
+  assert.equal(Buffer.from(exported.content_base64, 'base64').toString(), 'group result')
+  await assert.rejects(f.bridge.file({ ...target, contact_qq: '999999', input_id: input.inputId, blob_id: blob.id }), /not found/)
+  await assert.rejects(f.bridge.file({ ...contact, input_id: input.inputId, blob_id: blob.id }), /not found/)
+  f.bridge.permissionMode({ ...target, mode: 'full_access' })
+  assert.deepEqual(f.bridge.permissionMode({ ...target, contact_qq: '888888' }), { mode: 'full_access' })
+  assert.deepEqual(f.bridge.permissionMode({ ...target, group_qq: '444444' }), { mode: 'restricted' })
+  assert.deepEqual(f.bridge.permissionMode(contact), { mode: 'takeover' })
+})
+
 test('private bridge keeps staging transactional, deduplicates input and refuses character change while queued', async t => {
   const f = await fixture(); t.after(f.close)
   const file = await f.bridge.upload({ ...contact, filename: 'example.txt', mime: 'text/plain',

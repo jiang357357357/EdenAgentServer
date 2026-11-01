@@ -22,6 +22,7 @@ export interface OsConfig {
   memoReconcileSeconds: number
   memoBatchSize: number
   memoRetryMinutes: number
+  /** Legacy preference imported only when the account has no persisted control. */
   selfAwakeEnabled: boolean
   startupWakeEnabled: boolean
   startupDelaySeconds: number
@@ -40,7 +41,9 @@ export interface ReminderTarget {
   admitReminder(input: ReminderInput): Promise<{ memoId: number }>
   reminderDelivery(memoId: number): Promise<number | null>
 }
-export type OsTarget = WakeTarget & ReminderTarget
+export type OsTarget = WakeTarget & ReminderTarget & {
+  control(): Promise<{ enabled: boolean; updatedAt: number }>
+}
 
 export function time(value: unknown): number | undefined {
   if (typeof value !== 'string') return undefined

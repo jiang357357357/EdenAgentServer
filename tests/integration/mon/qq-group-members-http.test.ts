@@ -15,7 +15,7 @@ const core = path.resolve('../Core')
 const python = path.join(core, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python')
 const script = path.join(core, 'Application/Domain/BOT/tests/serve_group_agent_fixture.py')
 
-test('signed Agent tools admit ordinary group speakers through real Core HTTP while preserving private and write gates',
+test('signed group tools share private execution policy through real Core HTTP and preserve source/target checks',
   { skip: existsSync(python) && existsSync(script) ? false : 'Sibling Core test environment is unavailable', timeout: 30000 }, async t => {
     const child = spawn(python, ['-B', script], { cwd: core, windowsHide: true,
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' }, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -45,6 +45,7 @@ test('signed Agent tools admit ordinary group speakers through real Core HTTP wh
         { channelAudience: 'qq_group' }, { purpose: 'user_chat', sourceChannel: 'qq' })
       database.connection.prepare('INSERT INTO qq_group_sessions VALUES(?,?,?,?,?,?)')
         .run(session.id, '100001', group, contact, Number(actions), Date.now())
+      permissions.setQqMode('100001', contact, 'full_access', group)
       const tools = napcatTools(client, permissions, session.id, randomUUID())
       return { target: client.target(session.id), tool: (name: string) => tools.find(item => item.name === name)! }
     }
@@ -55,16 +56,17 @@ test('signed Agent tools admit ordinary group speakers through real Core HTTP wh
     }
     assert.equal(catalog.status, 'success')
     assert.ok(catalog.result.actions.get_group_info)
-    assert.ok(Object.values(catalog.result.actions).every(spec => spec.target === 'group' && !spec.mutating))
-    const read = await member.tool('read_qq_action').execute({ action: 'get_group_info', params: {} }, context)
+    assert.ok(catalog.result.actions.get_login_info)
+    assert.ok(catalog.result.actions.send_private_msg)
+    const read = await member.tool('read_qq_action').execute({ action: 'get_group_info', params: { group_id: '300001' } }, context)
     assert.equal((read as { status: string }).status, 'success')
-    // Core must reject a forged/stale host write flag even if the Agent allows its local permission.
+    // Execution approval does not grant access to a target rejected by Core.
     const forged = groupTools('200002', '300001', true)
     const refused = await sendNapcatRequest(forged.target, { action: 'set_group_name',
-      params: { group_id: '300001', group_name: 'new' }, mode: 'write', request_id: randomUUID() }, context.signal)
+      params: { group_id: '300002', group_name: 'new' }, mode: 'write', request_id: randomUUID() }, context.signal)
     assert.equal(refused.status, 'failed'); assert.equal(refused.code, 'HTTP_403')
     const admin = groupTools('200001', '300001', true)
-    const write = await admin.tool('execute_qq_action').execute({ action: 'set_group_name', params: { group_name: 'new' } }, context)
+    const write = await admin.tool('execute_qq_action').execute({ action: 'set_group_name', params: { group_id: '300001', group_name: 'new' } }, context)
     assert.equal((write as { status: string }).status, 'success')
     for (const [contact, group] of [['200003', '300001'], ['200002', '300002'], ['200002', '300003']]) {
       const rejected = groupTools(contact!, group!)

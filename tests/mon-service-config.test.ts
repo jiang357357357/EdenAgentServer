@@ -37,8 +37,8 @@ test('external schedule preserves time zone and rejects malformed state', () => 
     writeFileSync(file, JSON.stringify({ enabled: true, next_wake_at: '2026-09-10T19:41:53+08:00', next_wake_reason: 'timer' }))
     assert.deepEqual(readExternalSchedule(file), { status: 'scheduled', nextWakeAt: '2026-09-10T11:41:53.000Z', source: 'unknown', reason: 'timer' })
     writeFileSync(file, JSON.stringify({ enabled: false, next_wake_at: null }))
-    assert.deepEqual(readExternalSchedule(file), { status: 'disabled', nextWakeAt: null, reason: 'MonOs 自醒已暂停' })
+    assert.deepEqual(readExternalSchedule(file), { status: 'disabled', nextWakeAt: null, reason: '自醒已暂停' })
     writeFileSync(file, '{')
-    assert.throws(() => readExternalSchedule(file), /无法读取 MonOs/)
+    assert.throws(() => readExternalSchedule(file), /无法读取当前账号的自醒计划/)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })

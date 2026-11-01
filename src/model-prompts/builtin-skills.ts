@@ -56,7 +56,7 @@ selector 可定位元素，waitMs 可等待短时间的异步绘制。截图来�
     tools: ['list_memos', 'create_reminder'], profiles: ['user_chat', 'self_awake', 'subagent'],
     content: `# 提醒与备忘
 先用 list_memos 核对相关安排。把用户要求转换为明确的提醒内容与触发时间，使用当前环境的时区；日期、对象或时区存在关键歧义时先确认。
-使用 create_reminder 创建提醒。提交前检查已有相同安排，避免因工具重试重复创建。
+使用 create_reminder 创建提醒。提交前检查已有相同安排，避免因工具重试重复创建。delivery.channel 默认 auto，到点由角色选择可用且已授权的通信工具和表达方式；仅在用户明确指定渠道时设置 qq、email、device 或 app。不要因为提醒来自 QQ 或 App 就自行固定渠道。需要更改渠道时用 update_memo 的 patch.delivery。
 创建成功只代表提醒已登记，不代表未来已经送达。根据返回结果说明安排或失败原因。`,
   },
   {

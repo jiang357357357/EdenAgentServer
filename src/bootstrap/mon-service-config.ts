@@ -54,8 +54,9 @@ export function monServiceConfig(origin: 'mon' | 'local', dataRoot: string, env:
   // A realm bound to another deployment must not borrow this workspace's scheduler.
   const workspaceAuth = workspaceRoot && path.resolve(workspaceRoot, 'Config', 'ENV', 'service-auth.env')
   const sameWorkspace = workspaceAuth && path.relative(workspaceAuth, authFile) === ''
-  const scheduleStateFile = explicitStateFile ?? (sameWorkspace ? workspaceSchedulerStateFile(workspaceRoot, env) : undefined)
-  return { env: identityEnvironment(authFile, config.coreBaseUrl, env),
+  const identityEnv = identityEnvironment(authFile, config.coreBaseUrl, env)
+  const scheduleStateFile = explicitStateFile ?? (sameWorkspace ? workspaceSchedulerStateFile(workspaceRoot, identityEnv) : undefined)
+  return { env: identityEnv,
     scheduleStateFile, externalDeployment: !sameWorkspace }
 }
 
@@ -70,8 +71,9 @@ function workspaceServiceConfig(workspaceRoot: string | undefined, env: NodeJS.P
   // Core/Agent startup available until the owner explicitly binds an account.
   const initial = parseEnv(readFileSync(authFile, 'utf8'))
   if (initial.MON_SERVICE_SHARED_SECRET?.trim() && !initial.MON_SERVICE_USER_ID?.trim()) return { env }
-  const scheduleStateFile = environmentScheduleStateFile(env) ?? workspaceSchedulerStateFile(root, env)
-  return { env: identityEnvironment(authFile, env.MON_CORE_BASE_URL ?? 'http://127.0.0.1:40011', env),
+  const identityEnv = identityEnvironment(authFile, env.MON_CORE_BASE_URL ?? 'http://127.0.0.1:40011', env)
+  const scheduleStateFile = environmentScheduleStateFile(identityEnv) ?? workspaceSchedulerStateFile(root, identityEnv)
+  return { env: identityEnv,
     ...(scheduleStateFile ? { scheduleStateFile } : {}) }
 }
 

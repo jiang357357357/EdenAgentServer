@@ -17,7 +17,8 @@ test('MonOs keeps polling queued and in-progress self-awake jobs', () => {
     assert.throws(() => bridge.status('1', job.id), /owner mismatch/)
     const run = new SelfAwakeRepository(db).begin(job, {}, {})
     for (const [state, expected] of [['preparing', 'pending'], ['running', 'running'], ['awaiting_action', 'running'],
-      ['action_running', 'running'], ['completed', 'completed'], ['action_interrupted', 'failed']]) {
+      // An interrupted external action has an unknown outcome; treating it as failed permits an unsafe replay.
+      ['action_running', 'running'], ['completed', 'completed'], ['action_interrupted', 'action_interrupted']]) {
       db.connection.prepare('UPDATE self_awake_runs SET state=? WHERE id=?').run(state!, run)
       assert.equal(bridge.status('2', job.id).status, expected)
     }

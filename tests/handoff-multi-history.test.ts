@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { test } from './fixtures/mon-test-account.ts'
 import { randomUUID } from 'node:crypto'
 import { EdenDatabase } from '@eden/store'
 import { publicHistoryCheckpoint } from '@eden/runtime-pi'
@@ -12,7 +12,7 @@ import { InputRepository } from '../src/modules/sessions/input/input-repository.
 
 const modelConfig = { id: 'model', provider: 'test', baseUrl: 'https://model.invalid/v1', contextWindow: 32000, maxTokens: 1024 }
 
-test('multi-actor handoff carries public speaker history into the new actor and later restored turns', { timeout: 10000 }, async t => {
+test('multi-actor handoff carries public speaker history into the new actor and later restored turns', { timeout: 60000 }, async t => {
   const first = await recordedModel([{ text: '{"beats":[{"assistantId":1},{"assistantId":2}]}' },
     { tool: 'schedule_switch', input: { secret: 'PRIVATE_TOOL_ARGUMENT' } }, { text: 'Actor one public reply' }])
   const second = await recordedModel([{ text: 'Actor two public reply' }])

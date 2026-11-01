@@ -41,7 +41,7 @@ test('foreign blobs, traversal, unsupported formats and aborted calls do not rea
   assert.equal(calls, 0)
 })
 
-test('denied approval stops staging and QQ groups only process current attachments without enabling remote downloads', async t => {
+test('denied approval stops staging and QQ groups share the private video permissions', async t => {
   let calls = 0
   const backend: VideoBackend = { async call() { calls++; return { structuredContent: { status: 'complete' } } }, async close() {} }
   const app = await videoFixture(backend); t.after(() => app.close())
@@ -57,8 +57,8 @@ test('denied approval stops staging and QQ groups only process current attachmen
   await group.execute('inspect_video', { source: { attachment: video.id } })
   assert.equal(calls, 1)
   await assert.rejects(group.execute('prepare_video', { source: { path: 'video.mp4' } }), /QQ/)
-  await assert.rejects(group.execute('prepare_video', { source: { youtubeUrl: 'https://youtu.be/abcdefghijk' } }), /未允许/)
-  assert.equal(calls, 1)
+  await group.execute('prepare_video', { source: { youtubeUrl: 'https://youtu.be/abcdefghijk' } })
+  assert.equal(calls, 2)
 })
 
 test('video job storage is stable across turns and differs between sessions and acting characters', async t => {

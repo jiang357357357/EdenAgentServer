@@ -9,7 +9,8 @@ export class DesktopReminderRepository {
   create(sessionId: string, turnId: string, raw: unknown, operationKey: string) {
     const input = desktopReminderCreateSchema.parse(raw)
     const session = this.sessions.read(sessionId)
-    if (session.status !== 'active') throw new Error('Reminder requires an active session')
+    if (session.status !== 'active' && !this.sessions.isRunningJobTurn(sessionId, turnId, ['memo.reminder', 'memo.reminder.redelivery']))
+      throw new Error('Reminder requires an active session or its running reminder turn')
     const result = this.sessions.database.transaction(() => {
       const existing = this.sessions.database.connection.prepare('SELECT id FROM desktop_reminders WHERE operation_key=?').get(operationKey)
       if (existing) return { reminder: this.read(String(existing.id)) }

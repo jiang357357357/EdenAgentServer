@@ -96,7 +96,8 @@ export class SessionService {
   }
 
   submitJob(sessionId: string, text: string, jobId: string, jobKind: string, onCommit: (input: AcceptedInput) => void, recallQuery?: string): AcceptedInput {
-    const metadata = { ...this.inputMetadata(sessionId, undefined, false), job: { id: jobId, kind: jobKind }, ...(recallQuery === undefined ? {} : { recallQuery }) }
+    const reminder = ['memo.reminder', 'memo.reminder.redelivery'].includes(jobKind)
+    const metadata = { ...this.inputMetadata(sessionId, undefined, false, reminder), job: { id: jobId, kind: jobKind }, ...(recallQuery === undefined ? {} : { recallQuery }) }
     const accepted = this.inputs.enqueue(sessionId, text, `job:${jobId}`, metadata, 'prompt', undefined, onCommit)
     this.stopping.delete(sessionId)
     this.boundaryWaiting.delete(sessionId)
@@ -117,14 +118,14 @@ export class SessionService {
     })
   }
 
-  private inputMetadata(sessionId: string, environment?: JsonValue, allowRecovery = true) {
+  private inputMetadata(sessionId: string, environment?: JsonValue, allowRecovery = true, allowClosed = false) {
     if (this.closed) throw new Error('Server is shutting down')
     if (this.editing.has(sessionId)) throw new Error('Session is being closed or deleted')
     if (this.stopping.has(sessionId) && this.tasks.has(sessionId)) throw new Error('Session is stopping; wait for the current turn to finish')
     this.repository.ownership.assert(sessionId)
     this.faults.assertCanSubmit(sessionId, allowRecovery)
     const session = this.repository.read(sessionId)
-    if (session.status !== 'active') throw new Error('Session is closed')
+    if (session.status !== 'active' && !allowClosed) throw new Error('Session is closed')
     const preferences = new UiPreferenceRepository(this.repository.database)
     const replyLengths = Object.fromEntries(session.participants.map(participant => {
       const value = participant && typeof participant === 'object' && !Array.isArray(participant) ? participant : {}

@@ -12,7 +12,8 @@ import { SkillRepository, SkillService, SystemSkillCatalog, skillTools, builtinS
 import { DesktopReminderRepository, desktopReminderTools } from '../modules/notifications/index.ts'
 import { SelfAwakeRepository, SelfAwakeContext, SelfAwakeBridgeRepository, SelfAwakeBridge, SelfAwakeService, SelfAwakeActions, SelfAwakeRoleSessions, selfAwakeTools } from '../modules/self-awake/index.ts'
 import { JobRepository, JobScheduler } from '../modules/jobs/index.ts'
-import { MemoRepository, memoTools, MemoNotifications, memoDispatcher, MemoJobRecovery } from '../modules/memos/index.ts'
+import { MemoRepository, memoTools, MemoNotifications, memoDispatcher, MemoJobRecovery,
+  MemoDeliveryRepository, MemoDeliveryService, MemoDeliveryEffects } from '../modules/memos/index.ts'
 import { HandoffDispatcher, handoffTools } from '../modules/handoffs/index.ts'
 import path from 'node:path'
 import type { EdenDatabase } from '@eden/store'
@@ -87,12 +88,15 @@ export function createServices(database: EdenDatabase, config: ServerConfig, pro
   const video = new VideoService(path.join(config.dataRoot, 'video-context'),
     new VideoContextBackend(config.videoRuntimeRoot ?? defaultVideoRuntimeRoot()), new VideoSources(attachmentRepository, attachments))
   const selfAwakeRepository = new SelfAwakeRepository(database, config.selfAwakeScheduleFile, config.origin === 'mon' && Boolean(config.monIdentity || config.selfAwakeScheduleFile))
+  selfAwakeRepository.control.initialize(config.os?.selfAwakeEnabled, Boolean(config.monIdentity))
   const selfAwakeContext = new SelfAwakeContext(selfAwakeRepository, repository, config.monIdentity)
   const jobs = new JobRepository(database, config.origin === 'mon' && Boolean(config.monIdentity || config.selfAwakeScheduleFile), () => selfAwakeRepository.control.read().enabled)
   const connectorEvents = new ConnectorEventRepository(repository, connectors, connectorCatalog, jobs)
   const connectorLifecycle = new ConnectorLifecycle(config.dataRoot, connectors, connectorCatalog, connectorPermissions, connectorEvents, connectorCredentials)
   const memos = new MemoRepository(database, jobs)
   const memoNotifications = new MemoNotifications(database)
+  const memoDeliveries = new MemoDeliveryRepository(database, memos, memoNotifications, jobs)
+  const memoEffects = new MemoDeliveryEffects(memoDeliveries, (sessionId, id, signal) => mon.esp32CommandStatus(sessionId, id, signal))
   const memories = new MemoryRepository(database)
   const memoryScopes = new MemoryScopes(database)
   const { localMemory, memoryModel, memoryRecall } = memoryServices(config, memories, memoryScopes, providers.memoryRetrieval,
@@ -145,8 +149,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig, pro
     attachmentTool(attachmentRepository, attachments, sessionId, turnId),
     ...videoTools(video, permissions, sessionWorkspace(sessionId), { sessionId, turnId,
       ...(actorId === undefined ? {} : { actorId }),
-      qq: sessionId !== '00000000-0000-4000-8000-000000000000' && repository.read(sessionId).sourceChannel === 'qq',
-      groupReadOnly: Boolean(database.connection.prepare('SELECT 1 FROM qq_group_sessions WHERE session_id=? AND allow_actions=0').get(sessionId)) }),
+      qq: sessionId !== '00000000-0000-4000-8000-000000000000' && repository.read(sessionId).sourceChannel === 'qq' }),
     ...(config.origin === 'mon' ? [sharedWorkspaceTool(sharedWorkspace, sessionId),
       ...sharedLibraryFileTools(sharedWorkspace, permissions, sessionId, turnId, actorId)] : []),
     ...(config.origin === 'mon' ? [qqFileTool(repository, blobs, sessionWorkspace(sessionId), permissions, sessionId, turnId, mon)] : []),
@@ -159,7 +162,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig, pro
       ...napcatTools(napcat, permissions, sessionId, turnId)] : []),
     ...(config.origin === 'mon' ? deviceTools(mon, permissions, sessionId, turnId) : []),
     ...(config.origin === 'mon' ? handoffTools(mon, handoffs.repository, permissions, sessionId, turnId) : []),
-  ])
+  ]).map(tool => memoEffects.wrap(tool, sessionId, turnId))
   const capabilitySession = (sessionId: string, turnId: string, actorId?: string | number): SessionCapabilities => new SessionCapabilities(
     database, repository.events, sessionSkills(sessionId).repository, () => ({ sessionId, owner: capabilityOwner(sessionId === '00000000-0000-4000-8000-000000000000' ? [] : repository.read(sessionId).participants, actorId),
       profile: skillProfile(sessionId === '00000000-0000-4000-8000-000000000000' ? null : repository.read(sessionId).environment),
@@ -177,6 +180,7 @@ export function createServices(database: EdenDatabase, config: ServerConfig, pro
   const sessions = new SessionService(repository, sessionId => models.resolve(sessionId), tools,
     sessionId => models.invalidateSession(sessionId), new CompanionSessionExtension(companion, models, tools), handoffs, attachments, memoryRecall)
   const mon: MonBindingService = new MonBindingService(models, sessions, config.monIdentity, config.account)
+  const memoDelivery = new MemoDeliveryService(memoDeliveries, sessions, memoEffects)
   const selfAwakeRoleSessions = new SelfAwakeRoleSessions(sessions, mon)
   const selfAwakeBridge = config.monIdentity && config.origin === 'mon' ? new SelfAwakeBridge(config.monIdentity, new SelfAwakeBridgeRepository(database, jobs), sessions, mon) : undefined
   const qqChannelBridge = config.monIdentity && config.origin === 'mon'
@@ -190,9 +194,9 @@ export function createServices(database: EdenDatabase, config: ServerConfig, pro
   sessions.setEndCleanup(async sessionId => { await Promise.all([skills.releaseWorkspace(sessionId), desktop.release(sessionId)]) })
   sessions.toolCatalog()
   const pluginHooks = new PluginHookService(new PluginHookRepository(database, jobs), pluginMarket.installed, sessions, jobs)
-  const memoJobRecovery = new MemoJobRecovery(database, memos, memoNotifications, jobs, sessions)
-  const scheduler = new JobScheduler(jobs, { 'subagent.turn': job => subagents.dispatch(job), 'plugin.hook': job => pluginHooks.dispatch(job), self_awake: job => selfAwake.dispatch(job), 'memo.reminder': memoDispatcher(database, memos, memoNotifications, jobs, sessions), 'memo.reminder.redelivery': job => memoJobRecovery.dispatch(job) })
-  return { memoryModel, localMemory, video, desktop, browser, sharedWorkspace, memoJobRecovery, commands, repository, mcpResults, mcp, connectorCredentials, connectorLifecycle, connectorPermissions, connectorEvents, connectors, connectorCatalog, media, realtimeVoice, speech, voice, voiceConfig, subagentLifecycle, subagents, packageAssets, pluginHooks, pluginMarket, skills, plugins, permissions, sessions, workspace, models, mon, directors, companion, questions, handoffs, blobs, attachments, memories, memos, memoNotifications, jobs, scheduler, selfAwake, selfAwakeActions, selfAwakeBridge, qqChannelBridge, desktopReminders, memoryExtractions }
+  const memoJobRecovery = new MemoJobRecovery(database, memos, memoNotifications, jobs, sessions, memoDeliveries)
+  const scheduler = new JobScheduler(jobs, { 'subagent.turn': job => subagents.dispatch(job), 'plugin.hook': job => pluginHooks.dispatch(job), self_awake: job => selfAwake.dispatch(job), 'memo.reminder': memoDispatcher(database, memos, memoNotifications, jobs, sessions, memoDeliveries), 'memo.reminder.redelivery': job => memoJobRecovery.dispatch(job) })
+  return { memoryModel, localMemory, video, desktop, browser, sharedWorkspace, memoJobRecovery, memoDelivery, commands, repository, mcpResults, mcp, connectorCredentials, connectorLifecycle, connectorPermissions, connectorEvents, connectors, connectorCatalog, media, realtimeVoice, speech, voice, voiceConfig, subagentLifecycle, subagents, packageAssets, pluginHooks, pluginMarket, skills, plugins, permissions, sessions, workspace, models, mon, directors, companion, questions, handoffs, blobs, attachments, memories, memos, memoNotifications, jobs, scheduler, selfAwake, selfAwakeActions, selfAwakeBridge, qqChannelBridge, desktopReminders, memoryExtractions }
 }
 
 function skillProfile(environment: unknown): string {

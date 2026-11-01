@@ -51,3 +51,14 @@ test('complete execution registration still excludes desktop and plugin tools fr
   assert.deepEqual(f.capabilities().registeredTools().map(tool => tool.name), ['web_search'])
   assert.equal(f.capabilities().loadTools([{ id: 'builtin:desktop_observe' }]).failed.length, 1)
 })
+
+test('group and private QQ expose the same file, terminal, search and outbound tools', async t => {
+  const f = await capabilityFixture(); t.after(() => f.close()); f.setChannel('qq')
+  f.setTools(['web_search', 'read_file', 'exec_command', 'write_file', 'send_external_email', 'create_reminder',
+    'send_qq_file', 'delete_character_sticker', 'desktop_observe'].map(fixtureTool))
+  const privateTools = f.capabilities().registeredTools().map(tool => tool.name)
+  assert.ok(privateTools.includes('exec_command')); assert.ok(privateTools.includes('web_search'))
+  f.database.connection.prepare('INSERT INTO qq_group_sessions VALUES(?,?,?,?,?,?)')
+    .run(f.session.id, '111111', '333333', '222222', 0, Date.now())
+  assert.deepEqual(f.capabilities().registeredTools().map(tool => tool.name), privateTools)
+})

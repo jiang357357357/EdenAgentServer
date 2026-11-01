@@ -7,7 +7,7 @@ import { busy, enforceDeadline, observeActivation, retryWake, activated } from '
 import { iso, time, uuidPattern } from './contracts.ts'
 import type { State, OsConfig, WakeTarget } from './contracts.ts'
 
-/** Bootstrap the account's role; once handed off, the role scheduler is its only clock. */
+/** Called only after account control allows a wake; legacy enabled is a projection, not a second switch. */
 export class WakeRoot {
   constructor(private readonly config: OsConfig, private readonly target: WakeTarget) {}
   private save(state: State) { saveState(path.join(this.config.wakeDir, 'state.json'), state) }
@@ -15,12 +15,13 @@ export class WakeRoot {
     const state = readState(path.join(this.config.wakeDir, 'state.json'), { enabled: true, next_wake_at: null, last_run_at: null, last_decision: null })
     const delegated = this.delegated(state)
     if (delegated && !startup) return
+    state.enabled = true
     this.handoff(state, now)
     observeActivation(state, this.config.wakeDir, now)
     this.requests(state)
     if (busy(state)) { await this.reconcile(state, now); this.save(state); return }
     enforceDeadline(state, now); this.save(state)
-    if (!startup && (state.enabled === false || (time(state.next_wake_at) ?? -Infinity) > now)) return
+    if (!startup && (time(state.next_wake_at) ?? -Infinity) > now) return
     if (!state.pending_submission) {
       const event = randomUUID(), kind = startup ? 'startup' : 'scheduled'
       state.pending_submission = { schema_version: 'self-awake.v1', user_id: this.config.identity!.userId,

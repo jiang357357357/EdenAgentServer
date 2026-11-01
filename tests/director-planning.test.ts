@@ -43,7 +43,7 @@ test('director request persistence failure prevents HTTP and plan creation', asy
   const setup = await fixture({ text: '{"beats":[{"assistantId":1}]}' })
   try {
     setup.db.connection.exec("CREATE TRIGGER reject_request BEFORE INSERT ON events WHEN NEW.kind='director.model.request' BEGIN SELECT RAISE(ABORT, 'disk failure'); END")
-    await assert.rejects(setup.planner.plan(setup.request), /persistence failed/)
+    await assert.rejects(setup.planner.plan(setup.request), /会话事件提交失败.*disk failure/)
     assert.equal(setup.model.requests.length, 0)
     assert.deepEqual(setup.runs.list(setup.request.sessionId), [])
   } finally { await setup.close() }

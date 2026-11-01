@@ -94,6 +94,7 @@ export async function openRuntime(config: ServerConfig) {
     services.pluginHooks.close()
     services.selfAwake.close()
     return Promise.allSettled([
+      services.memoDelivery.close(),
       Promise.resolve().then(() => services.desktop.close()),
       services.browser.close(),
       services.sharedWorkspace.close(),
@@ -127,6 +128,7 @@ export async function openRuntime(config: ServerConfig) {
     sessionFaults: sessions.faultCount(),
     memoryExtraction: memoryExtractions.fault === undefined,
     jobs: services.scheduler.fault === undefined,
+    memoDelivery: services.memoDelivery.fault === undefined,
     pluginHooks: services.pluginHooks.fault === undefined,
     subagents: services.subagentLifecycle.fault === undefined,
     selfAwake: services.selfAwake.fault === undefined && services.selfAwakeActions.fault === undefined,
@@ -165,7 +167,7 @@ export async function openRuntime(config: ServerConfig) {
     ...notificationRoutes(services.desktopReminders),
     ...selfAwakeRoutes(services.selfAwake.repository, services.selfAwakeActions, services.selfAwake),
     ...directorRoutes(directors),
-    ...jobRoutes(services.jobs),
+    ...jobRoutes(services.jobs, services.memoJobRecovery),
     ...questionRoutes(questions),
     ...pluginAssetRoutes(services.packageAssets),
     ...pluginMarketRoutes(services.pluginMarket),
@@ -193,6 +195,7 @@ export async function openRuntime(config: ServerConfig) {
         await services.subagentLifecycle.start()
         sessions.resumePending()
         services.memos.recoverSchedules()
+        services.memoDelivery.start()
         services.selfAwakeActions.start()
         services.selfAwake.start()
         services.pluginHooks.start()

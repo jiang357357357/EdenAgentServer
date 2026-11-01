@@ -5,6 +5,7 @@ import { MEMORY_RECALL_HEADING, MEMORY_RECALL_UNAVAILABLE } from '../../model-pr
 import { logDiagnostic } from '../logging/index.ts'
 import { validUntil } from './retrieval.ts'
 import type { MemoryRetriever } from './retrieval.ts'
+import { memoryRecallFailure } from './recall-diagnostics.ts'
 
 function fragments(query: string): string[] {
   const lower = Array.from(query).slice(0, 8192).join('').toLowerCase()
@@ -44,11 +45,17 @@ export class MemoryRecall {
     if (!scope || !text.trim()) return ''
     const candidates = this.repository.recallCandidates(scope).filter(memory => (validUntil(memory) ?? Infinity) > Date.now())
     if (!candidates.length) return ''
+    const started = performance.now()
+    const facts = { sessionId, turnId, scopeType: scope.scopeType, characterId: scope.scopeKey, candidateCount: candidates.length }
+    const duration = () => ({ ...facts, durationMs: Math.round((performance.now() - started) * 100) / 100 })
+    logDiagnostic({ event: 'memory.recall.started', ...facts })
+    let stage: 'retrieval' | 'selection' = 'retrieval'
     let selected: { memory: MemoryRecord; excerpt?: string }[]
     try {
       const retrievalSignal = AbortSignal.any([AbortSignal.timeout(25000), ...(signal ? [signal] : [])])
       const matches = await this.retrieve({ sessionId, scope, query: text, candidates, signal: retrievalSignal })
       retrievalSignal.throwIfAborted()
+      stage = 'selection'
       const allowed = new Map(candidates.map(memory => [memory.id, memory]))
       selected = matches.map(match => {
         const memory = allowed.get(match.id)
@@ -57,8 +64,9 @@ export class MemoryRecall {
         return { memory, ...(match.excerpt ? { excerpt: match.excerpt } : {}) }
       })
     } catch (error) {
+      if (signal?.aborted) logDiagnostic({ event: 'memory.recall.cancelled', ...duration() })
       signal?.throwIfAborted()
-      logDiagnostic({ event: 'memory.recall.unavailable', message: '本轮长期记忆检索不可用，仅使用当前对话', errorName: error instanceof Error ? error.name : 'UnknownError' }, 'warn')
+      logDiagnostic({ event: 'memory.recall.unavailable', message: '本轮自动长期记忆召回不可用', ...duration(), ...memoryRecallFailure(error, stage) }, 'warn')
       return MEMORY_RECALL_UNAVAILABLE
     }
     signal?.throwIfAborted()
@@ -66,6 +74,7 @@ export class MemoryRecall {
       const current = this.repository.unchanged(scope, memory)
       return current && (validUntil(current) ?? Infinity) > Date.now() ? [{ ...current, content: excerpt ?? current.content }] : []
     }))
+    logDiagnostic({ event: 'memory.recall.completed', ...duration(), matchCount: memories.length, result: memories.length ? 'matched' : 'no_match' })
     if (!memories.length) return ''
     return MEMORY_RECALL_HEADING +
       JSON.stringify(memories.map(memory => ({ id: memory.id, kind: memory.kind, content: memory.content, provenance: { source: typeof memory.metadata === 'object' && memory.metadata !== null && !Array.isArray(memory.metadata) ? memory.metadata.source ?? 'historical_record' : 'historical_record', verification: 'unverified_history' }, createdAt: memory.createdAt, updatedAt: memory.updatedAt })))

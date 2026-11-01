@@ -1,11 +1,13 @@
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { z } from 'zod'
+import { monServiceIdentity } from './mon-identity.ts'
+import { osConfig } from './os-config.ts'
 
 const moduleSchema = z.object({ id: z.string(), root: z.string().trim().min(1), config: z.string().trim().min(1).default('.monconfig') })
 const workspaceSchema = z.object({ modules: z.array(moduleSchema).default([]) })
 
-/** Both source and portable installations declare their own MonOs module here. */
+/** Integrated installations use the same account-scoped resolver as the actual scheduler. */
 export function workspaceSchedulerStateFile(workspaceRoot: string | undefined, env: NodeJS.ProcessEnv): string | undefined {
   if (!workspaceRoot) return undefined
   const root = path.resolve(workspaceRoot), manifest = path.join(root, '.monworkspace')
@@ -13,6 +15,10 @@ export function workspaceSchedulerStateFile(workspaceRoot: string | undefined, e
   let modules: z.infer<typeof moduleSchema>[]
   try { modules = workspaceSchema.parse(JSON.parse(readFileSync(manifest, 'utf8'))).modules }
   catch { throw new Error(`Mon 模块清单无法读取或格式无效：${manifest}`) }
+  if (env.EDEN_AGENT_OS_ROOT || existsSync(path.join(root, 'Config', 'Os', '.monconfig'))) {
+    const config = osConfig(root, path.join(root, 'Data'), monServiceIdentity('mon', env), env)
+    return config ? path.join(config.wakeDir, 'state.json') : undefined
+  }
   const schedulers = modules.filter(module => module.id === 'baseos')
   if (!schedulers.length) return undefined
   if (schedulers.length !== 1) throw new Error(`Mon 模块清单存在重复的 baseos：${manifest}`)

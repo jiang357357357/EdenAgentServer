@@ -80,6 +80,7 @@ export async function stickerFixture(channel: 'app' | 'qq' | 'group' = 'app') {
   } else if (channel === 'group') database.connection.prepare('INSERT INTO qq_group_sessions VALUES(?,?,?,?,?,?)')
     .run(session.id, '111111', '333333', '222222', 1, Date.now())
   services.permissions.setMode('takeover')
+  if (channel === 'group') services.permissions.setQqMode('111111', '222222', 'full_access', '333333')
   const attachment = await withAccount(account, () => services.blobs.put(gif, 'image/gif'))
   const snapshots = await services.attachments.snapshot([{ blobId: attachment.id, mime: 'image/gif', filename: 'smile.gif' }])
   const inputs = new InputRepository(database, services.repository.events)

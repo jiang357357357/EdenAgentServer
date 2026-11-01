@@ -32,7 +32,7 @@ test('account scope protects lists, direct reads, independent references, memori
    assert.throws(()=>resources.assert({sessionId:second.id,jobId:job.id}))
    assert.throws(()=>resources.assert({runId:run}))
    assert.deepEqual(jobs.page({}).items,[])
-   assert.equal(wakes.list({}).count,0)
+   assert.throws(()=>wakes.list({}), /自醒开关不属于当前账号运行实例/)
    assert.deepEqual(memos.list(),[])
    assert.throws(()=>memos.update(memo.id,{title:'stolen'}))
    assert.deepEqual(memories.search(scope),[])

@@ -38,7 +38,7 @@ test('real Mon runtime registers and exposes all four NapCat tools to a QQ model
   assert.ok(!exposed.includes('send_qq_message'), 'owner-target legacy sender stays outside QQ allowlist')
 })
 
-test('real group runtime exposes only scoped QQ tools and excludes private memory and host tools', async t => {
+test('real group runtime exposes shared QQ tools without inheriting private memory', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'eden-qq-group-runtime-'))
   const model = await recordedModel([{ text: '这是群内回答' }])
   const database = new EdenDatabase(':memory:', 'mon')
@@ -58,9 +58,9 @@ test('real group runtime exposes only scoped QQ tools and excludes private memor
   await services.sessions.waitForIdle(session.id)
   assert.equal(services.sessions.faultCount(), 0)
   const exposed = (model.requests[0]!.tools as { function: { name: string } }[]).map(tool => tool.function.name)
-  assert.deepEqual(exposed.sort(), ['delete_video_job', 'execute_qq_action', 'get_video_frame_previews', 'get_video_frames',
-    'inspect_video', 'list_character_stickers', 'list_qq_capabilities', 'prepare_video', 'read_attachment',
-    'read_qq_action', 'read_video_timeline', 'remember_character_sticker', 'send_character_sticker', 'video_context_doctor'])
+  for (const name of ['web_search', 'read_file', 'write_file', 'exec_command', 'create_reminder', 'send_external_email',
+    'send_qq_file', 'read_attachment', 'list_qq_events', 'read_qq_action', 'execute_qq_action']) assert.ok(exposed.includes(name), name)
+  assert.equal(exposed.includes('desktop_observe'), false)
   assert.equal(search.mock.calls.length, 0)
   assert.match(JSON.stringify(model.requests[0]!.messages), /多人可见的 QQ 群聊/)
 })

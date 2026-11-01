@@ -7,6 +7,7 @@ import { assertScopedScheduler, selfAwakeScopeState } from './scope-paths.ts'
 import { SelfAwakeRoleRepository } from './role-repository.ts'
 import { publishRoleCoordinator } from './role-publication.ts'
 import { SelfAwakeControlRepository } from './control-repository.ts'
+import { schedulerStatus } from './scheduler-status.ts'
 
 /** Session revisions are a durable outbox; MonOs owns actual timed activation. */
 export class SelfAwakeTimerPublication {
@@ -17,9 +18,15 @@ export class SelfAwakeTimerPublication {
   private readonly activationErrors = new Map<string, string>()
   constructor(private readonly database: EdenDatabase, private readonly stateFile?: string, private readonly external = Boolean(stateFile)) {}
   get fault() { return this.error ?? this.activationErrors.values().next().value }
+  status() { return schedulerStatus(this.stateFile, this.external, true, this.account()) }
+  private account(): string | undefined {
+    const value = this.database.connection.prepare("SELECT value FROM realm_meta WHERE key='account_key'").get()?.value
+    return typeof value === 'string' ? value : undefined
+  }
   assertAvailable(scoped = false): void {
-    if (this.external && !this.stateFile) throw new Error('自醒调度未配置：Agent 未取得当前安装的 MonOs 状态文件路径，请检查服务绑定并重启 Agent')
-    if (scoped && this.external && this.stateFile) assertScopedScheduler(this.stateFile)
+    if (this.external && !this.stateFile) throw new Error('自醒调度未配置：Agent 未取得当前账号的调度路径，请检查账号绑定')
+    if (this.external && this.stateFile && this.status().status === 'wrong_account') throw new Error(this.status().message)
+    if (scoped && this.external && this.stateFile) assertScopedScheduler(this.stateFile, false, this.account())
   }
   start() {
     if (this.timer || !this.external) return
@@ -46,7 +53,7 @@ export class SelfAwakeTimerPublication {
         if (failure) throw new Error(String(failure))
       }
     }
-    catch (error) { this.error = `Self-awake timer saved, MonOs delivery pending: ${error instanceof Error ? error.message : String(error)}`; throw new Error(this.error) }
+    catch (error) { this.error = error instanceof Error ? error.message : String(error); throw new Error(`自醒设置已保存，调度同步未完成：${this.error}`) }
   }
   private deliver(sessionId?: string): void {
     const rows = this.database.connection.prepare(`SELECT s.*,j.due_at,j.payload_json,j.state AS job_state FROM self_awake_session_schedules s
@@ -68,7 +75,7 @@ export class SelfAwakeTimerPublication {
   }
   private writeRequest(row: Record<string, SQLOutputValue>): void {
     const kind = new SelfAwakeRoleRepository(this.database).schedulerKind(String(row.session_id))
-    if (kind === 'role') assertScopedScheduler(this.stateFile!, true)
+    if (kind === 'role') assertScopedScheduler(this.stateFile!, true, this.account())
     const stateFile = selfAwakeScopeState(this.stateFile!, String(row.session_id))
     const directory = path.join(path.dirname(stateFile), 'schedule_requests')
     mkdirSync(directory, { recursive: true, mode: 0o700 })

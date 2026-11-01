@@ -16,6 +16,10 @@ const events: Record<string, string> = {
   'node.warning': 'Node.js 运行提示', 'sqlite.experimental_warning': 'SQLite 实验性功能提示',
   'process.warning': 'Node.js 运行提示',
   'self_awake.request_failed': '自主唤醒请求失败',
+  'memory.recall.started': '自动长期记忆召回开始',
+  'memory.recall.completed': '自动长期记忆召回完成',
+  'memory.recall.unavailable': '自动长期记忆召回不可用',
+  'memory.recall.cancelled': '自动长期记忆召回已取消',
 }
 const stages: Record<string, string> = {
   'legacy.database': '检查旧数据库', 'legacy.ownership': '核对历史会话归属',
@@ -25,7 +29,8 @@ const stages: Record<string, string> = {
 }
 const fields: Record<string, string> = { account: '账号', path: '路径', host: '地址', port: '端口',
   method: '方法', status: '状态', errorCode: '错误码', code: '代码', warningName: '警告类型',
-  sessionId: '会话', jobId: '任务', connectorId: '连接器' }
+  sessionId: '会话', jobId: '任务', connectorId: '连接器', characterId: '角色',
+  coreReason: '检索原因', candidateCount: '候选数', matchCount: '命中数', durationMs: '耗时ms' }
 
 export function logUsesColor(env: NodeJS.ProcessEnv, tty: boolean): boolean {
   if (Object.hasOwn(env, 'NO_COLOR')) return false

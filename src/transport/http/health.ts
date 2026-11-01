@@ -2,7 +2,7 @@ import { serverVersion } from '../../version.ts'
 import type { RequestListener } from 'node:http'
 import type { RuntimeOrigin } from '@eden/api'
 
-interface HealthChecks { model: boolean; sessionFaults: number; memoryExtraction: boolean; accounts?: boolean; jobs?: boolean; selfAwake?: boolean }
+interface HealthChecks { model: boolean; sessionFaults: number; memoryExtraction: boolean; accounts?: boolean; jobs?: boolean; selfAwake?: boolean; memoDelivery?: boolean }
 
 export function healthHandler(origin: RuntimeOrigin, checks: () => HealthChecks, workspaceId?: string): RequestListener {
   return (request, response) => {
@@ -15,7 +15,7 @@ export function healthHandler(origin: RuntimeOrigin, checks: () => HealthChecks,
     const current = checks()
     // A stopped session is reported for diagnosis; it must not make healthy peers
     // appear offline or invite the supervisor to restart their shared host.
-    const ready = (origin === 'mon' || current.model) && current.memoryExtraction && current.accounts !== false && current.jobs !== false && current.selfAwake !== false
+    const ready = (origin === 'mon' || current.model) && current.memoryExtraction && current.accounts !== false && current.jobs !== false && current.selfAwake !== false && current.memoDelivery !== false
     const unavailable = request.url === '/readyz' && !ready
     response.writeHead(unavailable ? 503 : 200).end(JSON.stringify({
       status: unavailable ? 'not_ready' : 'ok', runtimeOrigin: origin, serverVersion, workspaceId, checks: { database: true, ...current },

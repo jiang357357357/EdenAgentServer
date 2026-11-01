@@ -34,14 +34,15 @@ test('a 100 MB quoted group file reaches signed HTTP, its speaker input and the 
   const readInput = { action: 'read', blobId: '', encoding: 'base64', offset: QQ_FILE_MAX_BYTES - 16, limit: 16 }
   const model = await recordedModel([{ tool: 'read_attachment', input: { action: 'list' } },
     { tool: 'read_attachment', input: readInput }, { text: 'Read the quoted group file' }])
-  const blocked: RuntimeTool = { name: 'read_file', revision: 'blocked-test', description: 'owner file', parameters: {},
-    execute: async () => { throw new Error('Owner file tool must not be exposed in a group') } }
+  const blocked: RuntimeTool = { name: 'read_file', revision: 'unused-test', description: 'owner file',
+    parameters: { type: 'object', properties: {} },
+    execute: async () => { throw new Error('This attachment-only turn must not read an unrelated workspace file') } }
   const tools = (sessionId: string, turnId: string) => {
     const reader = attachmentTool(new AttachmentRepository(database), attachments, sessionId, turnId)
     const capabilities = new SessionCapabilities(database, repository.events, {} as SkillRepository,
       () => ({ sessionId, owner: 'speaker', profile: 'main', workspaceRoot: '', sourceChannel: 'qq' }), () => [reader, blocked])
     const registry = capabilities.registry()
-    assert.deepEqual(registry.tools.map(tool => tool.name), ['read_attachment'])
+    assert.deepEqual(registry.tools.map(tool => tool.name), ['read_attachment', 'read_file'])
     return registry.tools
   }
   const sessions = new SessionService(repository, model.config, tools, undefined, undefined, undefined, attachments)
@@ -80,7 +81,7 @@ test('a 100 MB quoted group file reaches signed HTTP, its speaker input and the 
   const info = await uploaded.json() as { blobId: string; mime: string; byteLength: number; sha256: string }
   assert.equal(info.byteLength, QQ_FILE_MAX_BYTES); assert.equal(info.sha256, sha256)
   readInput.blobId = info.blobId
-  const input = { ...source, schema_version: 'qq-group-turn.v2', message_id: 'reply-1', quoted_message_id: 'file-1',
+  const input = { ...source, schema_version: 'qq-group-turn.v3', message_id: 'reply-1', quoted_message_id: 'file-1',
     text: 'Read my quoted file', assistant_id: 1, character_id: 2,
     attachments: [{ blobId: info.blobId, mime: info.mime, filename: 'large.bin' }] }
   const response = await post('/internal/channels/qq/turns', input)

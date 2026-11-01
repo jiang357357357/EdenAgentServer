@@ -19,12 +19,8 @@ export function stickerTools(mon: Pick<MonBindingService, 'characterContext'>, n
   repository: SessionRepository, permissions: PermissionService, attachmentRepository: AttachmentRepository,
   attachments: AttachmentService, sessionId: string, turnId: string, actorId?: string | number): RuntimeTool[] {
   const delivery = new StickerDelivery(repository, permissions, napcat, sessionId, turnId, actorId)
-  const groupWrite = () => {
-    const row = repository.database.connection.prepare('SELECT allow_actions FROM qq_group_sessions WHERE session_id=?').get(sessionId)
-    if (row && !row.allow_actions) throw new Error('QQ group sticker writes require allow_actions')
-  }
   const approve = async (context: ToolContext, character: CharacterContext, mode: 'read' | 'write', action: string, details: unknown) => {
-    const assertCurrent = () => { context.assertCurrent?.(); character.assertCurrent(); if (mode === 'write') groupWrite() }
+    const assertCurrent = () => { context.assertCurrent?.(); character.assertCurrent() }
     assertCurrent()
     await permissions.request({ ...context, sessionId, turnId, assertCurrent }, `character.sticker.${mode}`,
       `character:${character.characterId}:${action}`, toJson({ action, characterId: character.characterId, ...details as object }))
@@ -44,7 +40,7 @@ export function stickerTools(mon: Pick<MonBindingService, 'characterContext'>, n
     const input = stickerRememberInputSchema.parse(raw), character = mon.characterContext(sessionId, actorId)
     await approve(context, character, 'write', 'save', input)
     const image = await stickerImage(input, attachmentRepository, attachments, sessionId, turnId, context.signal)
-    character.assertCurrent(); groupWrite(); context.assertCurrent?.()
+    character.assertCurrent(); context.assertCurrent?.()
     const form = new FormData()
     for (const key of ['name', 'description', 'emotion', 'intent'] as const) form.set(key, input[key])
     form.set('aliases', JSON.stringify(input.aliases))
@@ -57,9 +53,9 @@ export function stickerTools(mon: Pick<MonBindingService, 'characterContext'>, n
     const input = stickerSelectInputSchema.parse(raw), character = mon.characterContext(sessionId, actorId)
     await approve(context, character, 'write', action, input)
     const sticker = selectSticker(await stickerCatalog(character.client, character.characterId, context.signal), input.sticker)
-    character.assertCurrent(); groupWrite(); context.assertCurrent?.()
+    character.assertCurrent(); context.assertCurrent?.()
     if (action === 'send') return delivery.send(sticker, character, context,
-      () => { context.assertCurrent?.(); character.assertCurrent(); groupWrite() })
+      () => { context.assertCurrent?.(); character.assertCurrent() })
     await character.client.delete(`/api/characters/${character.characterId}/stickers/${sticker.id}/`, context.signal)
     return toJson({ deleted: true, sticker })
   }))]

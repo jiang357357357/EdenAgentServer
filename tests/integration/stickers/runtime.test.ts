@@ -35,7 +35,7 @@ for (const channel of ['app', 'qq', 'group'] as const) test(`${channel} actual r
   const firstTools = (model.requests[0]!.tools as { function: { name: string } }[]).map(tool => tool.function.name)
   for (const name of ['list_character_stickers', 'send_character_sticker']) assert.ok(firstTools.includes(name), name)
   if (channel !== 'app') assert.ok(firstTools.includes('remember_character_sticker'))
-  assert.equal(firstTools.includes('delete_character_sticker'), channel === 'qq')
+  assert.equal(firstTools.includes('delete_character_sticker'), channel !== 'app')
   f.sessions.start(f.session.id, '查询刚才收藏的表情包')
   await f.sessions.waitForIdle(f.session.id)
   assert.equal(f.sessions.faultCount(), 0)

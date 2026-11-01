@@ -36,9 +36,24 @@ function resultSummary(result: unknown): string {
   return ''
 }
 
+function compactionUpdate(payload: Record<string, unknown>, seq: string) {
+  const processed = Number(payload.processed), total = Number(payload.total)
+  if (!Number.isSafeInteger(processed) || !Number.isSafeInteger(total) || processed < 0 || total < 1 || processed > total) return undefined
+  return { seq, kind: 'compaction', processed, total, resumed: payload.resumed === true }
+}
+
+function pendingPermissionUpdate(database: EdenDatabase, sessionId: string, payload: Record<string, unknown>, seq: string) {
+  const permission = database.connection.prepare('SELECT state FROM permission_requests WHERE id=? AND session_id=?')
+    .get(String(payload.id ?? ''), sessionId)
+  if (permission?.state !== 'pending') return undefined
+  return { seq, kind: 'approval', request_id: String(payload.id ?? ''),
+    capability: brief(payload.capability, 80), resource: brief(payload.resource, 180), preview: permissionPreview(payload.details) }
+}
+
 function eventUpdate(database: EdenDatabase, sessionId: string, turnId: string, event: Record<string, SQLOutputValue>) {
   const payload = JSON.parse(String(event.payload_json)) as Record<string, unknown>
   const seq = String(event.seq)
+  if (event.kind === 'agent.compaction_progress') return compactionUpdate(payload, seq)
   if (event.kind === 'operation.started') {
     return ({ seq, kind: 'tool_start', name: brief(payload.name, 80) })
   } else if (event.kind === 'operation.completed') {
@@ -47,12 +62,7 @@ function eventUpdate(database: EdenDatabase, sessionId: string, turnId: string, 
     return ({ seq, kind: 'tool_end', name: brief(operation?.tool_name, 80),
       outcome: payload.outcome === 'completed' ? 'completed' : 'failed', summary: resultSummary(payload.result) })
   } else if (event.kind === 'permission.requested') {
-    const permission = database.connection.prepare('SELECT state FROM permission_requests WHERE id=? AND session_id=?')
-      .get(String(payload.id ?? ''), sessionId)
-    if (permission?.state !== 'pending') return undefined
-    return ({ seq, kind: 'approval', request_id: String(payload.id ?? ''),
-      capability: brief(payload.capability, 80), resource: brief(payload.resource, 180),
-      preview: permissionPreview(payload.details) })
+    return pendingPermissionUpdate(database, sessionId, payload, seq)
   } else if (event.kind === 'permission.resolved') {
     return ({ seq, kind: 'approval_resolved', request_id: String(payload.requestId ?? ''),
       state: brief(payload.state, 30) })
@@ -62,11 +72,11 @@ function eventUpdate(database: EdenDatabase, sessionId: string, turnId: string, 
   }
 }
 
-export function privateTurnStatus(database: EdenDatabase, sessionId: string, turnId: string,
+export function qqTurnStatus(database: EdenDatabase, sessionId: string, turnId: string,
   row: { state?: SQLOutputValue; error?: SQLOutputValue }, afterSeq: string): unknown {
   const eventRows = database.connection.prepare(`SELECT CAST(seq AS TEXT) AS seq,kind,payload_json FROM events
     WHERE session_id=? AND turn_id=? AND seq>? AND kind IN
-      ('operation.started','operation.completed','permission.requested','permission.resolved','qq.file_requested') ORDER BY seq LIMIT 100`)
+      ('operation.started','operation.completed','permission.requested','permission.resolved','qq.file_requested','agent.compaction_progress') ORDER BY seq LIMIT 100`)
     .all(sessionId, turnId, BigInt(afterSeq))
   const updates = eventRows.map(event => eventUpdate(database, sessionId, turnId, event))
     .filter(update => update !== undefined)
@@ -82,7 +92,7 @@ export function privateTurnStatus(database: EdenDatabase, sessionId: string, tur
     const content = payload.message.content
     const text = typeof content === 'string' ? content : Array.isArray(content)
       ? content.filter(block => block.type === 'text').map(block => block.text ?? '').join('\n') : ''
-    return { status: 'completed', text, updates, next_seq, has_more }
+    if (text.trim()) return { status: 'completed', text, updates, next_seq, has_more }
   }
   return { status: 'completed', text: '', updates, next_seq, has_more }
 }

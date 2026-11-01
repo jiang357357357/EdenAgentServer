@@ -80,8 +80,7 @@ export class PermissionService {
       : this.modeStore.allows(capability) || this.repository.granted(request)) request.state = 'allowed'
     const event = this.repository.insert(request)
     if (request.state === 'allowed') { this.repository.events.publish(event); context.assertCurrent?.(); return request.id }
-    const groupConversation = this.database.connection.prepare('SELECT 1 FROM qq_group_sessions WHERE session_id=?').get(context.sessionId)
-    if (groupConversation || !this.interactiveApprovalAvailable(context.sessionId)) {
+    if (!this.interactiveApprovalAvailable(context.sessionId)) {
       this.repository.events.publish(event)
       const message = '后台运行无法等待交互审批；已有持久授权或允许该能力后可在下次运行中执行'
       this.resolve(request.id, false, 'denied', false, message)
@@ -114,10 +113,10 @@ export class PermissionService {
 
   setMode(mode: PermissionMode): PermissionMode { return this.modeStore.set(mode) }
 
-  qqMode(botQq: string, contactQq: string): PermissionMode { return this.modeStore.qqMode(botQq, contactQq) }
+  qqMode(botQq: string, contactQq: string, groupQq?: string): PermissionMode { return this.modeStore.qqMode(botQq, contactQq, groupQq) }
 
-  setQqMode(botQq: string, contactQq: string, mode: PermissionMode): PermissionMode {
-    return this.modeStore.setQqMode(botQq, contactQq, mode)
+  setQqMode(botQq: string, contactQq: string, mode: PermissionMode, groupQq?: string): PermissionMode {
+    return this.modeStore.setQqMode(botQq, contactQq, mode, groupQq)
   }
 
   list(sessionId?: string): PermissionRequest[] { return this.repository.list(sessionId) }

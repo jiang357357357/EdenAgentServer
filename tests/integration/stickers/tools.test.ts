@@ -69,11 +69,14 @@ for (const status of ['unknown', 'failed', 'disconnect']) test(`QQ ${status} rec
 
 test('permission denial, invalid image, foreign attachment and ambiguous source cause no mutations', async t => {
   const f = await stickerFixture('group'); t.after(() => f.close())
-  f.database.connection.prepare('UPDATE qq_group_sessions SET allow_actions=0').run()
-  await assert.rejects(f.execute('remember_character_sticker', { ...metadata, blobId: f.attachment.id }), /allow_actions/)
-  await assert.rejects(f.execute('send_character_sticker', { sticker: '1' }), /allow_actions/)
+  f.permissions.setQqMode('111111', '222222', 'restricted', '333333')
+  const pending = f.execute('remember_character_sticker', { ...metadata, blobId: f.attachment.id })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  f.permissions.resolve(f.permissions.list().find(item => item.state === 'pending')!.id, false)
+  await assert.rejects(pending, /Permission denied/)
   assert.equal(f.requests.length, 0)
   f.database.connection.prepare('UPDATE qq_group_sessions SET allow_actions=1').run()
+  f.permissions.setQqMode('111111', '222222', 'full_access', '333333')
   await assert.rejects(f.execute('remember_character_sticker', { ...metadata, blobId: randomUUID() }), /current input/)
   await assert.rejects(f.execute('remember_character_sticker', { ...metadata, blobId: f.attachment.id, imageUrl: f.base + '/image.gif' }), /exactly one/)
   f.image(Buffer.from('not an image'))

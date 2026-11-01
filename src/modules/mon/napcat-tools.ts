@@ -37,7 +37,7 @@ export function napcatTools(client: NapcatClient, permissions: PermissionService
     context.signal.throwIfAborted()
   }
   const resolve = async (context: ToolContext, botId?: string, requireOnline = false) => {
-    const target = client.target(sessionId, botId)
+    const target = client.target(sessionId, botId, turnId)
     if (target.discovery) await approve(context, 'qq.napcat.read', target.resource, { channel: 'qq_bot_discovery' })
     return client.resolve(target, context.signal, requireOnline)
   }
@@ -48,7 +48,7 @@ export function napcatTools(client: NapcatClient, permissions: PermissionService
       const input = capabilityInput.parse(raw), resolved = await resolve(context, input.bot_id)
       if (!('target' in resolved)) return toJson(resolved)
       const { target } = resolved
-      await approve(context, target.qqContext?.group_qq ? 'qq.napcat.group.read' : 'qq.napcat.read', target.resource,
+      await approve(context, 'qq.napcat.read', target.resource,
         { ...input, bot: target.qqContext?.bot_qq ?? target.botId })
       return reply(target, await client.capabilities(target, `${turnId}:${context.callId}`, context.signal, input.action))
     },
@@ -59,7 +59,6 @@ export function napcatTools(client: NapcatClient, permissions: PermissionService
       const input = eventInput.parse(raw), resolved = await resolve(context, input.bot_id)
       if (!('target' in resolved)) return toJson(resolved)
       const { target } = resolved
-      if (target.qqContext?.group_qq) throw new Error('群会话不能读取整个机器人的事件记录')
       await approve(context, 'qq.napcat.read', target.resource, { ...input, bot: target.qqContext?.bot_qq ?? target.botId })
       const params = client.resolveParams(target, { ...(input.event_type ? { type: input.event_type } : {}),
         ...(input.limit === undefined ? {} : { limit: input.limit }), ...(input.cursor ? { cursor: input.cursor } : {}) })
@@ -73,11 +72,10 @@ export function napcatTools(client: NapcatClient, permissions: PermissionService
       const input = actionInput.parse(raw), resolved = await resolve(context, input.bot_id, true)
       if (!('target' in resolved)) return toJson(resolved)
       const { target } = resolved
-      const params = client.groupParams(target, client.resolveParams(target, input.params), mode)
-      const scope = target.qqContext?.group_qq ? 'qq.napcat.group' : 'qq.napcat'
-      await approve(context, `${scope}.${mode}`, `${target.resource}:${input.action}`,
+      const params = client.resolveParams(target, input.params)
+      await approve(context, `qq.napcat.${mode}`, `${target.resource}:${input.action}`,
         { ...input, params, channel: 'qq_action', bot: target.qqContext?.bot_qq ?? target.botId })
-      return reply(target, await client.execute(target, input.action, params, mode, `${turnId}:${context.callId}`, context.signal))
+      return reply(target, await client.execute(target, input.action, params, mode, `${turnId}:${context.callId}`, context.signal, context.assertCurrent))
     },
   }))]
 }

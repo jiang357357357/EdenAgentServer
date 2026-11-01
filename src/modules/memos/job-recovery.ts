@@ -2,18 +2,26 @@ import { z } from 'zod'
 import { memoInfoSchema, memoIntegerSchema } from '@eden/api'
 import type { JobInfo } from '@eden/api'
 import type { EdenDatabase } from '@eden/store'
-import { DeferredJob } from '../jobs/index.ts'
 import type { JobRepository } from '../jobs/index.ts'
 import type { SessionService } from '../sessions/index.ts'
 import type { MemoRepository } from './repository.ts'
 import type { MemoNotifications } from './notifications.ts'
 import type { DatabaseSync } from 'node:sqlite'
-import { memoRedeliveryInstruction } from '../../model-prompts/jobs.ts'
+import { MemoDeliveryRepository } from './delivery-repository.ts'
 const payload = z.object({ memoId: memoIntegerSchema, revision: memoIntegerSchema, occurrence: memoIntegerSchema }).strict()
 
 export class MemoJobRecovery {
   constructor(private readonly database: EdenDatabase, private readonly memos: MemoRepository,
-    private readonly notifications: MemoNotifications, private readonly jobs: JobRepository, private readonly sessions: SessionService) { }
+    private readonly notifications: MemoNotifications, private readonly jobs: JobRepository, _sessions: SessionService,
+    private readonly deliveries = new MemoDeliveryRepository(database, memos, notifications, jobs)) { }
+
+  resolveOutcome(id: string, expectedUpdatedAt: number, decision: 'completed' | 'cancelled', note: string): JobInfo {
+    return this.database.transaction(() => {
+      const job = this.jobs.resolveOutcomeInTransaction(id, expectedUpdatedAt, decision, note)
+      this.deliveries.reviewOutcome(id, decision, note)
+      return job
+    })
+  }
   resubmit(jobId: string, expectedUpdatedAt: number, note: string): JobInfo {
     return this.database.transaction(() => {
       const db = this.database.connection
@@ -23,12 +31,8 @@ export class MemoJobRecovery {
         return this.jobs.read(String(previous.new_job_id))
       }
       const source = this.jobs.read(jobId)
-      if (!['memo.reminder', 'memo.reminder.redelivery'].includes(source.kind) || !['failed', 'cancelled'].includes(source.state) || source.updatedAt !== expectedUpdatedAt) throw new Error('Stop or review the original reminder job, then reload it')
-      if (source.inputId) {
-        const input = db.prepare('SELECT state,turn_id FROM inputs WHERE id=?').get(source.inputId)
-        if (input?.state !== 'cancelled') throw new Error('Explicitly stop the original reminder input before resubmitting')
-        if (db.prepare("SELECT 1 FROM tool_operations WHERE turn_id=? AND state IN ('running','unknown') LIMIT 1").get(input.turn_id!)) throw new Error('Reconcile unknown reminder effects first')
-      }
+      if (!['memo.reminder', 'memo.reminder.redelivery'].includes(source.kind) || !['failed', 'cancelled', 'completed'].includes(source.state) || source.updatedAt !== expectedUpdatedAt) throw new Error('Stop or review the original reminder job, then reload it')
+      this.assertInputSettled(source)
       let delivered = this.recoverDeliverySnapshot(source, jobId, db)
       const next = this.jobs.scheduleInTransaction({
         kind: delivered ? 'memo.reminder.redelivery' : 'memo.reminder',
@@ -39,6 +43,18 @@ export class MemoJobRecovery {
         .run(jobId, next.id, expectedUpdatedAt, delivered ? JSON.stringify(delivered) : null, note, Date.now(), delivered ? 'redelivery' : 'retry')
       return next
     })
+  }
+
+  private assertInputSettled(source: JobInfo): void {
+    if (!source.inputId) return
+    const db = this.database.connection
+    const input = db.prepare('SELECT state,turn_id FROM inputs WHERE id=?').get(source.inputId)
+    if (!input || !['cancelled', 'completed', 'failed', 'interrupted'].includes(String(input.state)))
+      throw new Error('Explicitly stop the original reminder input before resubmitting')
+    if (db.prepare(`SELECT 1 FROM tool_operations o WHERE o.turn_id=? AND o.state IN ('running','unknown')
+      AND NOT EXISTS(SELECT 1 FROM memo_delivery_effects e JOIN job_outcome_reviews r ON r.job_id=e.job_id
+        WHERE e.request_id=o.id AND e.job_id=? AND o.state='unknown') LIMIT 1`).get(input.turn_id!, source.id))
+      throw new Error('Reconcile unknown reminder effects first')
   }
   private recoverDeliverySnapshot(source: JobInfo, jobId: string, db: DatabaseSync) {
     const original = source.kind === 'memo.reminder' ? payload.parse(source.payload) : undefined
@@ -63,19 +79,6 @@ export class MemoJobRecovery {
     const row = this.database.connection.prepare('SELECT snapshot_json FROM memo_job_resubmissions WHERE source_job_id=? AND new_job_id=? AND mode=\'redelivery\'').get(request.sourceJobId, job.id)
     if (!row) throw new Error('Reminder redelivery has no matching confirmation')
     const memo = memoInfoSchema.parse(JSON.parse(String(row.snapshot_json)))
-    const commit = (inputId: string | null = null) => {
-      this.notifications.recordInTransaction(job.id, memo)
-      this.jobs.completeInTransaction(job.id, inputId)
-    }
-    let active = false
-    if (job.sessionId) { try { active = this.sessions.repository.read(job.sessionId).status === 'active' } catch { /* Durable notification remains available. */ } }
-    if (!job.sessionId || !active) { this.database.transaction(() => commit()); return }
-    try {
-      this.sessions.submitJob(job.sessionId, memoRedeliveryInstruction(memo),
-        job.id, job.kind, input => commit(input.inputId))
-    } catch (error) {
-      if (error instanceof Error && /No model configured/.test(error.message)) throw new DeferredJob('Reminder redelivery is waiting for its session model')
-      throw error
-    }
+    this.deliveries.enqueue(job, memo, this.deliveries.advancesOnReplay(request.sourceJobId, memo))
   }
 }

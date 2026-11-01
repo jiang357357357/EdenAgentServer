@@ -47,7 +47,7 @@ execute:async call=>{await writeFile(file,call.payload.text);context.publish('ch
   await promisify(execFile)(process.execPath, ['Script/Project/package_connector.mjs', '--source', source, output], { cwd: process.cwd() })
   assert.ok(JSON.parse(await readFile(path.join(output, 'checksums.json'), 'utf8'))['worker/main.mjs'])
   const preview = await call('inspect', { path: output }) as { previewID: string; id: string }
-  await call('install', { previewID: preview.previewID })
+  await call('install', { id: preview.id })
   await call('enable', { id: preview.id })
   assert.ok(JSON.stringify(await call('list')).includes('authored.notes'))
   const key = f.catalog.list().connectors.find(item => item.name === manifest.name)!.key

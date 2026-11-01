@@ -7,16 +7,17 @@ import { accountKey, withAccount } from '../accounts/index.ts'
 import type { SessionService } from '../sessions/index.ts'
 import { assistantParticipant, loadMonCatalog } from '../mon/index.ts'
 import type { MonBindingService } from '../mon/index.ts'
+import { qqTurnStatus } from './reply-status.ts'
 
 const qq = z.string().regex(/^\d{5,20}$/)
 const identityFields = { user_id: z.string(), bot_qq: qq, group_qq: qq, contact_qq: qq }
-const submitSchema = z.object({ ...identityFields, schema_version: z.enum(['qq-group-turn.v1', 'qq-group-turn.v2']),
+const submitSchema = z.object({ ...identityFields, schema_version: z.enum(['qq-group-turn.v1', 'qq-group-turn.v2', 'qq-group-turn.v3']),
   message_id: z.string().min(1).max(128), text: z.string().trim().min(1).max(4000),
   assistant_id: z.number().int().positive(), character_id: z.number().int().positive(),
   allow_actions: z.boolean().default(false), attachments: attachmentRefsSchema.max(QQ_FILE_MAX_ATTACHMENTS).default([]),
   quoted_message_id: z.string().min(1).max(128).optional() }).strict().refine(input =>
-    input.attachments.length ? input.schema_version === 'qq-group-turn.v2' && Boolean(input.quoted_message_id)
-      : input.quoted_message_id === undefined, 'Group attachments require the v2 protocol and a quoted file message')
+    input.attachments.length ? input.schema_version !== 'qq-group-turn.v1' && Boolean(input.quoted_message_id)
+      : input.quoted_message_id === undefined, 'Group attachments require the v2 protocol or newer and a quoted file message')
 const statusSchema = z.object({ ...identityFields, input_id: z.uuid(),
   after_seq: z.string().regex(/^\d+$/).default('0') }).strict()
 type GroupInput = z.infer<typeof submitSchema>
@@ -114,27 +115,14 @@ export class QqGroupBridge {
   status(raw: unknown): unknown {
     const input = statusSchema.parse(raw)
     this.assertOwner(input.user_id)
-    const row = this.database.connection.prepare(`SELECT i.session_id,i.turn_id,i.state FROM inputs i
+    const row = this.database.connection.prepare(`SELECT i.session_id,i.turn_id,i.state,t.error FROM inputs i
       JOIN qq_group_sessions g ON g.session_id=i.session_id
+      LEFT JOIN turns t ON t.id=i.turn_id
       WHERE i.id=? AND g.bot_qq=? AND g.group_qq=? AND g.operator_qq=?`)
       .get(input.input_id, input.bot_qq, input.group_qq, input.contact_qq)
     if (!row) throw new Error('QQ group turn not found')
     withAccount(this.account(input.user_id), () => this.sessions.repository.ownership.assert(String(row.session_id)))
-    // No tool output, approval details, file exports or internal errors are published to the group.
-    const result = { status: String(row.state), updates: [], next_seq: input.after_seq, has_more: false }
-    if (row.state !== 'completed') return result
-    const messages = this.database.connection.prepare(`SELECT payload_json FROM events WHERE session_id=? AND turn_id=?
-      AND kind='agent.message_end' ORDER BY seq DESC`).all(row.session_id!, row.turn_id!)
-    for (const item of messages) {
-      const payload = JSON.parse(String(item.payload_json)) as { message?: { role?: string; content?: unknown } }
-      if (payload.message?.role !== 'assistant') continue
-      const content = payload.message.content
-      const text = typeof content === 'string' ? content : Array.isArray(content)
-        ? content.filter(block => block.type === 'text').map(block => block.text ?? '').join('\n') : ''
-      if (!text.trim()) continue
-      return { ...result, text }
-    }
-    return { ...result, text: '' }
+    return qqTurnStatus(this.database, String(row.session_id), String(row.turn_id), row, input.after_seq)
   }
 
   async close(): Promise<void> { await this.tail.catch(() => {}) }
