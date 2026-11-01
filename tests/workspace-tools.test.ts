@@ -1,7 +1,8 @@
 import { CommandService } from '../src/modules/commands/command-service.ts'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { EdenDatabase } from '@eden/store'
@@ -21,7 +22,10 @@ test('workspace writes and commands wait for approval and execute within the sel
   const permissions = new PermissionService(database, sessions.events)
   const workspace = new WorkspaceService(database, [])
   workspace.switch(project)
-  const tools = workspaceTools(workspace, permissions, session.id, session.id, new CommandService(database, []))
+  const commands = new CommandService(database, [], undefined, {
+    deviceSettingsPath: path.join(directory, 'terminal-settings.json'),
+  })
+  const tools = workspaceTools(workspace, permissions, session.id, session.id, commands)
   const controller = new AbortController()
   let call = 0
   const execute = (name: string, input: Record<string, unknown>) => tools.find(tool => tool.name === name)!.execute(input, { callId: String(++call), signal: controller.signal })
@@ -64,5 +68,5 @@ test('workspace writes and commands wait for approval and execute within the sel
     const escaped = assert.rejects(escaping, /escapes/)
     await escaped
     assert.equal(existsSync(path.join(directory, 'outside.txt')), false)
-  } finally { controller.abort(); database.close(); rmSync(directory, { recursive: true, maxRetries: 5, retryDelay: 100 }) }
+  } finally { controller.abort(); database.close(); await rm(directory, { recursive: true, maxRetries: 10, retryDelay: 100 }) }
 })
