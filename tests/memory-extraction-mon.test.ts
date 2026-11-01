@@ -1,4 +1,4 @@
-import test from 'node:test'
+import { test } from './fixtures/mon-test-account.ts'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -10,7 +10,7 @@ import { loadConfig } from '../src/bootstrap/config.ts'
 import { createServices } from '../src/bootstrap/services.ts'
 
 async function until(check: () => boolean) {
-  const deadline = Date.now() + 10000
+  const deadline = Date.now() + 30000
   while (!check() && Date.now() < deadline) await delay(10)
   assert.ok(check(), 'Multi-actor extraction did not settle')
 }

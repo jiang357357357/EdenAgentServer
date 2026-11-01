@@ -22,6 +22,6 @@ test('catalog visibility reads scope independently of tool count and revalidates
   resolved.tool.assertCurrent!()
   const previous = reads
   workspaceRoot = ''
-  assert.throws(() => resolved.tool.assertCurrent!(), /not loaded/)
+  assert.throws(() => resolved.tool.assertCurrent!(), /execution scope changed/)
   assert.ok(reads > previous)
 })

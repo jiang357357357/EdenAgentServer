@@ -40,7 +40,7 @@ test('custom provider endpoints and credentials are explicit and configuration r
   assert.throws(() => loadConfig({ EDEN_AGENT_MODEL: 'openai/model', EDEN_AGENT_CONTEXT_WINDOW: '100', EDEN_AGENT_MAX_TOKENS: '200' }), /budget/)
 })
 
-test('a recovered queued input cannot silently switch model endpoints', async () => {
+test('a recovered queued input stays held and retains its original model endpoint', async () => {
   const first = await recordedModel([{ text: 'Original model' }])
   const second = await recordedModel([{ text: 'Changed model' }])
   const database = new EdenDatabase(':memory:', 'local')
@@ -52,8 +52,10 @@ test('a recovered queued input cannot silently switch model endpoints', async ()
     sessions.resumePending()
     await sessions.waitForIdle(session.id)
     assert.equal(first.requests.length + second.requests.length, 0)
-    assert.equal(database.connection.prepare("SELECT state FROM inputs WHERE idempotency_key='saved'").get()?.state, 'interrupted')
-    assert.match(JSON.stringify(repository.events.list(session.id)), /configuration changed/)
+    assert.equal(database.connection.prepare("SELECT state FROM inputs WHERE idempotency_key='saved'").get()?.state, 'held')
+    const saved = database.connection.prepare("SELECT metadata_json FROM inputs WHERE idempotency_key='saved'").get()!
+    assert.equal(JSON.parse(String(saved.metadata_json)).model.baseUrl, first.config.baseUrl)
+    assert.equal(new InputRepository(database, repository.events).pendingSessions().length, 0)
   } finally { await sessions.close(); database.close(); await Promise.all([first.close(), second.close()]) }
 })
 

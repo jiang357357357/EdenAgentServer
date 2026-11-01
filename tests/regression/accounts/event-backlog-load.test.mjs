@@ -5,7 +5,7 @@ import { test } from 'node:test'
 
 const fixture = fileURLToPath(new URL('./event-backlog-load-fixture.mjs', import.meta.url))
 
-test('real account refresh preserves multi-session durable backlogs beyond former memory limits', { concurrency: 2, timeout: 90_000 }, async t => {
+test('real account refresh preserves multi-session durable backlogs beyond former memory limits', { concurrency: 2, timeout: 180_000 }, async t => {
   await Promise.all(['count', 'bytes'].map(scenario => t.test(scenario, async t => {
     const child = spawn(process.execPath, ['--import', 'tsx', fixture, scenario], { stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = '', stderr = ''

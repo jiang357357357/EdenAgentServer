@@ -56,7 +56,7 @@ test('a thousand real session summaries yield between batches while preserving t
 
   // The ID selection itself remains synchronous; expose its cost rather than hiding it behind yielding.
   assert.ok(selectionSql)
-  const parameters = ['mon', 0, null, null, null, null, 1, 1000]
+  const parameters = ['mon', 0, null, null, null, null, 1, null, null, 1000]
   const selectionStart = performance.now()
   const selected = originalPrepare(selectionSql).all(...parameters)
   const selectionMs = performance.now() - selectionStart

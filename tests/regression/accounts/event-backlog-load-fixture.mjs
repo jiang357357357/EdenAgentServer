@@ -72,7 +72,7 @@ export async function runEventBacklogScenario(name) {
     if (holdProfiles && request.headers.authorization === `Token ${slowToken}`) pendingProfiles.push(response)
     else replyProfile(response)
   })
-  let host, websocket, runtimes, browser, observer
+  let host, websocket, runtimes, browser, observer, blockedObserver
   const connections = []
   let generatedCount = 0, generatedBytes = 0, appendInProgress = null
   try {
@@ -111,6 +111,7 @@ export async function runEventBacklogScenario(name) {
     const connectedAt = Date.now()
     const runtime = await runtimes.resolve(slowToken)
     observer = await observerConnection(baseUrl, config.token, fastToken)
+    blockedObserver = await observerConnection(baseUrl, config.token, slowToken)
     const sessions = []
     for (let index = 0; index < 4; index++) sessions.push(await browser.transport.rpcRequest('session.create', { title: `Synthetic ${name} load ${index}` }))
     await observer.request('ping', {})
@@ -119,6 +120,7 @@ export async function runEventBacklogScenario(name) {
     // Preserve the production refresh interval; hold the HTTP response only during load generation (below its 10s timeout).
     await delay(Math.max(0, 31000 - (Date.now() - connectedAt)))
     const refreshRpc = browser.transport.rpcRequest('ping', {}).then(() => ({ ok: true }), error => ({ error: error.message }))
+    const blockedRefresh = blockedObserver.request('ping', {}).then(() => ({ ok: true }), error => ({ error: error.message }))
     await until(() => pendingProfiles.length > 0, 'real account refresh HTTP request')
     const generated = [], startedAt = Date.now()
     let totalBytes = 0, maximumFrameBytes = 0
@@ -142,7 +144,15 @@ export async function runEventBacklogScenario(name) {
     holdProfiles = false
     for (const response of pendingProfiles.splice(0)) replyProfile(response)
     const refreshOutcome = await refreshRpc
+    const blockedRefreshOutcome = await blockedRefresh
+    assert.equal(blockedRefreshOutcome.ok, true, 'Account-wide observer refresh must succeed')
+    await until(() => blockedObserver.received.filter(value => value.eventType === eventType).length === scenario.events, 'account-wide authenticated backlog delivery')
+    assert.deepEqual(blockedObserver.closes, [], 'A persisted auth backlog must not close the account-wide stream')
     await until(() => statuses.at(-1)?.connected === true, 'browser connection after Core success')
+    // Finish measuring the account-wide live stream before history RPC opens
+    // independent per-session replay channels; those channels have no global
+    // cross-session delivery order and must not race this stream measurement.
+    if (!statuses.some(value => !value.connected)) await until(() => received.filter(value => value.eventType === eventType).length === scenario.events, 'browser backlog delivery')
     const recovered = [], pagesPerSession = []
     for (const session of sessions) {
       let afterSeq = '0', pages = 0
@@ -170,8 +180,6 @@ export async function runEventBacklogScenario(name) {
     assert.deepEqual(observer.closes, [], 'An independently verified connection must remain usable')
     assert.ok(maximumFrameBytes < 2 * 1024 * 1024, 'Each pressure frame must remain below 2 MiB')
     assert.ok(name === 'count' ? scenario.events > 1024 && totalBytes < 4 * 1024 * 1024 : totalBytes > 4 * 1024 * 1024 && scenario.events < 1024)
-    // Wait for healthy delivery on the fixed implementation; old implementations close before this point.
-    if (!statuses.some(value => !value.connected)) await until(() => received.filter(value => value.eventType === eventType).length === scenario.events, 'browser backlog delivery')
     const result = { scenario: name, node: process.version, syntheticEvents: scenario.events, sessions: sessions.length,
       totalBytes, maximumFrameBytes, loadDurationMs, profileRequests, receivedWhileUnverified,
       liveDelivered: received.filter(value => value.eventType === eventType).length, recovered: recovered.length,
@@ -183,8 +191,11 @@ export async function runEventBacklogScenario(name) {
     assert.deepEqual(connections[0].closes, [], 'A persisted auth backlog must not trigger 1013')
     const live = received.filter(value => value.eventType === eventType)
     assert.equal(live.length, generated.length, 'The original browser connection must receive every persisted backlog event exactly once')
-    assert.deepEqual(live.map(value => value.id), generated.map(value => value.id),
-      'Merged sessions must retain their global durable append order')
+    // Browser discovery uses independent session sockets. Preserve each
+    // session's order, and verify global append order on the single all-event
+    // connection that actually provides that contract.
+    assert.deepEqual(blockedObserver.received.filter(value => value.eventType === eventType).map(value => value.id), generated.map(value => value.id),
+      'The account-wide stream must retain global durable append order')
     assert.deepEqual(live.map(value => value.id).sort(), generated.map(value => value.id).sort())
     for (const session of sessions) {
       assert.deepEqual(live.filter(value => value.sessionId === session.id).map(value => value.seq),
@@ -196,6 +207,7 @@ export async function runEventBacklogScenario(name) {
     for (const response of pendingProfiles.splice(0)) response.destroy()
     await browser?.close()
     observer?.socket.terminate()
+    blockedObserver?.socket.terminate()
     if (websocket) { for (const socket of websocket.clients) socket.terminate(); websocket.close() }
     if (host) { host.closeAllConnections(); await new Promise(resolve => host.close(resolve)) }
     await runtimes?.close()

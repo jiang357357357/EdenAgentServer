@@ -64,5 +64,5 @@ test('workspace writes and commands wait for approval and execute within the sel
     const escaped = assert.rejects(escaping, /escapes/)
     await escaped
     assert.equal(existsSync(path.join(directory, 'outside.txt')), false)
-  } finally { controller.abort(); database.close(); rmSync(directory, { recursive: true }) }
+  } finally { controller.abort(); database.close(); rmSync(directory, { recursive: true, maxRetries: 5, retryDelay: 100 }) }
 })
