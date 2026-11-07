@@ -9,6 +9,8 @@ import { componentSummary, packageManifestSchema } from './manifest.ts'
 import type { PackagePreviewRepository } from './preview-repository.ts'
 import type { MarketRepository } from '../repository.ts'
 import { verifyPackageFiles } from './integrity.ts'
+import { packageUiModules } from './ui-modules.ts'
+import { packageActivationPlan } from './activation-plan.ts'
 type Preview = ReturnType<PackagePreviewRepository['read']>
 export class InstalledPackageRepository {
   readonly permissions: PackagePermissionRepository
@@ -71,6 +73,7 @@ export class InstalledPackageRepository {
     }
     const skills = packageSkillSnapshots(value, enabled)
     for (const hook of value.manifest.components.hooks) if (enabled(hook.id, hook.enabledByDefault) && !skills.some(skill => skill.componentId === hook.skill)) throw new Error('Hook target skill must be enabled')
+    packageUiModules(value, enabled)
     return { ui: packageUiCards(value, enabled), skills }
   }
   runtimePlan(id: string, revision: string) {
@@ -95,6 +98,21 @@ export class InstalledPackageRepository {
     return this.database.connection.prepare('SELECT id,revision FROM plugin_package_selection WHERE enabled=1').all()
       .map(row => ({ id: String(row.id), revision: String(row.revision) }))
   }
+  uiModules(id: string, revision: string) {
+    const selection = this.database.connection.prepare('SELECT revision,enabled FROM plugin_package_selection WHERE id=?').get(id)
+    if (!selection?.enabled || selection.revision !== revision) throw new Error('UI package is disabled or its active version changed')
+    this.componentPlan(id, revision)
+    return packageUiModules(this.verified(id, revision), (componentId, fallback) => this.componentEnabled(id, revision, componentId, fallback))
+  }
+  uiCatalogStamp() {
+    return JSON.stringify([
+      this.database.connection.prepare('SELECT * FROM plugin_package_selection ORDER BY id').all(),
+      this.database.connection.prepare('SELECT * FROM plugin_package_components ORDER BY id,revision,component_id').all(),
+      this.database.connection.prepare('SELECT * FROM plugin_package_grants ORDER BY id,revision,capability,resource,access').all(),
+      this.database.connection.prepare('SELECT * FROM plugin_market_keys ORDER BY id').all(),
+      this.database.connection.prepare('SELECT plugin_id,version,revision,revoked_at FROM legacy_plugin_revocations ORDER BY plugin_id,version,revision').all(),
+    ])
+  }
   setPermissions(id: string, revision: string, decisions: PackagePermissionDecision[]) {
     const row = this.database.connection.prepare('SELECT manifest_json FROM plugin_packages WHERE id=? AND revision=?').get(id, revision)
     if (!row) throw new Error('Plugin package version not found')
@@ -104,9 +122,27 @@ export class InstalledPackageRepository {
     this.permissions.set(id, revision, manifest.permissions, decisions)
     return this.read(id)
   }
+  activationPlan(id: string, enableComponents: string[] = []) {
+    const current = this.read(id), value = this.verified(id, current.revision)
+    return { ...packageActivationPlan(value, (componentId, fallback) => this.componentEnabled(id, current.revision, componentId, fallback), enableComponents),
+      grants: this.permissions.list(id, current.revision) }
+  }
+  /** The caller must approve this exact plan through its existing permission boundary. */
+  applyActivation(plan: ReturnType<InstalledPackageRepository['activationPlan']>) {
+    return this.database.transaction(() => {
+      if (JSON.stringify(this.activationPlan(plan.id, plan.enableComponents)) !== JSON.stringify(plan))
+        throw new Error('插件版本、组件或权限在审批期间发生变化，请重新启用')
+      this.permissions.set(plan.id, plan.revision, this.verified(plan.id, plan.revision).manifest.permissions,
+        plan.permissions.map(item => ({ ...item, decision: 'allowed' as const })))
+      for (const componentId of plan.enableComponents)
+        this.database.connection.prepare('INSERT INTO plugin_package_components VALUES(?,?,?,1) ON CONFLICT(id,revision,component_id) DO UPDATE SET enabled=1')
+          .run(plan.id, plan.revision, componentId)
+      return this.enable(plan.id)
+    })
+  }
   enable(id: string) {
     const current = this.read(id)
-    this.componentPlan(id, current.revision)
+    this.assertSkillNames(id, this.componentPlan(id, current.revision).skills)
     this.database.connection.prepare('UPDATE plugin_package_selection SET enabled=1,enabled_after_rowid=(SELECT COALESCE(MAX(rowid),0) FROM events) WHERE id=? AND revision=?').run(id, current.revision)
     return this.read(id)
   }
@@ -117,7 +153,7 @@ export class InstalledPackageRepository {
       this.database.connection.prepare('INSERT INTO plugin_package_components VALUES(?,?,?,?) ON CONFLICT(id,revision,component_id) DO UPDATE SET enabled=excluded.enabled').run(id, revision, componentId, Number(enabled))
       const active = this.database.connection.prepare('SELECT enabled,revision FROM plugin_package_selection WHERE id=?').get(id)
       if (active?.enabled && active.revision === revision) {
-        this.componentPlan(id, revision)
+        this.assertSkillNames(id, this.componentPlan(id, revision).skills)
         this.database.connection.prepare('UPDATE plugin_package_selection SET enabled_after_rowid=(SELECT COALESCE(MAX(rowid),0) FROM events) WHERE id=?').run(id)
       }
     })
@@ -142,6 +178,21 @@ export class InstalledPackageRepository {
       try { return this.componentPlan(String(row.id), String(row.revision)).skills }
       catch { return [] }
     })
+  }
+  skillContributionIssues() {
+    return this.database.connection.prepare('SELECT id,revision FROM plugin_package_selection WHERE enabled=1').all().flatMap(row => {
+      try { this.componentPlan(String(row.id), String(row.revision)); return [] }
+      catch (error) { return [{ id: String(row.id), message: error instanceof Error ? error.message : String(error) }] }
+    })
+  }
+  private assertSkillNames(id: string, skills: ReturnType<typeof packageSkillSnapshots>) {
+    const names = new Map<string, string>()
+    for (const item of this.skillContributions().filter(item => item.pluginId !== id)) names.set(item.snapshot.name, item.pluginId)
+    for (const item of skills) {
+      const previous = names.get(item.snapshot.name)
+      if (previous) throw new Error(`技能 ${item.snapshot.name} 与插件 ${previous} 的技能重名；请先停用冲突组件`)
+      names.set(item.snapshot.name, id)
+    }
   }
   select(id: string, revision: string) {
     this.verified(id, revision)

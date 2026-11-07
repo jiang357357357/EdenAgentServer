@@ -1,13 +1,14 @@
+import { PluginUiService, uiPluginTools } from '../modules/plugin-ui/index.ts'
 import { SessionCapabilities, ToolRegistry, defaultTool, capabilityOwner } from '../modules/capabilities/index.ts'
 import { CommandService } from '../modules/commands/command-service.ts'
 import { McpResults, McpLifecycle, mcpTools } from '../modules/mcp/index.ts'
-import { ConnectorCredentials, ConnectorCatalog, ConnectorRepository, ConnectorEventRepository, connectorEventTools, ConnectorPermissions, ConnectorLifecycle, connectorCapabilityTools, connectorDiscoveryTools } from '../modules/connectors/index.ts'
+import { ConnectorCredentials, ConnectorCatalog, ConnectorRepository, ConnectorEventRepository, connectorEventTools, ConnectorPermissions, ConnectorLifecycle, connectorCapabilityTools, connectorDiscoveryTools, connectorInstanceTools } from '../modules/connectors/index.ts'
 import { contactTools, deviceTools, NapcatClient, napcatTools } from '../modules/mon/index.ts'
 import { MediaService, mediaTools } from '../modules/media/index.ts'
 import { VoiceConfigRepository, VoiceService, SpeechRepository, SpeechService, RealtimeVoiceService } from '../modules/voice/index.ts'
 import { SubagentRepository, SubagentService, SubagentMailbox, SubagentLifecycle, subagentTools, subagentPolicy, filterSubagentTools } from '../modules/subagents/index.ts'
 import { PluginHookRepository, PluginHookService } from '../modules/plugin-hooks/index.ts'
-import { connectorPluginTools, PackageRecoveryRepository, PackageAssets, MarketRepository, MarketService, PackagePreviewRepository, InstalledPackageRepository } from '../modules/plugin-market/index.ts'
+import { connectorPluginTools, pluginGrantTools, connectorBuildTool, packageTools, PackageRecoveryRepository, PackageAssets, MarketRepository, MarketService, PackagePreviewRepository, InstalledPackageRepository } from '../modules/plugin-market/index.ts'
 import { SkillRepository, SkillService, SystemSkillCatalog, skillTools, builtinSkillSnapshots } from '../modules/skills/index.ts'
 import { DesktopReminderRepository, desktopReminderTools } from '../modules/notifications/index.ts'
 import { SelfAwakeRepository, SelfAwakeContext, SelfAwakeBridgeRepository, SelfAwakeBridge, SelfAwakeService, SelfAwakeActions, SelfAwakeRoleSessions, selfAwakeTools } from '../modules/self-awake/index.ts'
@@ -22,7 +23,7 @@ import { PermissionService } from '../modules/permissions/index.ts'
 import { SessionRepository, SessionService } from '../modules/sessions/index.ts'
 import { pluginTools } from '../modules/plugins/index.ts'
 import type { ServerConfig } from './config.ts'
-import { WorkspaceService, workspaceTools } from '../modules/workspace/index.ts'
+import { WorkspaceService, workspaceTools, ExtensionDocuments } from '../modules/workspace/index.ts'
 import { SharedWorkspaceService, sharedWorkspaceTool, sharedLibraryFileTools } from '../modules/shared-workspace/index.ts'
 import { discoverSharedWorkspace } from '../modules/shared-workspace/discovery.ts'
 import { ModelService, ModelBindingRepository, ModelPricingRepository, LocalChildModels, ModelContextLimitRepository } from '../modules/models/index.ts'
@@ -67,7 +68,9 @@ export function createServices(database: EdenDatabase, config: ServerConfig, pro
   const connectorPermissions = new ConnectorPermissions(database, connectorCatalog, connectors)
   const voiceConfig = new VoiceConfigRepository(database)
   const marketRepository = new MarketRepository(database)
-  const pluginMarket = new MarketService(marketRepository, new PackagePreviewRepository(database, marketRepository), new InstalledPackageRepository(database, marketRepository), new PackageRecoveryRepository(database, config.dataRoot))
+  const installedPackages = new InstalledPackageRepository(database, marketRepository)
+  const packagePreviews = new PackagePreviewRepository(database, marketRepository, () => installedPackages.skillContributions())
+  const pluginMarket = new MarketService(marketRepository, packagePreviews, installedPackages, new PackageRecoveryRepository(database, config.dataRoot))
   connectorCatalog.attachComponentProvider(() => pluginMarket.installed.connectorSelectionPlans())
   const mcp = new McpLifecycle(pluginMarket.installed, config.externalCommandSandbox)
   const repository = new SessionRepository(database, config.origin)
@@ -119,7 +122,9 @@ export function createServices(database: EdenDatabase, config: ServerConfig, pro
     return root ? ['.agents/skills', '.edenagent/skills'].map(relative => path.join(root, relative)) : []
   }, true)
   const skills: SkillService = new SkillService(new SkillRepository(database, () => workspace.availableRoot(), () => pluginMarket.installed.skillContributions(),
-    () => ({ tools: sessions.toolCatalog().map(tool => tool.name), codeToolsAvailable: skills.codeToolsAvailable }), () => systemSkills.list(), () => projectSkills.list(), builtinSkillSnapshots), systemSkills, projectSkills, config.externalCommandSandbox)
+    sessionId => { const registry = capabilitySession(sessionId ?? '00000000-0000-4000-8000-000000000000', '00000000-0000-4000-8000-000000000000').registry()
+      return { tools: registry.tools.map(tool => tool.name), identities: registry.tools.map(tool => tool.identity!), conflicts: registry.conflicts, codeToolsAvailable: skills.codeToolsAvailable } },
+    () => systemSkills.list(), () => projectSkills.list(), builtinSkillSnapshots, undefined, () => pluginMarket.installed.skillContributionIssues()), systemSkills, projectSkills, config.externalCommandSandbox)
   const permissions = new PermissionService(database, repository.events, sessionId => {
     const environment = repository.read(sessionId).environment
     return !(environment && typeof environment === 'object' && !Array.isArray(environment)
@@ -135,13 +140,18 @@ export function createServices(database: EdenDatabase, config: ServerConfig, pro
     ...connectorDiscoveryTools(connectors, connectorCatalog, sessionId),
     ...connectorCapabilityTools(database, connectors, connectorCatalog, connectorLifecycle, permissions, sessionId, turnId),
     ...connectorEventTools(connectorEvents, permissions, sessionId, turnId),
+    ...connectorInstanceTools(connectors, connectorCatalog, connectorPermissions, repository, permissions, sessionId, turnId),
     ...mediaTools(media, permissions, sessionId, turnId),
     ...subagentTools(subagents, permissions, sessionId, turnId, actorId),
-    ...skillTools(sessionSkills(sessionId), permissions, sessionId, turnId, skillProfile(sessionId === '00000000-0000-4000-8000-000000000000' ? null : repository.read(sessionId).environment), () => capabilitySession(sessionId, turnId, actorId).registry().tools.map(tool => tool.name), {
+    ...skillTools(sessionSkills(sessionId), permissions, sessionId, turnId, skillProfile(sessionId === '00000000-0000-4000-8000-000000000000' ? null : repository.read(sessionId).environment), () => capabilitySession(sessionId, turnId, actorId).registry().tools, {
       load: (name, expected) => capabilitySession(sessionId, turnId, actorId).loadSkill(name, expected),
       unload: name => capabilitySession(sessionId, turnId, actorId).unloadSkill(name),
-    }),
+    }, () => capabilitySession(sessionId, turnId, actorId).registry().conflicts),
     ...connectorPluginTools(pluginMarket, permissions, sessionId, turnId, actorId),
+    ...packageTools(pluginMarket, permissions, sessionId, turnId, actorId, (id, signal) => mcp.waitForPackage(id, signal)),
+    ...pluginGrantTools(pluginMarket, permissions, sessionId, turnId),
+    connectorBuildTool(sessionWorkspace(sessionId), permissions, sessionId, turnId),
+    ...uiPluginTools(pluginMarket, permissions, sessionId, turnId, actorId, () => pluginUi.status(), mcp, id => pluginUi.diagnosticStatus(sessionId, id), () => sessionWorkspace(sessionId).availableRoot()),
     ...pluginTools(plugins, permissions, sessionId, turnId, actorId, sessionWorkspace(sessionId)), ...workspaceTools(sessionWorkspace(sessionId), permissions, sessionId, turnId, commands, subagentPolicy(database, sessionId)?.sandboxMode === 'workspace-write', actorId),
     ...desktopReminderTools(desktopReminders, permissions, sessionId, turnId),
     ...selfAwakeTools(selfAwakeRepository, jobs, permissions, selfAwakeContext, sessionId, turnId, actorId, selfAwakeRoleSessions),
@@ -193,10 +203,17 @@ export function createServices(database: EdenDatabase, config: ServerConfig, pro
   sessions.setDescendantStop(sessionId => subagents.stopChildren(sessionId))
   sessions.setEndCleanup(async sessionId => { await Promise.all([skills.releaseWorkspace(sessionId), desktop.release(sessionId)]) })
   sessions.toolCatalog()
+  const pluginUi = new PluginUiService(installedPackages, repository, sessions, permissions,
+    (sessionId, turnId) => capabilitySession(sessionId, turnId).registeredTools(),
+    sessionId => workspace.forSession(sessionId).selectionSnapshot(),
+    async (args, signal) => {
+      if (['call_mcp_tool', 'read_mcp_resource', 'list_mcp_capabilities'].includes(args.name) && typeof args.input.runtimeId === 'string')
+        await mcp.ensureReady(args.input.runtimeId, signal)
+    }, (action, input, context) => new ExtensionDocuments(workspace, permissions).access(action, input, context))
   const pluginHooks = new PluginHookService(new PluginHookRepository(database, jobs), pluginMarket.installed, sessions, jobs)
   const memoJobRecovery = new MemoJobRecovery(database, memos, memoNotifications, jobs, sessions, memoDeliveries)
-  const scheduler = new JobScheduler(jobs, { 'subagent.turn': job => subagents.dispatch(job), 'plugin.hook': job => pluginHooks.dispatch(job), self_awake: job => selfAwake.dispatch(job), 'memo.reminder': memoDispatcher(database, memos, memoNotifications, jobs, sessions, memoDeliveries), 'memo.reminder.redelivery': job => memoJobRecovery.dispatch(job) })
-  return { memoryModel, localMemory, video, desktop, browser, sharedWorkspace, memoJobRecovery, memoDelivery, commands, repository, mcpResults, mcp, connectorCredentials, connectorLifecycle, connectorPermissions, connectorEvents, connectors, connectorCatalog, media, realtimeVoice, speech, voice, voiceConfig, subagentLifecycle, subagents, packageAssets, pluginHooks, pluginMarket, skills, plugins, permissions, sessions, workspace, models, mon, directors, companion, questions, handoffs, blobs, attachments, memories, memos, memoNotifications, jobs, scheduler, selfAwake, selfAwakeActions, selfAwakeBridge, qqChannelBridge, desktopReminders, memoryExtractions }
+  const scheduler = new JobScheduler(jobs, { 'subagent.turn': job => subagents.dispatch(job), 'plugin.hook': job => pluginHooks.dispatch(job), self_awake: job => selfAwake.dispatch(job), 'connector.event': job => selfAwake.dispatch(job), 'memo.reminder': memoDispatcher(database, memos, memoNotifications, jobs, sessions, memoDeliveries), 'memo.reminder.redelivery': job => memoJobRecovery.dispatch(job) })
+  return { pluginUi, memoryModel, localMemory, video, desktop, browser, sharedWorkspace, memoJobRecovery, memoDelivery, commands, repository, mcpResults, mcp, connectorCredentials, connectorLifecycle, connectorPermissions, connectorEvents, connectors, connectorCatalog, media, realtimeVoice, speech, voice, voiceConfig, subagentLifecycle, subagents, packageAssets, pluginHooks, pluginMarket, skills, plugins, permissions, sessions, workspace, models, mon, directors, companion, questions, handoffs, blobs, attachments, memories, memos, memoNotifications, jobs, scheduler, selfAwake, selfAwakeActions, selfAwakeBridge, qqChannelBridge, desktopReminders, memoryExtractions }
 }
 
 function skillProfile(environment: unknown): string {

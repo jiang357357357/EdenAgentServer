@@ -1,5 +1,6 @@
 import { packageAssetFiles } from './asset-files.ts'
 import { connectorDescriptor } from './connector-descriptor.ts'
+import { packageUiModules } from './ui-modules.ts'
 import { z } from 'zod'
 const id = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,127}$/)
 const relative = z.string().min(1).max(1024).refine(value => !value.startsWith('/') && !/[\\:\x00-\x1f]/.test(value) && value.split('/').every(part => part !== '..' && part !== '.' && part !== ''), 'Package path must be relative')
@@ -25,6 +26,7 @@ export function packageManifest(raw: unknown, files: Map<string, Buffer>) {
   for (const item of manifest.components.runtimes) if (!files.has(item.manifest)) throw new Error('Runtime component manifest is missing')
   assertConnectorComponents(manifest, files)
   for (const item of manifest.components.ui) if (!files.has(item.entry)) throw new Error('UI component entry is missing')
+  packageUiModules({ manifest, files, revision: '' }, () => true)
   for (const item of manifest.components.hooks) if (!manifest.components.skills.some(skill => skill.id === item.skill)) throw new Error('Hook refers to an absent skill component')
   packageAssetFiles(manifest.assets, files)
   return manifest

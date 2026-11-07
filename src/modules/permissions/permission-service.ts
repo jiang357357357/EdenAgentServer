@@ -76,7 +76,7 @@ export class PermissionService {
     const request: PermissionRequest = { id: randomUUID(), sessionId: context.sessionId, turnId: context.turnId,
       operationId: `${context.turnId}:${context.callId}`, capability, resource, details, state: 'pending', createdAt: Date.now() }
     // QQ uses its own per-conversation mode; app grants do not cross channels.
-    if (qqChannel ? this.modeStore.allowsQq(context.sessionId, capability)
+    if (qqChannel ? this.modeStore.allowsQq(context.sessionId, capability, context.turnId)
       : this.modeStore.allows(capability) || this.repository.granted(request)) request.state = 'allowed'
     const event = this.repository.insert(request)
     if (request.state === 'allowed') { this.repository.events.publish(event); context.assertCurrent?.(); return request.id }
@@ -86,7 +86,8 @@ export class PermissionService {
       this.resolve(request.id, false, 'denied', false, message)
       throw Object.assign(new Error(`Permission unavailable in background run: ${capability}`), { toolOutcome: 'failed' })
     }
-    await new Promise<void>((resolve, reject) => {
+    context.onPermissionState?.('waiting')
+    try { await new Promise<void>((resolve, reject) => {
       const abort = () => {
         try { this.resolve(request.id, false, 'cancelled') }
         catch (error) { this.pending.delete(request.id); cleanup(); reject(error) }
@@ -104,7 +105,7 @@ export class PermissionService {
       context.signal.addEventListener('abort', abort, { once: true })
       this.repository.events.publish(event)
       if (context.signal.aborted && this.pending.has(request.id)) abort()
-    })
+    }) } finally { context.onPermissionState?.('resolved') }
     context.assertCurrent?.()
     return request.id
   }
@@ -115,8 +116,8 @@ export class PermissionService {
 
   qqMode(botQq: string, contactQq: string, groupQq?: string): PermissionMode { return this.modeStore.qqMode(botQq, contactQq, groupQq) }
 
-  setQqMode(botQq: string, contactQq: string, mode: PermissionMode, groupQq?: string): PermissionMode {
-    return this.modeStore.setQqMode(botQq, contactQq, mode, groupQq)
+  setQqMode(botQq: string, contactQq: string, mode: PermissionMode, groupQq?: string, expected?: PermissionMode): PermissionMode {
+    return this.modeStore.setQqMode(botQq, contactQq, mode, groupQq, expected)
   }
 
   list(sessionId?: string): PermissionRequest[] { return this.repository.list(sessionId) }

@@ -5,11 +5,12 @@ import { runHostModule } from '@eden/execution'
 import { jsonValue } from '@eden/api'
 import { writeProgram } from './write-program.ts'
 
-export async function writeWorkspaceFile(root: string, input: unknown, signal: AbortSignal) {
+export async function writeWorkspaceFile(root: string, input: unknown, signal: AbortSignal, approvedTarget?: string) {
   const moduleRoot = await mkdtemp(path.join(tmpdir(), 'eden-workspace-write-'))
   try {
     await writeFile(path.join(moduleRoot, 'index.mjs'), writeProgram, { mode: 0o600 })
-    const result = await runHostModule({ moduleRoot, readRoot: root, writableWorkspace: true, input, signal })
+    const result = await runHostModule({ moduleRoot, readRoot: root, writableWorkspace: true,
+      input: { request: input, approvedTarget }, signal })
     if (result.exitCode !== 0) throw new Error(result.stderr.slice(0, 2000) || 'Workspace write failed')
     return jsonValue.parse(JSON.parse(result.stdout).result)
   } finally { await rm(moduleRoot, { recursive: true, force: true }) }

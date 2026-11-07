@@ -2,6 +2,8 @@ import { recordFilter, ownRecord } from '../accounts/index.ts'
 import { SessionOwnership } from '../accounts/index.ts'
 import { JobRepository } from '../jobs/index.ts'
 import { scheduleMemo } from './scheduling.ts'
+import { readMemoCursor, writeMemoCursor } from './page-cursor.ts'
+import { memoPageRequestSchema, type MemoPageRequest } from '@eden/api'
 import { nextMemoOccurrence } from './repeat.ts'
 import { memoCreateSchema, memoPatchSchema, memoInfoSchema, memoIdSchema, memoIntegerSchema, memoListSchema } from '@eden/api'
 import type { MemoInput, MemoPatch, MemoInfo } from '@eden/api'
@@ -13,7 +15,7 @@ const pending = "status='active' AND COALESCE(snoozed_until,remind_at,due_at) IS
 export class MemoRepository {
   constructor(private readonly database: EdenDatabase, private readonly jobs = new JobRepository(database)) {}
 
-  create(value: MemoInput, operationKey?: string): MemoInfo {
+  create(value: MemoInput, operationKey?: string, originTurnId?: string): MemoInfo {
     const input = memoCreateSchema.parse(value)
     if (input.relatedSessionId) new SessionOwnership(this.database).assert(input.relatedSessionId)
     return this.database.transaction(() => {
@@ -29,6 +31,9 @@ export class MemoRepository {
           input.remindAt, input.dueAt, input.repeatRule, input.relatedSessionId, JSON.stringify(input.metadata), input.status === 'done' ? now : null, now, now, operationKey ?? null, input.snoozedUntil, JSON.stringify(input.delivery ?? { channel: 'auto' }))
       ownRecord(this.database, 'memo', Number(result.lastInsertRowid), input.relatedSessionId)
       const memo = this.read(Number(result.lastInsertRowid))
+      if (originTurnId && input.relatedSessionId) this.database.connection.prepare(`INSERT INTO qq_memo_origins
+        SELECT ?,session_id,operator_qq,origin_json FROM qq_group_inputs WHERE session_id=? AND turn_id=?`)
+        .run(memo.id, input.relatedSessionId, originTurnId)
       scheduleMemo(this.jobs, memo)
       return memo
     })
@@ -56,6 +61,18 @@ export class MemoRepository {
     const search = input.query?.trim() ?? ''
     return this.database.connection.prepare(`SELECT * FROM memos WHERE ${recordFilter(this.database, 'memo', 'id')} AND (?='' OR instr(lower(title),lower(?))>0 OR instr(lower(content),lower(?))>0)
       ORDER BY updated_at DESC,id DESC LIMIT ?`).all(search, search, search, input.limit).map(fromRow)
+  }
+
+  page(value: MemoPageRequest = {}) {
+    const input = memoPageRequestSchema.parse(value), search = input.query?.trim() ?? ''
+    const cursor = readMemoCursor(input.cursor, search)
+    const boundary = cursor ? 'AND (updated_at < ? OR (updated_at = ? AND id < ?))' : ''
+    const rows = this.database.connection.prepare(`SELECT * FROM memos WHERE ${recordFilter(this.database, 'memo', 'id')}
+      AND (?='' OR instr(lower(title),lower(?))>0 OR instr(lower(content),lower(?))>0) ${boundary}
+      ORDER BY updated_at DESC,id DESC LIMIT ?`).all(search, search, search,
+        ...cursor ? [cursor.updatedAt, cursor.updatedAt, cursor.id] : [], input.limit + 1)
+    const hasMore = rows.length > input.limit, items = rows.slice(0, input.limit).map(fromRow), last = items.at(-1)
+    return { items, hasMore, nextCursor: hasMore && last ? writeMemoCursor(last.updatedAt, last.id, search) : null }
   }
 
   update(id: number, patch: MemoPatch, expectedUpdatedAt?: number): MemoInfo {

@@ -1,6 +1,6 @@
 import os from 'node:os'
 import { open, readdir } from 'node:fs/promises'
-import { constants, mkdirSync, realpathSync } from 'node:fs'
+import { constants, mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import type { EdenDatabase } from '@eden/store'
@@ -9,6 +9,7 @@ import { workspaceRoot, workspaceFile } from './workspace-path.ts'
 import { WorkspaceMutationQueue } from './mutation-queue.ts'
 import { readWorkspacePage } from './workspace-read-page.ts'
 import { WorkspaceLocation, type WorkspaceInfo } from './workspace-location.ts'
+import { localFile, localFileTarget } from './local-file-target.ts'
 
 export interface WorkspaceSnapshot { root: string; revision: string }
 const mutations = new WorkspaceMutationQueue()
@@ -20,12 +21,13 @@ export class WorkspaceService {
   private resolutionKey: string
 
   async readForModel(scope: string, requested: string, offset = 0, limit = 65536) {
-    const root = this.root(), filename = workspaceFile(root, requested)
-    return readWorkspacePage(root, requested, offset, limit, hash => this.rememberHash(scope, filename, hash))
+    const filename = localFile(this.root(), requested)
+    return readWorkspacePage(path.dirname(filename), path.basename(filename), offset, limit,
+      hash => this.rememberHash(scope, filename, hash))
   }
 
   rememberWrite(scope: string, requested: string, content: string) {
-    this.rememberHash(scope, workspaceFile(this.root(), requested), createHash('sha256').update(content).digest('hex'))
+    this.rememberHash(scope, localFile(this.root(), requested), createHash('sha256').update(content).digest('hex'))
   }
 
   private rememberHash(scope: string, filename: string, hash: string): void {
@@ -36,15 +38,15 @@ export class WorkspaceService {
   }
 
   async writeSnapshot(scope: string, requested: string): Promise<string | null> {
+    const filename = localFileTarget(this.root(), requested)
     try {
-      const filename = workspaceFile(this.root(), requested)
       const known = this.modelReads.get(scope)?.get(filename)
       if (known) return known
-      const current = await this.read(requested)
+      const current = await this.read(filename)
       if (!current.sha256) throw new Error('File is too large to safely replace')
       return current.sha256
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return this.modelReads.get(scope)?.get(path.resolve(this.root(), requested)) ?? null
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return this.modelReads.get(scope)?.get(filename) ?? null
       throw error
     }
   }
@@ -98,6 +100,7 @@ export class WorkspaceService {
   snapshot(command = false): WorkspaceSnapshot {
     return { root: command ? this.commandRoot() : this.root(), revision: this.repository.revision() }
   }
+  selectionSnapshot() { return { path: this.info().path, revision: this.repository.revision() } }
 
   assertSnapshot(snapshot: WorkspaceSnapshot, command = false): void {
     const current = this.snapshot(command)
@@ -181,23 +184,14 @@ export class WorkspaceService {
     }, { path: root, kind: 'directory' })
   }
 
-  async mutateFile<T>(snapshot: WorkspaceSnapshot, requested: string, signal: AbortSignal, work: () => Promise<T>): Promise<T> {
+  async mutateFile<T>(snapshot: WorkspaceSnapshot, requested: string, signal: AbortSignal, work: () => Promise<T>,
+    approvedTarget = localFileTarget(snapshot.root, requested)): Promise<T> {
     this.assertSnapshot(snapshot)
-    const filename = this.writeTarget(snapshot.root, requested)
     return mutations.run(signal, async () => {
       this.assertSnapshot(snapshot)
-      if (this.writeTarget(snapshot.root, requested) !== filename) throw new Error('File target changed after permission request')
+      if (localFileTarget(snapshot.root, requested) !== approvedTarget) throw new Error('File target changed after permission request')
       return work()
-    }, { path: filename, kind: 'file' })
-  }
-
-  private writeTarget(root: string, requested: string): string {
-    try { return workspaceFile(root, requested) }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      const parent = workspaceFile(root, path.dirname(requested))
-      return path.join(realpathSync(parent), path.basename(requested))
-    }
+    }, { path: approvedTarget, kind: 'file' })
   }
 
   private clearReads(): void {
@@ -216,7 +210,7 @@ export class WorkspaceService {
 
   async read(requested: string) {
     const root = this.root()
-    const filename = workspaceFile(root, requested)
+    const filename = localFile(root, requested)
     const file = await open(filename, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
     try {
       const stat = await file.stat()

@@ -14,6 +14,7 @@ export class JobRepository {
     private readonly selfAwakeEnabled: () => boolean = () => true) {}
 
   canSelfAwake(): boolean { return this.selfAwakeEnabled() }
+  usesExternalSelfAwake(): boolean { return this.externalSelfAwake }
 
   schedule(value: JobSchedule): JobInfo { return this.database.transaction(() => this.scheduleInTransaction(value)) }
   byKey(key: string): JobInfo | undefined {
@@ -44,8 +45,8 @@ export class JobRepository {
   scheduleInTransaction(value: JobSchedule): JobInfo {
     this.owningTransaction()
     const input = jobScheduleSchema.parse(value)
-    if (input.kind === 'self_awake' && !input.sessionId) throw new Error('Self-awake requires a target session')
-    if (input.kind === 'self_awake') input.payload = wakePayload(input.payload)
+    if (['self_awake', 'connector.event'].includes(input.kind) && !input.sessionId) throw new Error('Self-awake requires a target session')
+    if (['self_awake', 'connector.event'].includes(input.kind)) input.payload = wakePayload(input.payload)
     if (input.sessionId) new SessionOwnership(this.database).assert(input.sessionId)
     normalizeWakeOwnership(this.database, input)
     const existing = this.database.connection.prepare('SELECT * FROM jobs WHERE operation_key=?').get(input.key)
@@ -103,10 +104,10 @@ export class JobRepository {
       const row = this.database.connection.prepare(`SELECT candidate.id FROM jobs candidate WHERE candidate.state='queued' AND candidate.due_at<=?
         AND (candidate.session_id IS NULL OR candidate.kind IN ('memo.reminder','memo.reminder.redelivery')
           OR EXISTS(SELECT 1 FROM sessions s WHERE s.id=candidate.session_id AND s.status='active'))
-        AND (candidate.kind!='self_awake' OR (?=1 AND (?=0 OR json_extract(candidate.payload_json,'$.scheduler')='monos')
+        AND (candidate.kind NOT IN ('self_awake','connector.event') OR (?=1 AND (candidate.kind='connector.event' OR ?=0 OR json_extract(candidate.payload_json,'$.scheduler')='monos')
           AND NOT EXISTS(SELECT 1 FROM jobs busy LEFT JOIN self_awake_runs r ON r.job_id=busy.id
             WHERE COALESCE(json_extract(busy.payload_json,'$.roleScope'),busy.session_id)
-              =COALESCE(json_extract(candidate.payload_json,'$.roleScope'),candidate.session_id) AND busy.kind='self_awake'
+              =COALESCE(json_extract(candidate.payload_json,'$.roleScope'),candidate.session_id) AND busy.kind IN ('self_awake','connector.event')
               AND (busy.state IN ('running','dispatched','unknown') OR r.state IN ('running','awaiting_action','action_running','action_interrupted')))))
         ORDER BY candidate.due_at,candidate.id LIMIT 1`).get(now, Number(this.canSelfAwake()), Number(this.externalSelfAwake))
       if (!row) return undefined

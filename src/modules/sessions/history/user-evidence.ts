@@ -37,6 +37,6 @@ export function hasNewUserContext(database: EdenDatabase, scope: Scope, after: n
 }
 export function isSelfAwakeInput(database: EdenDatabase, owner: { sessionId: string; turnId: string }) {
   return Boolean(database.connection.prepare(`SELECT 1 FROM inputs WHERE session_id=? AND turn_id=?
-    AND (json_extract(metadata_json,'$.job.kind')='self_awake' OR json_extract(metadata_json,'$.environment.sessionPurpose')='self_awake')`)
+    AND (json_extract(metadata_json,'$.job.kind') IN ('self_awake','connector.event') OR json_extract(metadata_json,'$.environment.sessionPurpose')='self_awake')`)
     .get(owner.sessionId, owner.turnId))
 }

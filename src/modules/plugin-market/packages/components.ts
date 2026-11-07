@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { createSkillSnapshot } from '../../skills/index.ts'
 import type { VerifiedPackage } from './verified-package.ts'
+import { uiDocument } from './ui-modules.ts'
 type Package = VerifiedPackage
 const cardSchema = z.object({
   schemaVersion: z.literal(1), cards: z.array(z.object({
@@ -10,9 +11,9 @@ const cardSchema = z.object({
 }).strict()
 export function packageUiCards(value: Package, enabled: (id: string, fallback: boolean) => boolean) {
   return value.manifest.components.ui.filter(component => enabled(component.id, component.enabledByDefault)).flatMap(component => {
-    const bytes = value.files.get(component.entry)
-    if (!bytes || bytes.length > 1024 * 1024) throw new Error('UI contribution document is absent or too large')
-    const document = cardSchema.parse(JSON.parse(bytes.toString('utf8'))), ids = new Set<string>()
+    const raw = uiDocument(value.files.get(component.entry))
+    if (raw.type === 'module') return []
+    const document = cardSchema.parse(raw), ids = new Set<string>()
     return document.cards.map(card => {
       if (ids.has(card.id)) throw new Error('Duplicate UI contribution ID')
       ids.add(card.id)

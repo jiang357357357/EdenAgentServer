@@ -14,7 +14,7 @@ const search = z.object({ query: z.string().min(1).max(200), path: z.string().ma
 
 export function workspaceReadTools(workspace: WorkspaceService, scope: string): RuntimeTool[] {
   return [
-    { name: 'read_file', revision: 'eden.workspace.read.v2', description: toolDescription('read_file'),
+    { name: 'read_file', revision: 'eden.workspace.read.v3', description: toolDescription('read_file'),
       parameters: toJson(z.toJSONSchema(read, { io: 'input' })) as Record<string, import('@eden/api').JsonValue>,
       async execute(raw, context) {
         const input = read.parse(raw)

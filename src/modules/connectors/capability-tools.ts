@@ -19,7 +19,7 @@ export function connectorCapabilityTools(database: EdenDatabase, connectors: Con
     parameters: toJson(z.toJSONSchema(inputSchema, { io: 'input' })) as Record<string, JsonValue>,
     async execute(raw, context) {
       const input = inputSchema.parse(raw), current = connectors.read(input.connectorId)
-      if (current.settings.boundSessionId !== sessionId) throw new Error('该连接器未绑定到当前会话')
+      if (!connectors.accessible(current.id, sessionId)) throw new Error('该连接器未授权当前会话使用')
       const descriptor = catalog.descriptor(current.connectorKey)
       const schema = descriptor.manifest[method === 'query' ? 'queries' : 'actions'][input.capability]
       if (!schema) throw new Error('连接器未声明该能力')
@@ -29,7 +29,7 @@ export function connectorCapabilityTools(database: EdenDatabase, connectors: Con
         { generation: current.generation, revision: descriptor.revision, payload })
       context.signal.throwIfAborted()
       const updated = connectors.read(current.id)
-      if (updated.generation !== current.generation || updated.settings.boundSessionId !== sessionId) throw new Error('连接器在审批期间发生变化，请重新提交')
+      if (updated.generation !== current.generation || !connectors.accessible(updated.id, sessionId)) throw new Error('连接器在审批期间发生变化，请重新提交')
       const operationId = `${turnId}:${context.callId}`, db = database.connection
       if (db.prepare('SELECT 1 FROM connector_operations WHERE id=?').get(operationId)) throw new Error('连接器操作已经存在；重试前请先检查其结果')
       db.prepare("INSERT INTO connector_operations VALUES(?,?,?,?,?,?,'running',NULL,NULL,?,?)")

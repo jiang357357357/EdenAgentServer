@@ -62,7 +62,7 @@ test('production cancellation interrupts the actor queue without marking cancell
     await setup.services.sessions.waitForIdle(setup.session.id)
     assert.equal(setup.services.sessions.faultCount(), 0)
     assert.equal(setup.second.requests.length, 0)
-    assert.equal(setup.db.connection.prepare('SELECT state FROM inputs').get()?.state, 'interrupted')
+    assert.equal(setup.db.connection.prepare('SELECT state FROM inputs').get()?.state, 'cancelled')
     assert.equal(setup.services.directors.list(setup.session.id)[0]?.status, 'failed')
   } finally { await setup.close() }
 })

@@ -8,8 +8,9 @@ import { callbacks, recordedModel } from '@eden/runtime-pi/testing'
 import { SystemSkillCatalog } from '../../../src/modules/skills/index.ts'
 import { capabilityFixture } from './fixture.ts'
 
-function system(request: Record<string, unknown>) {
-  return JSON.stringify((request.messages as { role: string; content: unknown }[]).filter(message => message.role === 'system'))
+function catalog(request: Record<string, unknown>) {
+  return JSON.stringify((request.messages as { role: string; content: unknown }[])
+    .filter(message => message.role === 'user' && JSON.stringify(message.content).includes('可用技能摘要：')).at(-1)?.content)
 }
 
 test('actual model requests receive summaries before reading, full instructions on demand, and an empty replacement after removal', async t => {
@@ -21,17 +22,17 @@ test('actual model requests receive summaries before reading, full instructions 
   const runtime = createRuntime({ sessionId: f.session.id, systemPrompt: '', model: model.config, tools: f.capabilities().registeredTools(),
     refreshTools: () => f.capabilities().registeredTools(), callbacks: callbacks().handlers })
   await runtime.prompt('读取回显流程。')
-  assert.match(system(model.requests[0]!), /echo-skill/)
-  assert.match(system(model.requests[0]!), /unavailable_workflow_tool/)
-  assert.doesNotMatch(system(model.requests[0]!), /PRIVATE_SKILL_BODY/)
+  assert.match(catalog(model.requests[0]!), /echo-skill/)
+  assert.match(catalog(model.requests[0]!), /unavailable_workflow_tool/)
+  assert.doesNotMatch(catalog(model.requests[0]!), /PRIVATE_SKILL_BODY/)
   assert.match(JSON.stringify(model.requests[1]!.messages), /echo-skill/)
   assert.match(JSON.stringify(model.requests[2]!.messages), /PRIVATE_SKILL_BODY/)
   assert.ok(!f.capabilities().tools().some(tool => tool.name === 'echo_skill'))
   assert.ok(!f.capabilities().tools().some(tool => tool.name === 'unavailable_workflow_tool'))
   f.skills.uninstall('echo-skill')
   await runtime.prompt('现在有哪些技能？')
-  assert.match(system(model.requests[3]!), /当前没有可供模型读取的技能条目/)
-  assert.doesNotMatch(system(model.requests[3]!), /echo-skill/)
+  assert.match(catalog(model.requests[3]!), /当前没有可供模型读取的技能条目/)
+  assert.doesNotMatch(catalog(model.requests[3]!), /echo-skill/)
 })
 
 test('catalog refresh failure stays visible through the capability selector', async t => {
@@ -42,9 +43,9 @@ test('catalog refresh failure stays visible through the capability selector', as
   const f = await capabilityFixture(':memory:', catalog); t.after(() => f.close())
   roots = [path.join(root, 'missing')]
   await assert.rejects(f.service.refresh(), /ENOENT/)
-  const hint = f.capabilities().tools().find(tool => tool.name === 'list_skills')!.promptHint!
+  const hint = f.capabilities().tools().find(tool => tool.name === 'list_skills')!.contextHint!.content
   assert.match(hint, /技能目录刷新失败/)
   assert.match(hint, /空目录不能证明没有安装技能/)
   roots = [root]; await f.service.refresh()
-  assert.doesNotMatch(f.capabilities().tools().find(tool => tool.name === 'list_skills')!.promptHint!, /刷新失败/)
+  assert.doesNotMatch(f.capabilities().tools().find(tool => tool.name === 'list_skills')!.contextHint!.content, /刷新失败/)
 })

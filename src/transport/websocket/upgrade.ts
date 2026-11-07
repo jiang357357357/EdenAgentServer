@@ -1,3 +1,4 @@
+import { pluginUiRoutes } from '../rpc/plugin-ui.routes.ts'
 import { AccountConnection, AccountAuthentication, withAccount } from "../../modules/accounts/index.ts"
 import { timingSafeEqual } from "node:crypto"
 import type { Server as HttpServer, IncomingMessage } from "node:http"
@@ -113,7 +114,8 @@ function connectRpc(client: WebSocket, config: ServerConfig, resolve: (token: st
       if (input.afterSeq !== undefined && BigInt(input.afterSeq) > latest) throw new Error("Session cursor is ahead of the durable history")
       return input.afterSeq ?? String(latest)
     }) : undefined
-    const handlers = { ...sessionRoutes(runtime.services.sessions, lifetime.signal), ...runtime.routes }
+    const handlers = { ...sessionRoutes(runtime.services.sessions, lifetime.signal), ...runtime.routes,
+      ...pluginUiRoutes(runtime.services.pluginUi, lifetime.signal) }
     const routes = Object.fromEntries(
       Object.entries(handlers).map(([method, handler]) => [
         method,
@@ -183,7 +185,8 @@ function connectRpc(client: WebSocket, config: ServerConfig, resolve: (token: st
       return
     }
     const independent = initialized && (priorityRequest(raw) ||
-      (typeof raw === "object" && raw !== null && "method" in raw && raw.method === "voice.tts.synthesize"))
+      (typeof raw === "object" && raw !== null && "method" in raw &&
+        (raw.method === "voice.tts.synthesize" || raw.method === 'plugin.ui.call')))
     if (++pendingCount > (independent ? 72 : 64)) {
       pendingCount--
       client.close(1008, "Request queue limit exceeded")

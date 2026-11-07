@@ -13,7 +13,8 @@ const skillReadSchema = z.object({ name: skillNameSchema }).strict()
 const skillFileSchema = skillReadSchema.extend({ path: z.string().min(1).max(1024) })
 
 function modelSkill(skill: ReturnType<SkillService['repository']['read']>) {
-  return { name: skill.name, description: skill.description, content: skill.content, tools: skill.tools, files: skill.files, available: skill.available, missingTools: skill.missingTools }
+  return { name: skill.name, description: skill.description, content: skill.content, tools: skill.tools, files: skill.files,
+    available: skill.available, missingTools: skill.missingTools, toolConflicts: skill.toolConflicts }
 }
 
 interface SkillSelection {
@@ -21,11 +22,14 @@ interface SkillSelection {
   unload(name: string): unknown
 }
 
-export function skillTools(service: SkillService, permissions: PermissionService, sessionId: string, turnId: string, profile = 'user_chat', availableTools?: () => readonly string[], selection?: SkillSelection): RuntimeTool[] {
+export function skillTools(service: SkillService, permissions: PermissionService, sessionId: string, turnId: string, profile = 'user_chat', availableTools?: () => readonly (RuntimeTool | string)[], selection?: SkillSelection,
+  availableConflicts?: () => readonly { name: string; identities: string[] }[]): RuntimeTool[] {
   const availability = (skill: ReturnType<SkillService['repository']['read']>) => {
     if (!availableTools) return skill
-    const names = availableTools()
-    return skillAvailability(skill, { tools: names, codeToolsAvailable: service.codeToolsAvailable && names.includes('run_skill_tool') })
+    const tools = availableTools(), names = tools.map(tool => typeof tool === 'string' ? tool : tool.name)
+    const identities = tools.every(tool => typeof tool !== 'string') ? tools.flatMap(tool => typeof tool !== 'string' && tool.identity ? [tool.identity] : []) : undefined
+    return skillAvailability(skill, { tools: names, ...(identities ? { identities } : {}), conflicts: availableConflicts?.() ?? [],
+      codeToolsAvailable: service.codeToolsAvailable && names.includes('run_skill_tool') })
   }
   const read = (input: z.infer<typeof skillReadSchema>) => {
     const skill = service.repository.read(input.name, true)
@@ -37,8 +41,8 @@ export function skillTools(service: SkillService, permissions: PermissionService
     { name: 'list_skills', description: toolDescription('list_skills'), schema: z.object({}).strict(),
       run: () => service.repository.list().filter(skill => skill.enabled && skill.modelInvocable && supportsSkillProfile(skill.profiles, profile))
         .map(skill => {
-          const { available, missingTools } = availability(skill)
-          return { name: skill.name, description: skill.description, available, missingTools }
+          const { available, missingTools, toolConflicts } = availability(skill)
+          return { name: skill.name, description: skill.description, available, missingTools, toolConflicts }
         }) },
     { name: 'read_skill', description: toolDescription('read_skill'), schema: skillReadSchema,
       run: (raw: unknown) => modelSkill(read(skillReadSchema.parse(raw))) },

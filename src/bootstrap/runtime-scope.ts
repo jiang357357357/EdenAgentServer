@@ -27,6 +27,7 @@ import { contractHandler } from "../transport/rpc/contract-handler.ts"
 import type { ServerConfig } from "./config.ts"
 import { acquireProcessLock } from "./process-lock.ts"
 import { pluginRoutes } from "../transport/rpc/plugin.routes.ts"
+import { pluginUiRoutes } from '../transport/rpc/plugin-ui.routes.ts'
 import { permissionRoutes } from "../transport/rpc/permission.routes.ts"
 import { workspaceRoutes } from "../transport/rpc/workspace.routes.ts"
 import { sharedWorkspaceRoutes } from "../transport/rpc/shared-workspace.routes.ts"
@@ -107,6 +108,7 @@ export async function openRuntime(config: ServerConfig) {
       services.subagentLifecycle.close(),
       services.packageAssets.close(),
       services.pluginMarket.close(),
+      services.pluginUi.close(),
       services.skills.close(),
       selfAwakeHttp.close(),
       qqChannelHttp.close(),
@@ -170,9 +172,10 @@ export async function openRuntime(config: ServerConfig) {
     ...jobRoutes(services.jobs, services.memoJobRecovery),
     ...questionRoutes(questions),
     ...pluginAssetRoutes(services.packageAssets),
-    ...pluginMarketRoutes(services.pluginMarket),
+    ...pluginMarketRoutes(services.pluginMarket, services.permissions),
     ...skillRoutes(services.skills, workspace),
-    ...pluginRoutes(plugins, services.pluginMarket.installed),
+    ...pluginRoutes(plugins, services.pluginMarket.installed, services.permissions),
+    ...pluginUiRoutes(services.pluginUi),
     ...permissionRoutes(permissions),
     ...workspaceRoutes(workspace, sessions),
     ...sharedWorkspaceRoutes(services.sharedWorkspace),

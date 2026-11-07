@@ -2,12 +2,19 @@ import { createHash } from 'node:crypto'
 import type { RuntimeTool } from '@eden/runtime-pi'
 
 export interface ToolBinding { id: string; name: string; revision: string }
+export interface ToolConflict { name: string; identities: string[] }
 
 export class ToolRegistry {
   readonly tools: RuntimeTool[]
+  readonly conflicts: ToolConflict[]
   constructor(tools: RuntimeTool[]) {
+    const grouped = new Map<string, RuntimeTool[]>()
+    for (const tool of tools) grouped.set(tool.name, [...grouped.get(tool.name) ?? [], tool])
+    this.conflicts = [...grouped.entries()].flatMap(([name, items]) => items.length > 1 && items.some(item => item.source === 'skill')
+      ? [{ name, identities: items.map(item => item.identity ?? `builtin:${item.name}`) }] : [])
+    const conflictingSkills = new Set(this.conflicts.flatMap(conflict => conflict.identities.filter(identity => identity.startsWith('skill:'))))
     const names = new Set<string>(), identities = new Set<string>()
-    this.tools = tools.map(tool => {
+    this.tools = tools.filter(tool => !conflictingSkills.has(tool.identity ?? '')).map(tool => {
       const identity = tool.identity ?? `builtin:${tool.name}`
       if (names.has(tool.name) || identities.has(identity)) throw new Error(`Conflicting tool: ${tool.name}`)
       if (tool.parameters.type !== 'object') throw new Error(`Tool "${tool.name}" parameters must have an object root`)

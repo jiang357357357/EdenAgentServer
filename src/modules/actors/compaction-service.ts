@@ -27,6 +27,7 @@ export class ActorCompactionService {
       try { return await work() } catch (error) { persistenceFailed = true; throw error }
     }
     const guarded: RuntimeCallbacks = {
+      ...(callbacks.diagnostic ? { diagnostic: callbacks.diagnostic } : {}),
       checkpoint: snapshot => guard(() => callbacks.checkpoint(snapshot)),
       event: (kind, payload, delivery) => guard(() => callbacks.event(kind, payload, delivery)),
       request: snapshot => guard(() => callbacks.request(snapshot)),

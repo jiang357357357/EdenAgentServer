@@ -13,3 +13,7 @@ src/ 为上游处理引擎；Eden 通过 TypeScript 内置工具管理输入、�
 Whisper tiny 模型源自 https://huggingface.co/Systran/faster-whisper-tiny，
 其原模型 MIT 许可见 WHISPER-LICENSE（https://github.com/openai/whisper/blob/main/LICENSE）。
 Eden 入口直接组装服务，按当前 OS 账户权限运行，包括管理员账户；不使用上游 CLI 的 root 拒绝策略。
+
+Eden 的本地补丁还包括：入口在引擎导入前初始化 stderr 结构化日志，保持 stdout
+仅用于 MCP；未预期异常日志补充有长度上限的异常消息，供宿主诊断读取，不改变
+上游工具的业务参数、任务归属或公开错误码。

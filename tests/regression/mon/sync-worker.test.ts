@@ -19,7 +19,7 @@ function fixture(context: TestContext) {
   context.mock.method(globalThis, 'fetch', () => { throw new Error('Network is forbidden in this test') })
   context.mock.method(MonClient.prototype, 'post', async (path: string, body: JsonValue) => {
     calls.push({ method: 'POST', path, body })
-    return path === '/api/agent/sessions/' ? { id: 17 } : { sync_status: 'synced' }
+    return new URL(path, 'http://core').pathname === '/api/agent/sessions/' ? { id: 17 } : { sync_status: 'synced' }
   })
   context.mock.method(MonClient.prototype, 'put', async (path: string, body: JsonValue) => {
     calls.push({ method: 'PUT', path, body })
@@ -107,7 +107,7 @@ test('failed delivery leaves the batch cursor unchanged and restart retries with
   let rejectSecond = true
   const deliveries: string[] = []
   context.mock.method(MonClient.prototype, 'post', async (path: string, body: JsonValue) => {
-    if (path === '/api/agent/sessions/') return { id: 17 }
+    if (new URL(path, 'http://core').pathname === '/api/agent/sessions/') return { id: 17 }
     const id = String((body as Record<string, JsonValue>).external_message_id)
     deliveries.push(id)
     if (id === 'second' && rejectSecond) throw new Error('fixture interrupted response')

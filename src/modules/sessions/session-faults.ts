@@ -1,5 +1,13 @@
-import { isRuntimePersistenceFailure } from '@eden/runtime-pi'
+import { isRuntimePersistenceFailure, isRuntimeCancellation } from '@eden/runtime-pi'
 import { safeLogText } from '../logging/index.ts'
+
+export function userCancelledExecution(error: unknown, signal: AbortSignal): boolean {
+  return signal.aborted && (error === signal.reason || isRuntimeCancellation(error))
+}
+
+export function explicitlyCancelledExecution(signal: AbortSignal, failure: unknown): boolean {
+  return isRuntimeCancellation(signal.reason) && failure === undefined
+}
 
 export function sessionFailureReason(error: unknown): string {
   let value = error, message = String(error)

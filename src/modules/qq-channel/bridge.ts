@@ -4,10 +4,11 @@ import type { MonServiceIdentity } from '@eden/integrations'
 import type { EdenDatabase } from '@eden/store'
 import type { SessionService } from '../sessions/index.ts'
 import type { PermissionService } from '../permissions/index.ts'
+import { QqPermissionModeConflict } from '../permissions/index.ts'
 import type { BlobService } from '../blobs/index.ts'
 import type { AttachmentService } from '../attachments/index.ts'
-import { attachmentRefsSchema, QQ_FILE_MAX_BYTES, QQ_FILE_MAX_BASE64_LENGTH,
-  QQ_FILE_MAX_ATTACHMENTS, QQ_FILE_MAX_INPUT_BYTES } from '@eden/api'
+import { attachmentRefsSchema, QQ_FILE_MAX_BYTES, QQ_FILE_MAX_BASE64_LENGTH, QQ_GROUP_CONTEXT_PROTOCOL, QQ_GROUP_CONTEXT_LEGACY_PROTOCOL,
+  QQ_FILE_MAX_ATTACHMENTS, QQ_FILE_MAX_INPUT_BYTES, replyLengthSchema } from '@eden/api'
 import { loadMonCatalog } from '../mon/index.ts'
 import type { MonBindingService } from '../mon/index.ts'
 import { z } from 'zod'
@@ -15,12 +16,15 @@ import { qqTurnStatus } from './reply-status.ts'
 import { QqPrivateSessionBindings } from './private-session.ts'
 import { resolveQqPermission } from './permission-bridge.ts'
 import { isGroupChannelInput, QqGroupBridge } from './group-bridge.ts'
+import { QqSharedBridge } from './shared-bridge.ts'
+import { qqSharedInput } from './turn-origin.ts'
 
 const qq = z.string().regex(/^\d{5,20}$/)
 const identity = { assistant_id: z.number().int().positive(), character_id: z.number().int().positive() }
 const submitInput = z.object({ schema_version: z.enum(['qq-turn.v2', 'qq-turn.v3']), user_id: z.string(), bot_qq: qq,
   contact_qq: qq, message_id: z.string().min(1).max(128), text: z.string().trim().min(1).max(4000),
-  attachments: attachmentRefsSchema.default([]), ...identity }).strict()
+  attachments: attachmentRefsSchema.default([]), reply_length: replyLengthSchema.default('medium'),
+  prompt_mode_enabled: z.boolean().default(false), ...identity }).strict()
 const fileInput = z.object({ user_id: z.string(), bot_qq: qq, contact_qq: qq, group_qq: qq.optional(),
   input_id: z.uuid(), blob_id: z.uuid() }).strict()
 const uploadInput = z.object({ user_id: z.string(), bot_qq: qq, contact_qq: qq,
@@ -36,18 +40,21 @@ const availabilityInput = z.object({ user_id: z.string().min(1), bot_qq: qq, con
 const approvalInput = z.object({ user_id: z.string(), bot_qq: qq, contact_qq: qq, group_qq: qq.optional(),
   request_id: z.uuid().optional(), decision: z.enum(['allow', 'deny']) }).strict()
 const permissionModeInput = z.object({ user_id: z.string(), bot_qq: qq, contact_qq: qq, group_qq: qq.optional(),
-  mode: z.enum(['restricted', 'full_access', 'takeover']).optional() }).strict()
+  mode: z.enum(['restricted', 'full_access', 'takeover']).optional(),
+  expected_mode: z.enum(['restricted', 'full_access', 'takeover']).optional() }).strict()
 
 export class QqChannelBridge {
   private tail: Promise<unknown> = Promise.resolve()
   private readonly abort = new AbortController()
   private readonly group: QqGroupBridge
+  private readonly shared: QqSharedBridge
   private readonly privateSessions: QqPrivateSessionBindings
   constructor(readonly identity: MonServiceIdentity, readonly database: EdenDatabase,
     private readonly sessions: SessionService, private readonly mon: MonBindingService,
     private readonly permissions: PermissionService, private readonly blobs: BlobService,
     private readonly attachments: AttachmentService) {
     this.group = new QqGroupBridge(identity, database, sessions, mon, this.abort.signal)
+    this.shared = new QqSharedBridge(identity, database, sessions, mon, this.abort.signal)
     this.privateSessions = new QqPrivateSessionBindings(identity, database, sessions, mon, this.abort.signal)
   }
 
@@ -102,7 +109,8 @@ export class QqChannelBridge {
   async file(raw: unknown): Promise<unknown> {
     const input = fileInput.parse(raw)
     if (input.user_id !== this.identity.userId) throw new Error('QQ channel owner mismatch')
-    const row = input.group_qq ? this.database.connection.prepare(`SELECT i.session_id,i.turn_id FROM inputs i
+    const row = input.group_qq ? qqSharedInput(this.database, input.input_id, input.bot_qq, input.group_qq, input.contact_qq)
+      ?? this.database.connection.prepare(`SELECT i.session_id,i.turn_id FROM inputs i
       JOIN qq_group_sessions q ON q.session_id=i.session_id
       WHERE i.id=? AND q.bot_qq=? AND q.group_qq=? AND q.operator_qq=?`)
       .get(input.input_id, input.bot_qq, input.group_qq, input.contact_qq)
@@ -125,7 +133,10 @@ export class QqChannelBridge {
     })
   }
 
-  async close(): Promise<void> { this.abort.abort(); await Promise.all([this.tail.catch(() => {}), this.group.close()]) }
+  async close(): Promise<void> { this.abort.abort(); await Promise.all([this.tail.catch(() => {}), this.group.close(), this.shared.close()]) }
+
+  ingestGroupHistory(raw: unknown): Promise<unknown> { return this.shared.ingest(raw) }
+  cancelGroupInput(raw: unknown): Promise<unknown> { return this.shared.cancel(raw) }
 
   consumeNonce(nonce: string): void {
     this.database.transaction(() => {
@@ -143,10 +154,15 @@ export class QqChannelBridge {
     const result = await loadMonCatalog(new MonClient(this.identity.coreBaseUrl, token), input.assistant_id, this.abort.signal)
     if (String(result.catalog.character.id) !== String(input.character_id)) throw new Error('QQ bound character does not match assistant')
     return { available: Boolean(result.binding), reason: result.binding ? null : 'NO_MODEL', qq_permission_protocol: 'conversation.v1',
+      // Keep the legacy single value for older Core clients; new clients negotiate the full list.
+      qq_group_context_protocol: QQ_GROUP_CONTEXT_LEGACY_PROTOCOL,
+      qq_group_context_protocols: [QQ_GROUP_CONTEXT_LEGACY_PROTOCOL, QQ_GROUP_CONTEXT_PROTOCOL],
+      qq_shared_history_protocol: 'qq-group-shared.v1',
       assistant_id: String(result.catalog.assistant.id) }
   }
 
   submit(raw: unknown): Promise<unknown> {
+    if (raw && typeof raw === 'object' && 'schema_version' in raw && raw.schema_version === 'qq-group-turn.v5') return this.shared.submit(raw)
     if (isGroupChannelInput(raw)) return this.group.submit(raw)
     const input = submitInput.parse(raw)
     if (input.user_id !== this.identity.userId) throw new Error('QQ channel owner mismatch')
@@ -186,8 +202,9 @@ export class QqChannelBridge {
         ? this.sessions.startWithAttachments(sessionId, input.text, refs, key, undefined, () => {
           this.database.connection.prepare(`DELETE FROM qq_channel_pending_files
             WHERE owner_id=? AND bot_qq=? AND contact_qq=?`).run(input.user_id, input.bot_qq, input.contact_qq)
-        })
-        : this.sessions.start(sessionId, input.text, key))
+        }, { reply_length: input.reply_length, prompt_mode_enabled: input.prompt_mode_enabled })
+        : this.sessions.start(sessionId, input.text, key, undefined, 'prompt',
+          { reply_length: input.reply_length, prompt_mode_enabled: input.prompt_mode_enabled }))
       return { accepted: true, session_id: sessionId, input_id: accepted.inputId, turn_id: accepted.turnId,
         status: accepted.state, expired_files: expiredCount }
     })
@@ -196,6 +213,8 @@ export class QqChannelBridge {
   }
 
   status(raw: unknown): unknown {
+    if (raw && typeof raw === 'object' && 'input_id' in raw && typeof raw.input_id === 'string'
+      && this.database.connection.prepare('SELECT 1 FROM qq_group_inputs WHERE input_id=?').get(raw.input_id)) return this.shared.status(raw)
     if (isGroupChannelInput(raw)) return this.group.status(raw)
     const input = statusInput.parse(raw)
     if (input.user_id !== this.identity.userId) throw new Error('QQ channel owner mismatch')
@@ -223,9 +242,13 @@ export class QqChannelBridge {
   permissionMode(raw: unknown): unknown {
     const input = permissionModeInput.parse(raw)
     if (input.user_id !== this.identity.userId) throw new Error('QQ channel owner mismatch')
-    const mode = input.mode === undefined
-      ? this.permissions.qqMode(input.bot_qq, input.contact_qq, input.group_qq)
-      : this.permissions.setQqMode(input.bot_qq, input.contact_qq, input.mode, input.group_qq)
-    return { mode }
+    try {
+      const mode = input.mode === undefined ? this.permissions.qqMode(input.bot_qq, input.contact_qq, input.group_qq)
+        : this.permissions.setQqMode(input.bot_qq, input.contact_qq, input.mode, input.group_qq, input.expected_mode)
+      return { mode }
+    } catch (error) {
+      if (!(error instanceof QqPermissionModeConflict)) throw error
+      return { mode: this.permissions.qqMode(input.bot_qq, input.contact_qq, input.group_qq), conflict: true }
+    }
   }
 }

@@ -3,9 +3,11 @@ import { sharedWorkspaceUsage } from './shared-workspace.ts'
 import { STICKER_GUIDE } from './stickers.ts'
 import { VIDEO_GUIDE } from './video.ts'
 import { CUA_SKILL_GUIDE, CUA_SKILL_TOOLS } from './cua-skill.ts'
+import { UI_PLUGIN_SKILL_GUIDE } from './ui-plugin-skill.ts'
 
 /** Instruction content only: execution schemas and permissions belong to their tools. */
 export const BUILTIN_SKILL_GUIDES = [
+  UI_PLUGIN_SKILL_GUIDE,
   {
     name: 'cua-computer-use', description: '用内置 Cua 操作本机 Windows 应用和已登录浏览器，按观察结果定位、输入并核验；相关剪贴板、录制和驱动配置按任务需要使用。',
     tools: CUA_SKILL_TOOLS, profiles: ['user_chat', 'subagent'], content: CUA_SKILL_GUIDE,
@@ -53,18 +55,20 @@ selector 可定位元素，waitMs 可等待短时间的异步绘制。截图来�
   },
   {
     name: 'eden-reminders', description: '查询备忘、创建定时提醒，核对时间与已有安排，避免重复提醒。',
-    tools: ['list_memos', 'create_reminder'], profiles: ['user_chat', 'self_awake', 'subagent'],
+    tools: ['list_memos', 'list_memos_page', 'create_reminder'], profiles: ['user_chat', 'self_awake', 'subagent'],
     content: `# 提醒与备忘
 先用 list_memos 核对相关安排。把用户要求转换为明确的提醒内容与触发时间，使用当前环境的时区；日期、对象或时区存在关键歧义时先确认。
 使用 create_reminder 创建提醒。提交前检查已有相同安排，避免因工具重试重复创建。delivery.channel 默认 auto，到点由角色选择可用且已授权的通信工具和表达方式；仅在用户明确指定渠道时设置 qq、email、device 或 app。不要因为提醒来自 QQ 或 App 就自行固定渠道。需要更改渠道时用 update_memo 的 patch.delivery。
 创建成功只代表提醒已登记，不代表未来已经送达。根据返回结果说明安排或失败原因。`,
   },
   {
-    name: 'eden-workspace', description: '在所选工作区阅读和修改文件、执行命令，保护已有改动并验证操作结果。',
-    tools: ['read_file', 'write_file', 'delete_file', 'rename_file', 'restore_file', 'exec_command'], profiles: ['user_chat', 'subagent'],
+    name: 'eden-workspace', description: '以所选工作区为基准阅读和修改本机文件、执行命令，支持绝对路径，保护已有改动并验证操作结果。',
+    tools: ['read_file', 'read_image', 'write_file', 'edit_file', 'delete_file', 'rename_file', 'restore_file', 'exec_command'], profiles: ['user_chat', 'subagent'],
     content: `# 工作区操作
 先确认当前已选择的工作区和任务范围，再阅读相关文件及项目说明。没有工作区时不要猜测路径或声称已访问项目。
 通过 read_file 理解现有内容，使用 write_file 修改必要部分，保留用户已有改动。命令操作使用 exec_command，并明确工作目录。
+read_file、write_file、edit_file 支持本机绝对路径，可操作任务涉及的工作区外文件；相对路径以当前工作区为基准。write_file 授权后自动创建缺失的多级父目录，不必先调用命令建目录，也无需为工作区外写入改用 exec_command。
+本地图片、截图和视频总表用 read_image 查看，图片会直接进入模型视觉输入；analyze_screen 和 capture_camera 分别用于屏幕、摄像头，不能据此判断没有图片文件读取能力。未实际看图时不要把亮度或切点统计当作画面验收。
 清理或重命名不超过 1 MiB 的普通文件使用 delete_file、rename_file；审批后先保留恢复副本，restore_file 通过 recoveryId 恢复原路径，不覆盖现有文件。不递归删除目录。
 先判断命令是否会覆盖文件、修改外部系统或产生其他副作用。工具返回失败时查看原因，不能凭发出调用就报告成功。
 按任务需要验证最终结果，报告实际完成内容与尚未验证的部分。`,
@@ -79,6 +83,7 @@ selector 可定位元素，waitMs 可等待短时间的异步绘制。截图来�
 需要接上聊天时，read_qq_messages 查看 QQ 最近十轮，read_recent_conversation 查看最新会话最近三轮。设备需先发现在线设备与声明能力，再选择消息卡片、短提示或合适的来电。
 一次选一个合适渠道；相同话题近期已发送且无新回复时留出空间，避免跨渠道追问。接受、送达、已读和回复是不同事实，结果未知先查询，明确失败后再判断是否换渠道。
 用户要求向自己的 QQ 发工作区文件时，使用 send_qq_file 的相对路径；App 会话也可使用，默认机器人与接收者由 Core 配置确定。不要改用要求公网 URL 的 upload_private_file，也不要猜测 bot_id、服务器文件路径或把文件内容塞进文字消息。
+send_qq_file 是内置工具，与 list_connectors 无关；连接器空列表不能证明无法发送。工作区外文件可先复制到工作区再发送，先检查文件大小和渠道状态，依据真实回执报告结果。
 邮件与设备当前没有回复正文读取接口，保留未知；设备命令可查询执行/接听状态。遵循用户的渠道与时段偏好。`,
   },
   {

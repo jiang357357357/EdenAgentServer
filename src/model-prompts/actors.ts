@@ -1,4 +1,5 @@
 import type { DirectorPlan, JsonValue } from '@eden/api'
+import { ATTACHMENT_INPUT_CONTEXT_PREFIX } from './runtime-context.ts'
 
 export { SESSION_SYSTEM_RULES as ACTOR_SYSTEM_RULES } from './session.ts'
 
@@ -17,10 +18,16 @@ export function projectActorTurnHistory(content: string, project: (history: Json
 /** The wrapper and director schema belong to the host; redact only the decoded payload. */
 export function projectActorTurnContent(content: string, project: (value: Record<string, JsonValue>) => JsonValue): string {
   if (!content.startsWith(ACTOR_TURN_PREFIX)) return content
-  const value = JSON.parse(content.slice(ACTOR_TURN_PREFIX.length)) as Record<string, JsonValue>
+  const source = content.slice(ACTOR_TURN_PREFIX.length)
+  // Host JSON escapes user newlines. Only the separately appended attachment
+  // wrapper contains this literal separator outside that JSON value.
+  const boundary = source.indexOf('\n\n' + ATTACHMENT_INPUT_CONTEXT_PREFIX)
+  const json = boundary < 0 ? source : source.slice(0, boundary)
+  const suffix = boundary < 0 ? '' : source.slice(boundary)
+  const value = JSON.parse(json) as Record<string, JsonValue>
   if (!value || typeof value !== 'object' || Array.isArray(value) || !Array.isArray(value.recentConversation)) {
     throw new Error('Stored actor instruction has invalid conversation history')
   }
   const next = project(value)
-  return JSON.stringify(next) === JSON.stringify(value) ? content : ACTOR_TURN_PREFIX + JSON.stringify(next)
+  return JSON.stringify(next) === JSON.stringify(value) ? content : ACTOR_TURN_PREFIX + JSON.stringify(next) + suffix
 }

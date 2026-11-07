@@ -25,7 +25,7 @@ test('generic invocation cannot evade a denied final skill and root-only names s
   const wrapper = f.capabilities().tools().find(tool => tool.name === 'run_skill_tool')!
   save(['echo_skill'])
   assert.throws(() => wrapper.resolveCall!({ name: 'echo-skill', tool: 'echo_skill', arguments: { text: 'blocked' } }), /不可用|excluded|unavailable/)
-  assert.doesNotMatch(f.capabilities().tools().find(tool => tool.name === 'list_tools')!.promptHint!, /skill:echo-skill:echo_skill|builtin:switch_assistant/)
+  assert.doesNotMatch(f.capabilities().tools().find(tool => tool.name === 'list_tools')!.contextHint!.content, /skill:echo-skill:echo_skill|builtin:switch_assistant/)
   assert.ok(!f.capabilities().tools().some(tool => tool.name === 'echo_skill'))
   const loaded = f.capabilities().loadSkill('echo-skill')
   assert.deepEqual(loaded.missingTools, ['echo_skill'])

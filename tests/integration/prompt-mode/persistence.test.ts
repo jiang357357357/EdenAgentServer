@@ -8,7 +8,7 @@ import { promptModeConfigSchema } from '@eden/api'
 import { withAccount } from '../../../src/modules/accounts/index.ts'
 import { PromptModeRepository } from '../../../src/modules/prompt-mode/index.ts'
 import { promptModeRoutes } from '../../../src/transport/rpc/prompt-mode.routes.ts'
-import { BUILTIN_PROMPT_MODE_TEMPLATE } from '../../../src/model-prompts/prompt-mode-v3.ts'
+import { BUILTIN_PROMPT_MODE_TEMPLATE, BUILTIN_PROMPT_MODE_VERSION, PROMPT_MODE_LEADING_LAYOUT } from '../../../src/model-prompts/prompt-mode-eden.ts'
 
 const account = (key: string) => ({ key, userId: key, coreBaseUrl: 'https://fixture.invalid' })
 const defaults = { enabled: false, updatedAt: 0 }
@@ -33,7 +33,8 @@ test('config survives restart and remains isolated by account and realm; stale s
     assert.deepEqual(withAccount(account('a'), () => new PromptModeRepository(local).get()), defaults)
     const snapshot = withAccount(account('a'), () => new PromptModeRepository(database).snapshot())
     assert.equal(snapshot.template, BUILTIN_PROMPT_MODE_TEMPLATE)
-    assert.equal(snapshot.templateVersion, 'v3')
+    assert.equal(snapshot.templateVersion, BUILTIN_PROMPT_MODE_VERSION)
+    assert.equal(snapshot.layoutVersion, PROMPT_MODE_LEADING_LAYOUT)
     const disabled = promptModeConfigSchema.parse(await withAccount(account('a'), () => routes['prompt.mode.update']({ enabled: false, expectedUpdatedAt: saved.updatedAt })))
     assert.equal(disabled.enabled, false)
     assert.ok(!Object.hasOwn(disabled, 'template'))
@@ -67,7 +68,7 @@ test('legacy stored custom templates are ignored for new turns and removed by th
         .run(JSON.stringify({ enabled: true, template: oldTemplate }))
       assert.deepEqual(repository.get(), { enabled: true, updatedAt: previous.updatedAt })
       assert.equal(repository.snapshot().template, BUILTIN_PROMPT_MODE_TEMPLATE)
-      assert.equal(repository.snapshot().templateVersion, 'v3')
+      assert.equal(repository.snapshot().templateVersion, BUILTIN_PROMPT_MODE_VERSION)
     }
     repository.update({ enabled: false, expectedUpdatedAt: previous.updatedAt })
     const stored = database.connection.prepare('SELECT value_json FROM runtime_settings').get()!

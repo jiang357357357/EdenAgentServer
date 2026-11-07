@@ -75,11 +75,11 @@ export class MonSessionProjection {
     db.prepare("UPDATE mon_projection_outbox SET state='running',error=NULL,updated_at=? WHERE id=?").run(Date.now(), key)
     try {
       signal.throwIfAborted()
-      const response = await client.post('/api/agent/sessions/', body, signal)
+      const response = await client.post('/api/agent/sessions/?response=minimal', body, signal)
       const remote = z.object({ id: z.union([z.number().int().positive().safe(), z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/)]) }).parse(response)
       const payload = body as Record<string, import('@eden/api').JsonValue>
       const metadata = payload.session_payload as Record<string, import('@eden/api').JsonValue>
-      await client.put(`/api/agent/sessions/${remote.id}/participants/`, { assistant_ids: metadata.participantAssistantIDs!, mode: 'companion' }, signal)
+      await client.put(`/api/agent/sessions/${remote.id}/participants/?response=minimal`, { assistant_ids: metadata.participantAssistantIDs!, mode: 'companion' }, signal)
       db.prepare("UPDATE mon_projection_outbox SET state='applied',remote_id=?,updated_at=? WHERE id=?").run(String(remote.id), Date.now(), key)
       return String(remote.id)
     } catch (error) {

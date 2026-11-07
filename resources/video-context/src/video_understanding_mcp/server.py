@@ -70,7 +70,9 @@ def _error(exc: VideoMCPError | ValidationError) -> ToolError:
 
 
 def _unexpected(exc: Exception) -> ToolError:
-    get_logger().error("tool_failed", exception_type=type(exc).__name__)
+    get_logger().error(
+        "tool_failed", exception_type=type(exc).__name__, exception_message=str(exc)[:2000]
+    )
     return _error(
         VideoMCPError(
             ErrorCode.INTERNAL_ERROR,

@@ -16,5 +16,5 @@ export function assertSessionChannel(sessionId: string | undefined, method: stri
 
 export function priorityRequest(raw: unknown): boolean {
   if (!raw || typeof raw !== 'object' || !('method' in raw)) return false
-  return raw.method === 'turn.cancel' || raw.method === 'voice.tts.cancel' || raw.method === 'subagent.cancel'
+  return raw.method === 'turn.cancel' || raw.method === 'voice.tts.cancel' || raw.method === 'subagent.cancel' || raw.method === 'plugin.ui.cancel'
 }

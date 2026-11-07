@@ -108,6 +108,17 @@ export class SelfAwakeRepository {
     })
   }
 
+  finishConnectorEvent(id: string): void {
+    this.database.transaction(() => {
+      const run = this.read(id)
+      if (run.status !== 'running') return
+      const row = this.database.connection.prepare('SELECT kind FROM jobs WHERE id=?').get(run.jobId)
+      if (row?.kind !== 'connector.event') throw new Error('Not a connector event run')
+      const now = Date.now()
+      this.database.connection.prepare("UPDATE self_awake_runs SET state='completed',decision_json=NULL,completed_at=?,updated_at=? WHERE id=? AND state='running'").run(now, now, id)
+    })
+  }
+
   read(id: string) {
     selfAwakeExecutionSchema.parse({ runId: id })
     const row = this.database.connection.prepare('SELECT * FROM self_awake_runs WHERE id=?').get(id)

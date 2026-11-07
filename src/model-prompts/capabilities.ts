@@ -5,21 +5,26 @@ export const CAPABILITY_DESCRIPTIONS = {
   unload_skill: '停用当前角色的技能加载记录，不卸载关联工具，也不删除历史中的技能说明。',
 } as const
 
+export const SKILL_DISCOVERY_INSTRUCTION = '技能目录见有来源的运行资料快照；摘要用于发现，操作步骤需读取完整技能说明。available=false 仅表示工具依赖不完整。'
+export const TOOL_DISCOVERY_INSTRUCTION = '工具摘要见运行资料快照，可能只展示部分条目。知道名称和参数可直接调用；需要参数用 load_tools，不确定有哪些工具用 list_tools，需要操作步骤用 load_skill。参数是否展开、当前页是否列出均不代表执行权限；权限由宿主判断。'
+
 export function capabilityHint(skills: readonly unknown[], stale: boolean): string {
   return '可用技能摘要：\n' + JSON.stringify(skills.slice(0, 96))
     + (skills.length === 0 ? '\n当前没有可供模型读取的技能条目；当前授权范围内已注册的工具仍可调用。' : '')
     + (skills.length > 96 ? `\n当前共 ${skills.length} 个技能，摘要仅展示前 96 个；使用 list_skills 获取完整目录。` : '')
-    + '\navailable=false 表示工具依赖不完整，技能说明仍可读取。摘要用于发现，操作步骤见完整说明。'
     + (stale ? '\n部分说明展示记录已过期，可通过 list_tools 查看当前定义并按需加载说明。' : '')
 }
 
 export const MCP_IMAGE_REFERENCE = '[图片内容见图片块]'
+export const EMPTY_CONNECTOR_NOTICE = '当前会话没有绑定自定义连接器。此列表不包含 QQ 等内置能力；需要发送 QQ 文件时，查询或调用 send_qq_file，并以渠道状态、授权和真实回执判断是否可发送。'
 
 export function toolDirectoryHint(tools: readonly { identity?: string; name: string; description: string }[]): string {
-  return '工具目录（尚未展开完整参数）：\n'
-    + JSON.stringify(tools.slice(0, 96).map(tool => ({ id: tool.identity ?? tool.name, name: tool.name,
+  const ordered = tools.toSorted((left, right) => {
+    const a = left.identity ?? left.name, b = right.identity ?? right.name
+    return a < b ? -1 : a > b ? 1 : 0
+  })
+  return '当前已注册的可用工具目录（摘要不表示参数展开状态）：\n'
+    + JSON.stringify(ordered.slice(0, 96).map(tool => ({ id: tool.identity ?? tool.name, name: tool.name,
       description: tool.description.split(/[。\n]/u)[0]!.slice(0, 120) })))
     + (tools.length > 96 ? `\n另有 ${tools.length - 96} 项，可用 list_tools 按任务关键词检索。` : '')
-    + '\n知道名称和参数就直接调用；需要参数用 load_tools，不确定有什么工具才用 list_tools。需要操作步骤时用 load_skill，已有说明够用就直接做。'
-    + '\n能力以当前目录和工具结果为准，权限以宿主审批为准。loaded 只表示参数说明已展开；未展开或未列在当前页不表示没有权限。'
 }

@@ -23,7 +23,7 @@ test('model tool and skill schemas omit internal snapshot parameters', async t =
   for (const name of ['load_tools', 'load_skill', 'read_skill_file', 'unload_skill', 'run_skill_tool']) {
     assert.doesNotMatch(JSON.stringify(tools.find(tool => tool.name === name)!.parameters), /revision|expectedContentHash|expectedWorkspaceRoot/i)
   }
-  const hint = f.capabilities().tools().find(tool => tool.name === 'list_skills')!.promptHint!
+  const hint = f.capabilities().tools().find(tool => tool.name === 'list_skills')!.contextHint!.content
   assert.doesNotMatch(hint, /[a-f0-9]{64}/)
 })
 
@@ -32,7 +32,7 @@ test('unloaded tools are discoverable from a live directory without loading skil
   f.setTools([{ ...fixtureTool('control_esp32_device'), description: '向设备发起电话。完整操作流程。' }])
   const scope = f.capabilities()
   const before = scope.tools()
-  const directory = before.find(tool => tool.name === 'list_tools')!.promptHint!
+  const directory = before.find(tool => tool.name === 'list_tools')!.contextHint!.content
   assert.match(directory, /builtin:control_esp32_device/)
   assert.match(directory, /向设备发起电话/)
   assert.doesNotMatch(directory, /完整操作流程/)
@@ -40,7 +40,7 @@ test('unloaded tools are discoverable from a live directory without loading skil
   assert.deepEqual(scope.loadTools([{ id: 'builtin:control_esp32_device' }]).failed, [])
   const after = scope.tools()
   assert.ok(after.some(tool => tool.name === 'control_esp32_device'))
-  assert.doesNotMatch(after.find(tool => tool.name === 'list_tools')!.promptHint!, /builtin:control_esp32_device/)
+  assert.equal(after.find(tool => tool.name === 'list_tools')!.contextHint!.content, directory)
   f.setTools([])
-  assert.doesNotMatch(scope.tools().find(tool => tool.name === 'list_tools')!.promptHint!, /builtin:control_esp32_device/)
+  assert.doesNotMatch(scope.tools().find(tool => tool.name === 'list_tools')!.contextHint!.content, /builtin:control_esp32_device/)
 })

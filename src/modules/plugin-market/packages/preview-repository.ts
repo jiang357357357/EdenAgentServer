@@ -5,12 +5,23 @@ import { packageManifest, componentSummary } from './manifest.ts'
 import { verifyPackageFiles } from './integrity.ts'
 import type { downloadMarketPackage } from './download.ts'
 import type { MarketRepository } from '../repository.ts'
+import { packageSkillSnapshots } from './components.ts'
+import { packageSkillWarnings } from './skill-conflicts.ts'
+import { packageRuntimeDescriptors } from './runtime-descriptors.ts'
 type Download = Omit<Awaited<ReturnType<typeof downloadMarketPackage>>, 'provenance'> & { provenance: Awaited<ReturnType<typeof downloadMarketPackage>>['provenance'] & { sourceType?: 'local'; sourceUri?: string } }
 export class PackagePreviewRepository {
-  constructor(private readonly database: EdenDatabase, private readonly market: MarketRepository) {}
+  constructor(private readonly database: EdenDatabase, private readonly market: MarketRepository,
+    private readonly activeSkills: () => Parameters<typeof packageSkillWarnings>[2] = () => []) {}
   save(download: Download) {
     const manifest = packageManifest(download.manifest, download.snapshot)
     assertPackageHostVersion(manifest.minHostVersion, manifest.maxHostVersion)
+    let warnings: string[] = []
+    try {
+      const skills = packageSkillSnapshots({ manifest, revision: download.revision, files: download.snapshot }, (_id, fallback) => fallback)
+      warnings = packageSkillWarnings(manifest.id, skills, this.activeSkills())
+    } catch (error) { warnings = [`插件技能预检失败：${error instanceof Error ? error.message : String(error)}`] }
+    try { packageRuntimeDescriptors({ manifest, revision: download.revision, files: download.snapshot }, () => true) }
+    catch (error) { warnings.push(`插件后台预检失败：${error instanceof Error ? error.message : String(error)}`) }
     const id = randomUUID(), expires = Date.now() + 15 * 60000
     this.database.transaction(() => {
       this.database.connection.prepare('DELETE FROM plugin_package_previews WHERE expires_at<?').run(Date.now())
@@ -22,7 +33,7 @@ export class PackagePreviewRepository {
     })
     return { previewID: id, id: manifest.id, name: manifest.name, description: manifest.description, version: manifest.version,
       revision: download.revision, verified: Boolean(download.keyId), sourceType: download.provenance.sourceType ?? 'marketplace', sourceUri: download.provenance.sourceUri ?? `market:${download.provenance.sourceId}/${manifest.id}@${manifest.version}#${download.revision}`,
-      components: componentSummary(manifest), permissions: manifest.permissions, expiresAt: expires }
+      components: componentSummary(manifest), permissions: manifest.permissions, expiresAt: expires, warnings }
   }
   read(id: string) {
     const row = this.database.connection.prepare('SELECT * FROM plugin_package_previews WHERE id=?').get(id)

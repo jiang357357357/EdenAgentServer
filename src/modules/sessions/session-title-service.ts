@@ -1,4 +1,5 @@
 import { completeTextIsolated as completeText, TextCompletionError } from '@eden/runtime-pi'
+import { runtimeDiagnosticLogger } from '../logging/index.ts'
 import type { RuntimeModel } from '@eden/runtime-pi'
 import type { SessionRepository } from './session-repository.ts'
 
@@ -61,6 +62,7 @@ export class SessionTitleService {
 
   private async generate(sessionId: string, turnId: string, userText: string, model: RuntimeModel, signal: AbortSignal): Promise<void> {
     const title = generatedSessionTitle(await completeText({
+      diagnostic: runtimeDiagnosticLogger({ operation: 'session.title' }),
       model: { ...model, maxTokens: Math.min(model.maxTokens, 64), reasoning: 'off' },
       systemPrompt: TITLE_PROMPT,
       text: JSON.stringify({ userMessage: Array.from(userText).slice(0, 4096).join('') }),

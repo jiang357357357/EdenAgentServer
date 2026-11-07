@@ -1,6 +1,7 @@
 import type { JsonValue, DurableEvent } from '@eden/api'
 
-export interface PermissionContext { sessionId: string; turnId: string; callId: string; signal: AbortSignal; assertCurrent?: () => void }
+export interface PermissionContext { sessionId: string; turnId: string; callId: string; signal: AbortSignal; assertCurrent?: () => void;
+  onPermissionState?: (state: 'waiting' | 'resolved') => void }
 export interface PermissionRequest {
   id: string; sessionId: string; turnId: string; operationId: string; capability: string
   resource: string; state: string; details: JsonValue; createdAt: number

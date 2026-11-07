@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { memoryKindSchema } from '@eden/api'
 import type { JsonValue } from '@eden/api'
 import { completeTextIsolated as completeText } from '@eden/runtime-pi'
+import { runtimeDiagnosticLogger } from '../logging/index.ts'
 import type { RuntimeModel } from '@eden/runtime-pi'
 import { memoryContent } from './content.ts'
 import { MEMORY_EXTRACTION_PROMPT } from '../../model-prompts/memory.ts'
@@ -49,6 +50,7 @@ export async function extractMemoryCandidates(request: MemoryExtractionRequest):
   request.signal.throwIfAborted()
   if (!request.userText.trim() || !request.assistantText.trim()) return []
   const text = await completeText({
+    diagnostic: runtimeDiagnosticLogger({ operation: 'memory.extraction' }),
     model: request.model, systemPrompt: MEMORY_EXTRACTION_PROMPT,
     text: JSON.stringify({ userMessage: Array.from(request.userText).slice(0, 6000).join(''), assistantReply: Array.from(request.assistantText).slice(0, 6000).join(''),
       assistantReplyStatus: 'unverified_character_report', actionEvidence: request.actionEvidence ?? [] }),

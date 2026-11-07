@@ -22,7 +22,11 @@ test('real host uses a reduced default catalog while retaining deferred capabili
   server.sessions.start(session.id, '查找插件开发能力')
   await server.sessions.waitForIdle(session.id)
   const system = JSON.stringify((model.requests[0]!.messages as { role: string; content: unknown }[]).filter(message => message.role === 'system'))
-  for (const name of ['eden-memory', 'eden-reminders', 'eden-workspace']) assert.equal(system.split(name).length - 1, 1)
+  const messages = JSON.stringify(model.requests[0]!.messages)
+  for (const name of ['eden-memory', 'eden-reminders', 'eden-workspace']) {
+    assert.equal(system.split(name).length - 1, 0, 'skill inventory belongs to the sourced runtime snapshot')
+    assert.equal(messages.split(name).length - 1, 1, 'the model still receives each enabled skill once')
+  }
   assert.doesNotMatch(system, /eden-self-awake/)
   assert.doesNotMatch(system, /保存新记忆前检查是否已有相同记录/)
   const all = server.sessions.toolCatalog()

@@ -5,9 +5,10 @@ import type { PermissionService } from '../permissions/index.ts'
 import type { MarketService } from './service.ts'
 import { toolDescription } from '../../model-prompts/tool-descriptions.ts'
 import { connectorPluginGuide } from '../../model-prompts/plugin-development.ts'
+import { activatePluginPackage } from './activation.ts'
 
 const request = z.object({ action: z.enum(['describe', 'inspect', 'install', 'enable', 'disable', 'list']), args: z.record(z.string(), z.unknown()) }).strict()
-const identity = z.object({ id: z.string().min(1).max(128) }).strict()
+const identity = z.object({ id: z.string().min(1).max(128), enableComponents: z.array(z.string().min(1).max(128)).max(128).optional() }).strict()
 
 export function connectorPluginTools(market: MarketService, permissions: PermissionService, sessionId: string, turnId: string, actorId?: string | number): RuntimeTool[] {
   const scope = JSON.stringify([sessionId, turnId, actorId ?? null])
@@ -19,6 +20,10 @@ export function connectorPluginTools(market: MarketService, permissions: Permiss
       if (input.action === 'describe') return connectorPluginGuide()
       if (input.action === 'list') return toJson(market.installed.list())
       if (input.action === 'install') return installCheckedConnector(market, permissions, scope, sessionId, turnId, input.args, context)
+      if (input.action === 'enable') {
+        const args = identity.parse(input.args)
+        return toJson(await activatePluginPackage(market, permissions, args.id, sessionId, turnId, context, args.enableComponents))
+      }
       await permissions.request({ ...context, sessionId, turnId }, `plugin.connector.${input.action}`, 'plugin-registry', toJson(input.args))
       context.signal.throwIfAborted()
       if (input.action === 'inspect') {
@@ -27,7 +32,7 @@ export function connectorPluginTools(market: MarketService, permissions: Permiss
         return toJson(preview)
       }
       const { id } = identity.parse(input.args)
-      return toJson(input.action === 'enable' ? market.installed.enable(id) : market.installed.disable(id))
+      return toJson(market.installed.disable(id))
     }
   }]
 }

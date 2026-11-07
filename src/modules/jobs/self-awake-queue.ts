@@ -18,6 +18,6 @@ export function recoverWakes(db: DatabaseSync, now: number): void {
 export function wakeBusy(db: DatabaseSync, sessionId: string): boolean {
   return Boolean(db.prepare(`SELECT 1 FROM jobs j LEFT JOIN self_awake_runs r ON r.job_id=j.id
     WHERE (j.session_id=? OR json_extract(j.payload_json,'$.roleScope')=(SELECT scope_key FROM self_awake_role_members WHERE session_id=?))
-      AND j.kind='self_awake' AND (j.state IN ('running','dispatched','unknown') OR
+      AND j.kind IN ('self_awake','connector.event') AND (j.state IN ('running','dispatched','unknown') OR
       r.state IN ('running','awaiting_action','action_running','action_interrupted')) LIMIT 1`).get(sessionId, sessionId))
 }

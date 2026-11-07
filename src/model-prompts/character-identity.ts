@@ -10,8 +10,9 @@ export function characterIdentity(participant: JsonValue): string {
   return typeof name === 'string' && name.trim() ? `你是${name.trim()}。` : ''
 }
 
-export function identityPrompt(identity: string, rules: string, context: JsonValue): string {
-  return `${identity ? identity + '\n\n' : ''}${rules}\n${JSON.stringify(context)}`
+export function identityPrompt(identity: string, rules: string, context: JsonValue, identityExtension = ''): string {
+  const prefix = [identity, identityExtension].filter(Boolean).join('\n\n')
+  return `${prefix ? prefix + '\n\n' : ''}${rules}\n${JSON.stringify(context)}`
 }
 
 /** Identity is already present as system prose; keep only descriptive fields in JSON. */

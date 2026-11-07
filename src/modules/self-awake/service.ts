@@ -8,6 +8,7 @@ import type { SessionService } from '../sessions/index.ts'
 import { SelfAwakeRepository } from './repository.ts'
 import { selfAwakePrompt, selfAwakeRequest } from './prompt.ts'
 import { SelfAwakeJobRecovery } from './job-recovery.ts'
+import { connectorEventPrompt } from '../../model-prompts/connectors.ts'
 
 export class SelfAwakeService {
   readonly recovery: SelfAwakeJobRecovery
@@ -45,7 +46,8 @@ export class SelfAwakeService {
       wakeSchedule: this.repository.wakeSchedule(job.sessionId), ...selfAwakeRequest(job, author, session.environment), ...(recovery ? { recovery } : {}) })
     const id = this.repository.begin(job, request, author)
     try {
-      this.sessions.submitJob(job.sessionId, selfAwakePrompt(request), job.id, job.kind, input => {
+      const prompt = job.kind === 'connector.event' ? connectorEventPrompt(request) : selfAwakePrompt(request)
+      this.sessions.submitJob(job.sessionId, prompt, job.id, job.kind, input => {
         this.repository.dispatchedInTransaction(id, input.inputId, input.turnId)
         this.jobs.completeInTransaction(job.id, input.inputId)
       }, topics.map(topic => topic.userText).join("\n"))
@@ -83,6 +85,7 @@ export class SelfAwakeService {
   private finishResult(result: ReturnType<SelfAwakeRepository['pendingResults']>[number]): void {
     const run = this.repository.read(result.id)
     if (result.state !== 'completed') { this.repository.fail(result.id, this.repository.inputFailure(run.sessionId, result.inputId, result.state)); return }
+    if (this.jobs.read(run.jobId).kind === 'connector.event') { this.repository.finishConnectorEvent(result.id); return }
     const text = this.repository.finalText(run.sessionId, result.turnId)
     if (!text.trim() && !run.diaries.length) { this.repository.fail(result.id, '自醒完成但没有日记正文'); return }
     this.repository.finish(result.id, text)

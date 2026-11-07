@@ -1,4 +1,6 @@
 export { WorkspaceService } from './workspace-service.ts'
+export { ExtensionDocuments } from './extension-documents.ts'
+export type { DocumentInvocation } from './extension-documents.ts'
 export type { WorkspaceSnapshot } from './workspace-service.ts'
 export { WorkspaceRepository } from './workspace-repository.ts'
 export { workspaceTools } from './workspace-tools.ts'

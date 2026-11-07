@@ -9,15 +9,19 @@ export function transientTurnInput(metadata: JsonValue | undefined): boolean {
   return metadataRecord(metadata).internalHandoff === true
 }
 
+export function isCompanionInput(input: SessionInput): boolean {
+  return Object.hasOwn(metadataRecord(input.metadata), 'companion')
+}
+
 /** A new diary round uses current conversation excerpts, not previous autonomous transcripts. */
 export function isStandaloneSelfAwakeTurn(input: SessionInput): boolean {
-  return input.kind !== 'compact' && metadataRecord(metadataRecord(input.metadata).job).kind === 'self_awake'
+  return input.kind !== 'compact' && ['self_awake', 'connector.event'].includes(String(metadataRecord(metadataRecord(input.metadata).job).kind))
 }
 
 export function turnRecallQuery(input: SessionInput): string {
   const metadata = metadataRecord(input.metadata)
   const job = metadataRecord(metadata.job)
-  if (job.kind !== 'self_awake') return input.text
+  if (!['self_awake', 'connector.event'].includes(String(job.kind))) return input.text
   return typeof metadata.recallQuery === 'string' ? metadata.recallQuery : ''
 }
 

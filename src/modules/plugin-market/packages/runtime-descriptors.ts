@@ -16,14 +16,14 @@ export function packageRuntimeDescriptors(value: Package, enabled: (id: string, 
     const raw: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
     const owner = { pluginId: value.manifest.id, revision: value.revision, componentId: component.id }
     if (component.kind === 'mcp_stdio') {
-      const descriptor = stdio.parse(raw)
+      const descriptor = parseDescriptor(stdio, raw, component.id, component.manifest)
       return {
         ...owner, kind: 'mcp_stdio' as const, descriptor,
         permission: { capability: 'process.execute', resource: descriptor.command, access: 'execute' }
       }
     }
     if (component.kind === 'mcp_http') {
-      const descriptor = http.parse(raw), url = new URL(descriptor.url)
+      const descriptor = parseDescriptor(http, raw, component.id, component.manifest), url = new URL(descriptor.url)
       if (url.username || url.password || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)))) {
         throw new Error('MCP HTTP descriptor requires HTTPS or loopback HTTP without embedded credentials or fragment')
       }
@@ -34,4 +34,10 @@ export function packageRuntimeDescriptors(value: Package, enabled: (id: string, 
     }
     throw new Error('Package native worker components require the official connector lifecycle')
   })
+}
+
+function parseDescriptor<T extends z.ZodType>(schema: T, raw: unknown, componentId: string, filename: string): z.output<T> {
+  const result = schema.safeParse(raw)
+  if (!result.success) throw new Error(`后台组件 ${componentId} 的 ${filename} 格式错误：${result.error.issues.map(issue => `${issue.path.join('.') || '根对象'} ${issue.message}`).join('; ')}`)
+  return result.data
 }

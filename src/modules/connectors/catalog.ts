@@ -1,6 +1,7 @@
 import type { InstalledPackageRepository } from '../plugin-market/index.ts'
 import { z } from 'zod'
 import { toJson } from '@eden/api'
+import { capabilityInput } from './capability-input.ts'
 export class ConnectorCatalog {
   private componentProvider?: () => ReturnType<InstalledPackageRepository['connectorSelectionPlans']>
   attachComponentProvider(provider: () => ReturnType<InstalledPackageRepository['connectorSelectionPlans']>) { this.componentProvider = provider }
@@ -22,9 +23,12 @@ export class ConnectorCatalog {
     throw new Error('Connector component is unavailable or its plugin authorization changed')
   }
 
-  assertEvent(key: string, eventType: string) {
+  assertEvent(key: string, eventType: string, payload: import('@eden/api').JsonValue) {
     const entry = this.descriptor(key)
     if (!Object.hasOwn(entry.manifest.events, eventType)) throw new Error('Connector event is not declared in its manifest')
+    const schema = entry.manifest.events[eventType]
+    // Older manifests use an empty or descriptive object; typed declarations enforce the supported schema vocabulary.
+    if (schema && typeof schema === 'object' && !Array.isArray(schema) && schema.type !== undefined) capabilityInput(schema).parse(payload)
   }
   validate(key: string, raw: unknown) {
     const entry = this.descriptor(key)
@@ -39,6 +43,9 @@ export class ConnectorCatalog {
         shape[name] = schema.optional()
       }
     }
+    // Routing belongs to the host, including for connectors created before these settings were introduced.
+    shape.boundSessionId = z.string().uuid().optional()
+    shape.selfAwakeOnEvent = z.boolean().optional()
     const value = z.object(shape).strict().parse(raw)
     const network = entry.manifest.network
     if (network?.kind === 'http' && value[network.setting.slice(9)] === undefined) value[network.setting.slice(9)] = network.fallback

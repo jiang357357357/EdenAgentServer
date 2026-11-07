@@ -10,6 +10,7 @@ import type { SessionRepository } from '../session-repository.ts'
 import { SignalRepository } from '../input/signal-repository.ts'
 import { attachmentMessage } from '../../attachments/index.ts'
 import { StreamCoalescer } from './stream-coalescer.ts'
+import { runtimeDiagnosticLogger } from '../../logging/index.ts'
 
 export interface RuntimeCallbackScope {
   checkpoint?: RuntimeCallbacks['checkpoint']
@@ -52,6 +53,7 @@ export function runtimeCallbacks(repository: SessionRepository, input: SessionIn
   const scoped = (payload: JsonValue): JsonValue => scope.actor ? { ...(payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : { value: payload }), actor: scope.actor } : payload
   const stream = new StreamCoalescer(append)
   return {
+    diagnostic: runtimeDiagnosticLogger({ origin: repository.origin, turnId: input.turnId, ...(scope.actor ? { actor: scope.actor } : {}) }),
     async checkpoint(snapshot) {
       stream.flush()
       try {

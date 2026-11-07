@@ -61,7 +61,7 @@ test('cancelling the second actor compaction preserves the first summary and the
     assert.equal(setup.sessions.faultCount(), 0)
     assert.match(JSON.stringify(setup.checkpoints.read(setup.session.id, 1)), /First compact summary/)
     assert.deepEqual(setup.checkpoints.read(setup.session.id, 2), before)
-    assert.equal(setup.db.connection.prepare("SELECT state FROM inputs WHERE kind='compact'").get()?.state, 'interrupted')
+    assert.equal(setup.db.connection.prepare("SELECT state FROM inputs WHERE kind='compact'").get()?.state, 'cancelled')
     const events = setup.repository.events.list(setup.session.id, '0', 1000)
     assert.equal(events.filter(event => event.kind === 'actor.compaction.completed').length, 1)
     assert.equal(events.filter(event => event.kind === 'actor.compaction.cancelled').length, 1)

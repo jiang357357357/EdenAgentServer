@@ -10,6 +10,7 @@ export interface SkillSnapshot {
   name: string; displayName: string; description: string; version: string; content: string
   modelInvocable: boolean; tools: string[]; profiles: string[]; permissions: string[]; defaultPrompt: string
   codeTools?: SkillCodeTool[]
+  discoveredSource?: string
   files: Record<string, string>; contentHash: string; totalBytes: number
 }
 export async function readLocalSnapshot(source: string, subpath: string): Promise<SkillSnapshot> {

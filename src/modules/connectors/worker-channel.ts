@@ -4,16 +4,17 @@ import { jsonValue } from '@eden/api'
 import type { JsonValue } from '@eden/api'
 import { encodeWorkerFrame, WorkerFrameReader, maxWorkerFrame } from './worker-frames.ts'
 const notification = z.object({ method: z.enum(['event.publish', 'worker.status', 'worker.log']), params: jsonValue.default(null) }).strict()
+const confirmedEvent = z.object({ id: z.string().regex(/^event:[0-9]{1,16}$/), method: z.literal('event.publish.confirmed'), params: jsonValue }).strict()
 const response = z.object({ id: z.number().int().positive().safe(), result: jsonValue.optional(),
   error: z.object({ code: z.string().max(256), message: z.string().max(4096), data: jsonValue.optional() }).strict().optional() }).strict()
-export class WorkerRemoteError extends Error { constructor(readonly code: string) { super(`Connector worker rejected request (${code})`) } }
+export class WorkerRemoteError extends Error { constructor(readonly code: string, message: string) { super(`Connector worker rejected request (${code}): ${message.slice(0, 1000)}`) } }
 export class WorkerChannel {
   private readonly reader = new WorkerFrameReader()
   private sequence = 0
   private failure: Error | undefined
   private readonly pending = new Map<number, { resolve(value: JsonValue): void; reject(error: Error): void; cleanup(): void }>()
   constructor(private readonly input: Writable, private readonly output: Readable,
-    private readonly notify: (method: string, params: JsonValue) => void, private readonly onFailure: (error: Error) => void) {
+    private readonly notify: (method: string, params: JsonValue) => JsonValue | undefined, private readonly onFailure: (error: Error) => void) {
     output.on('data', this.onData); output.on('end', this.onEnd); output.on('error', this.onError); input.on('error', this.onError)
   }
   request(method: 'initialize' | 'health' | 'query' | 'execute' | 'disconnect' | 'shutdown', params: JsonValue,
@@ -50,6 +51,14 @@ export class WorkerChannel {
   private receive(value: JsonValue) {
     if (this.failure) return
     if (value && typeof value === 'object' && !Array.isArray(value) && 'method' in value) {
+      if (value.method === 'event.publish.confirmed') {
+        const item = confirmedEvent.parse(value)
+        let answer: JsonValue
+        try { answer = { ack: item.id, result: this.notify(item.method, item.params) ?? null } }
+        catch { answer = { ack: item.id, error: 'Connector event outcome could not be confirmed; verify the declaration and retry using the same external ID and content' } }
+        this.input.write(encodeWorkerFrame(answer), error => { if (error) this.fail(new Error('Connector event acknowledgment write failed')) })
+        return
+      }
       const item = notification.parse(value); this.notify(item.method, item.params); return
     }
     const item = response.parse(value)
@@ -57,7 +66,7 @@ export class WorkerChannel {
     const waiter = this.pending.get(item.id)
     if (!waiter) throw new Error('Unknown connector response ID')
     this.pending.delete(item.id); waiter.cleanup()
-    if (item.error) waiter.reject(new WorkerRemoteError(item.error.code))
+    if (item.error) waiter.reject(new WorkerRemoteError(item.error.code, item.error.message))
     else waiter.resolve(item.result!)
   }
   private fail(error: Error) {

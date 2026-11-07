@@ -17,14 +17,16 @@ export class PackagePermissionRepository {
       if (seen.has(key)) throw new Error('Duplicate permission decision')
       seen.add(key)
     }
-    this.database.transaction(() => {
+    const write = () => {
       const now = Date.now()
       for (const decision of decisions) this.database.connection.prepare(`INSERT INTO plugin_package_grants VALUES(?,?,?,?,?,?,?)
         ON CONFLICT(id,revision,capability,resource,access) DO UPDATE SET decision=excluded.decision,updated_at=excluded.updated_at`)
         .run(id, revision, decision.capability, decision.resource, decision.access, decision.decision, now)
       recordRecoveredPermissionDecisions(this.database, id, revision, decisions, now)
       if (decisions.some(decision => decision.decision === 'denied')) this.database.connection.prepare('UPDATE plugin_package_selection SET enabled=0 WHERE id=? AND revision=?').run(id, revision)
-    })
+    }
+    if (this.database.inTransaction) write()
+    else this.database.transaction(write)
     return this.list(id, revision)
   }
   require(id: string, revision: string, declarations: Declaration[]) {

@@ -5,7 +5,8 @@ import { toJson } from '@eden/api'
 import type { JsonValue } from '@eden/api'
 import { sourceSchema, sourceIdSchema, keySchema } from '../../modules/plugin-market/index.ts'
 import type { MarketService } from '../../modules/plugin-market/index.ts'
-export function pluginMarketRoutes(service: MarketService): Record<string, (input: JsonValue) => JsonValue | Promise<JsonValue>> {
+import type { PermissionService } from '../../modules/permissions/index.ts'
+export function pluginMarketRoutes(service: MarketService, permissions?: PermissionService): Record<string, (input: JsonValue) => JsonValue | Promise<JsonValue>> {
   const repo = service.repository
   const handlers: Record<string, (input: JsonValue) => JsonValue | Promise<JsonValue>> = {
     'plugin.recovery.permissions': raw => {
@@ -26,7 +27,13 @@ export function pluginMarketRoutes(service: MarketService): Record<string, (inpu
       if (input.requireVerified && !preview.keyId) throw new Error('Installation requires a signature from a trusted key')
       return toJson(service.installed.install(preview, input.activate, input.enabled))
     },
-    'plugin.component.set': raw => { const input = z.object({ id: z.string(), revision: z.string().regex(/^[a-f0-9]{64}$/), componentId: z.string(), enabled: z.boolean() }).strict().parse(raw); return toJson(service.installed.setComponent(input.id, input.revision, input.componentId, input.enabled)) },
+    'plugin.component.set': raw => {
+      const input = z.object({ id: z.string(), revision: z.string().regex(/^[a-f0-9]{64}$/), componentId: z.string(), enabled: z.boolean() }).strict().parse(raw)
+      const current = service.installed.read(input.id), mode = permissions?.mode()
+      if (input.enabled && current.enabled && current.revision === input.revision && (mode === 'full_access' || mode === 'takeover'))
+        return toJson(service.installed.applyActivation(service.installed.activationPlan(input.id, [input.componentId])))
+      return toJson(service.installed.setComponent(input.id, input.revision, input.componentId, input.enabled))
+    },
     'plugin.package.select': raw => { const input = z.object({ id: z.string(), revision: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(raw); return toJson(service.installed.select(input.id, input.revision)) },
     'plugin.market.inspect': async raw => { const input = z.object({ sourceID: z.string().min(1), pluginID: z.string().min(1), version: z.string().min(1) }).strict().parse(raw); return toJson(await service.inspect(input.sourceID, input.pluginID, input.version)) },
     'plugin.preview.discard': raw => { const input = z.object({ previewID: z.uuid() }).strict().parse(raw); return toJson(service.previews.discard(input.previewID)) },

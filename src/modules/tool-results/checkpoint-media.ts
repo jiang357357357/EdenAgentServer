@@ -3,8 +3,9 @@ import { validCheckpointImage } from '@eden/runtime-pi'
 
 const object = (value: JsonValue | undefined): Record<string, JsonValue> | undefined =>
   value && typeof value === 'object' && !Array.isArray(value) ? value : undefined
-const mcpTool = (name: unknown) => typeof name === 'string'
-  && (name.startsWith('mcp__') || ['call_mcp_tool', 'read_mcp_resource'].includes(name.replace(/^eden_/, '')))
+const imageReceiptTool = (name: unknown) => typeof name === 'string'
+  && (name.startsWith('mcp__') || ['call_mcp_tool', 'read_mcp_resource', 'read_image', 'get_video_frames',
+    'get_video_frame_previews'].includes(name.replace(/^eden_/, '')))
 
 function receiptImages(value: JsonValue | undefined): JsonValue[] {
   const raw = object(value)
@@ -26,7 +27,7 @@ export function recoverCheckpointMedia(checkpoint: RuntimeCheckpoint, receipts: 
   const key = (message: Record<string, JsonValue>) => JSON.stringify([message.toolName, message.toolCallId])
   for (const receipt of receipts) {
     const message = object(object(receipt)?.message)
-    if (!message || !mcpTool(message.toolName) || typeof message.toolCallId !== 'string') continue
+    if (!message || !imageReceiptTool(message.toolName) || typeof message.toolCallId !== 'string') continue
     const id = key(message)
     originals.set(id, originals.has(id) ? null : receiptImages(message.details))
   }
@@ -35,7 +36,7 @@ export function recoverCheckpointMedia(checkpoint: RuntimeCheckpoint, receipts: 
     const fields = object(value)
     if (!fields) return value
     let next = fields
-    if (fields.role === 'toolResult' && mcpTool(fields.toolName) && Array.isArray(fields.content)) {
+    if (fields.role === 'toolResult' && imageReceiptTool(fields.toolName) && Array.isArray(fields.content)) {
       const images = fields.content.filter(item => object(item)?.type === 'image')
       const source = originals.get(key(fields))
       if (source?.length === images.length && images.length) {

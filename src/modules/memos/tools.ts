@@ -16,6 +16,7 @@ export function memoTools(repository: MemoRepository, permissions: PermissionSer
     async execute(raw, context) {
       context.signal.throwIfAborted()
       const input = schemas[name].parse(raw)
+      if (name === 'list_memos_page') return toJson(repository.page(schemas.list_memos_page.parse(input)))
       if (name === 'list_memos') {
         const value = schemas.list_memos.parse(input)
         return toJson(repository.list(value.limit, value.query))
@@ -33,15 +34,15 @@ export function memoTools(repository: MemoRepository, permissions: PermissionSer
       await permissions.request({ ...context, sessionId, turnId }, 'memo.write', String(previous?.id ?? 'new'),
         toJson({ action: name, input, previous: previous ?? null }))
       context.signal.throwIfAborted()
-      return toJson(mutate(repository, name, input, previous, sessionId, `${sessionId}:${turnId}:${context.callId}`))
+      return toJson(mutate(repository, name, input, previous, sessionId, `${sessionId}:${turnId}:${context.callId}`, turnId))
     },
   }))
 }
 
-function mutate(repository: MemoRepository, name: MemoToolName, input: unknown, previous: MemoInfo | undefined, sessionId: string, operationKey: string): MemoInfo {
+function mutate(repository: MemoRepository, name: MemoToolName, input: unknown, previous: MemoInfo | undefined, sessionId: string, operationKey: string, turnId: string): MemoInfo {
   if (name === 'create_memo' || name === 'create_reminder') {
     const value = schemas.create_memo.parse(input)
-    return repository.create(memoCreateSchema.parse({ ...value, relatedSessionId: sessionId, ...(name === 'create_reminder' ? { kind: 'reminder' } : {}) }), operationKey)
+    return repository.create(memoCreateSchema.parse({ ...value, relatedSessionId: sessionId, ...(name === 'create_reminder' ? { kind: 'reminder' } : {}) }), operationKey, turnId)
   }
   if (!previous) throw new Error('修改备忘需要一个现有备忘')
   if (name === 'snooze_memo') {

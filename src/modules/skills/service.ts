@@ -38,7 +38,7 @@ export class SkillService {
     this.workspaces.delete(scopeKey)
     await service?.close()
   }
-  status() { return { error: this.refreshFailure ?? null, refreshing: Boolean(this.refreshing), codeToolsAvailable: this.codeToolsAvailable } }
+  status() { return { error: this.refreshFailure ?? null, refreshing: Boolean(this.refreshing), codeToolsAvailable: this.codeToolsAvailable, pluginIssues: this.repository.issues() } }
   get catalogError() { return this.refreshFailure }
   refresh(): Promise<void> {
     if (this.refreshing) return this.refreshing

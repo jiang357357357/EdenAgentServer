@@ -21,11 +21,12 @@ export function fixtureManifest(permissions: ConnectorManifest['permissions'] = 
     entrypoints: { node: { path: 'worker.mjs', args: [] } }, permissions,
     settingsSchema: { type: 'object', properties: { file: { type: 'string' } }, additionalProperties: false }, events: { changed: {} }, queries: { echo: {}, read: {} }, actions: { publish: {} } }
 }
-export async function connectorFixture(t: TestContext, permissions: ConnectorManifest['permissions'] = []) {
+export async function connectorFixture(t: TestContext, permissions: ConnectorManifest['permissions'] = [], source = fixtureSource,
+  options: { persistent?: boolean; eventSchema?: Record<string, unknown>; capabilities?: { events?: Record<string, unknown>; queries?: Record<string, unknown>; actions?: Record<string, unknown> } } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'eden-generic-connector-'))
   const dataRoot = path.join(root, 'private', 'realms', 'local', 'v2'), packageRoot = path.join(root, 'package')
   await mkdir(dataRoot, { recursive: true }); await mkdir(packageRoot)
-  const database = new EdenDatabase(':memory:', 'local'), marketRepository = new MarketRepository(database)
+  const database = new EdenDatabase(options.persistent ? path.join(dataRoot, 'fixture.sqlite') : ':memory:', 'local'), marketRepository = new MarketRepository(database)
   const market = new MarketService(marketRepository, new PackagePreviewRepository(database, marketRepository), new InstalledPackageRepository(database, marketRepository))
   const catalog = new ConnectorCatalog(); catalog.attachComponentProvider(() => market.installed.connectorSelectionPlans())
   const connectors = new ConnectorRepository(database, catalog), grants = new ConnectorPermissions(database, catalog, connectors)
@@ -33,9 +34,12 @@ export async function connectorFixture(t: TestContext, permissions: ConnectorMan
   const events = new ConnectorEventRepository(new SessionRepository(database, 'local'), connectors, catalog, new JobRepository(database))
   const cleanup: (() => Promise<unknown>)[] = []
   t.after(async () => { for (const close of cleanup) await close(); await market.close(); database.close(); await rm(root, { recursive: true, force: true }) })
-  const bundled = await build({ stdin: { contents: fixtureSource, resolveDir: process.cwd(), loader: 'ts' }, bundle: true, platform: 'node', format: 'esm', target: 'node22', write: false })
+  const bundled = await build({ stdin: { contents: source, resolveDir: process.cwd(), loader: 'ts' }, bundle: true, platform: 'node', format: 'esm', target: 'node22', write: false })
   await writeFile(path.join(packageRoot, 'worker.mjs'), bundled.outputFiles[0]!.contents)
-  await writeFile(path.join(packageRoot, 'connector.json'), JSON.stringify(fixtureManifest(permissions)))
+  const manifest = fixtureManifest(permissions)
+  if (options.eventSchema) manifest.events.changed = options.eventSchema
+  if (options.capabilities) Object.assign(manifest, options.capabilities)
+  await writeFile(path.join(packageRoot, 'connector.json'), JSON.stringify(manifest))
   await writeFile(path.join(packageRoot, 'plugin.json'), JSON.stringify({ schemaVersion: 1, id: 'custom.weather', name: 'Weather', description: 'Fixture', version: '1.0.0',
     components: { runtimes: [{ id: 'weather', kind: 'connector', manifest: 'connector.json' }] }, permissions }))
   const preview = await market.inspectLocal(packageRoot)

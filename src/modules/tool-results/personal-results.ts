@@ -10,9 +10,10 @@ export const memoResult: ModelResult = (value, _input, hidden) => {
   if (value === null) return null
   if (Array.isArray(value)) return value.map(item => memoResult(item, undefined, hidden))
   const row = resultObject(value)
+  if (Array.isArray(row.items)) return { ...fields(row, ['nextCursor', 'hasMore']), items: row.items.map(item => memoResult(item, undefined, hidden)) }
   if (Object.hasOwn(row, 'memo')) return { ...fields(row, ['nextWakeAt']), memo: memoResult(row.memo!, undefined, hidden) }
   return fields(row, ['id', 'title', 'content', 'kind', 'status', 'priority', 'remindAt', 'dueAt', 'snoozedUntil',
-    'repeatRule', 'lastTriggeredAt', 'completedAt', 'createdAt', 'updatedAt'], hidden, ['relatedSessionId'])
+    'repeatRule', 'lastTriggeredAt', 'completedAt', 'createdAt', 'updatedAt', 'delivery'], hidden, ['relatedSessionId'])
 }
 
 export const attachmentResult: ModelResult = (value, _input, hidden) => {

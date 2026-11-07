@@ -1,4 +1,4 @@
-import { accountFilter } from '../accounts/index.ts'
+import { accountFilter, SessionOwnership } from '../accounts/index.ts'
 import { randomUUID } from 'node:crypto'
 import { connectorCreateSchema, connectorUpdateSchema, connectorHistorySchema, toJson } from '@eden/api'
 import type { EdenDatabase } from '@eden/store'
@@ -13,6 +13,26 @@ export class ConnectorRepository {
       lastError: row.last_error === null ? null : String(row.last_error), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) }
   }
   list() { return this.database.connection.prepare('SELECT id FROM connectors ORDER BY created_at,id').all().map(row => this.read(String(row.id))) }
+  accessible(id: string, sessionId: string): boolean {
+    new SessionOwnership(this.database).assert(sessionId)
+    const connector = this.read(id), owner = connector.settings.boundSessionId
+    if (owner === sessionId) return true
+    if (typeof owner !== 'string') return false
+    const ownership = new SessionOwnership(this.database)
+    const ownerAccount = ownership.owner(owner), targetAccount = ownership.owner(sessionId)
+    if (ownerAccount !== targetAccount || (this.isMon() && !ownerAccount)) return false
+    return Boolean(this.database.connection.prepare('SELECT 1 FROM connector_session_shares WHERE connector_id=? AND session_id=?').get(id, sessionId))
+  }
+  share(id: string, ownerSessionId: string, targetSessionId: string, enabled: boolean): void {
+    const connector = this.read(id), ownership = new SessionOwnership(this.database)
+    ownership.assert(ownerSessionId); ownership.assert(targetSessionId)
+    if (connector.settings.boundSessionId !== ownerSessionId || ownerSessionId === targetSessionId) throw new Error('Only the owning session can change sharing')
+    const owner = ownership.owner(ownerSessionId), target = ownership.owner(targetSessionId)
+    if (owner !== target || (this.isMon() && !owner)) throw new Error('Connector sharing requires the same account')
+    if (enabled) this.database.connection.prepare('INSERT OR IGNORE INTO connector_session_shares VALUES(?,?,?)').run(id, targetSessionId, Date.now())
+    else this.database.connection.prepare('DELETE FROM connector_session_shares WHERE connector_id=? AND session_id=?').run(id, targetSessionId)
+  }
+  private isMon(): boolean { return this.database.connection.prepare("SELECT value FROM realm_meta WHERE key='origin'").get()?.value === 'mon' }
   create(raw: unknown) {
     const input = connectorCreateSchema.parse(raw), settings = this.catalog.validate(input.connectorKey, input.settings)
     this.validateBinding(settings)

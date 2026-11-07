@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { memoCreateSchema, memoIdSchema, memoIntegerSchema, memoListSchema, memoUpdateSchema } from '@eden/api'
+import { memoCreateSchema, memoIdSchema, memoIntegerSchema, memoListSchema, memoUpdateSchema, memoPageRequestSchema } from '@eden/api'
 
 const timestamp = z.union([memoIntegerSchema, z.string().refine(value => Number.isFinite(Date.parse(value)), 'Expected an ISO date').transform(value => Date.parse(value))])
 const create = memoCreateSchema.omit({ relatedSessionId: true, metadata: true }).extend({ remindAt: timestamp.nullable().optional(), dueAt: timestamp.nullable().optional() })
@@ -8,6 +8,7 @@ export const memoToolSchemas = {
   create_memo: create,
   create_reminder: create.omit({ kind: true }).extend({ remindAt: timestamp }),
   list_memos: memoListSchema,
+  list_memos_page: memoPageRequestSchema,
   list_due_memos: due,
   update_memo: memoUpdateSchema.extend({ patch: memoUpdateSchema.shape.patch.omit({ metadata: true }) }),
   complete_memo: memoIdSchema,

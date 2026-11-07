@@ -12,4 +12,5 @@ export { ConnectorLifecycle } from './lifecycle.ts'
 export { connectorCapabilityTools } from './capability-tools.ts'
 
 export { connectorDiscoveryTools } from './discovery-tools.ts'
+export { connectorInstanceTools } from './instance-tools.ts'
 export { ConnectorCredentials } from './credentials.ts'

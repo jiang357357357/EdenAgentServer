@@ -47,7 +47,8 @@ test('a 100 MB quoted group file reaches signed HTTP, its speaker input and the 
   }
   const sessions = new SessionService(repository, model.config, tools, undefined, undefined, undefined, attachments)
   const session = withAccount(account, () => repository.create('QQ group file', [{ assistantId: 1, characterId: 2 }],
-    { channelAudience: 'qq_group' }, { purpose: 'user_chat', sourceChannel: 'qq' }))
+    { channelAudience: 'qq_group', botQq: source.bot_qq, groupQq: source.group_qq, contactQq: source.contact_qq },
+    { purpose: 'user_chat', sourceChannel: 'qq' }))
   database.connection.prepare('INSERT INTO qq_group_sessions VALUES(?,?,?,?,?,?)')
     .run(session.id, source.bot_qq, source.group_qq, source.contact_qq, 0, Date.now())
   const mon = { catalog: async () => { throw new Error('must reuse the existing group binding') } } as unknown as MonBindingService
@@ -81,7 +82,9 @@ test('a 100 MB quoted group file reaches signed HTTP, its speaker input and the 
   const info = await uploaded.json() as { blobId: string; mime: string; byteLength: number; sha256: string }
   assert.equal(info.byteLength, QQ_FILE_MAX_BYTES); assert.equal(info.sha256, sha256)
   readInput.blobId = info.blobId
-  const input = { ...source, schema_version: 'qq-group-turn.v3', message_id: 'reply-1', quoted_message_id: 'file-1',
+  const input = { ...source, schema_version: 'qq-group-turn.v4', message_id: 'reply-1', quoted_message_id: 'file-1',
+    context: { schema_version: 'qq-group-context.v1', bot_qq: source.bot_qq, group_qq: source.group_qq,
+      operator_qq: source.contact_qq, speaker_name: 'Group member', messages: [], summaries: [] },
     text: 'Read my quoted file', assistant_id: 1, character_id: 2,
     attachments: [{ blobId: info.blobId, mime: info.mime, filename: 'large.bin' }] }
   const response = await post('/internal/channels/qq/turns', input)

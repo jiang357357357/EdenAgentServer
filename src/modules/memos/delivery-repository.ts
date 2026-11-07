@@ -66,6 +66,9 @@ export class MemoDeliveryRepository {
     if (updated.changes !== 1) throw new Error('Reminder decision was already admitted')
     this.database.connection.prepare("UPDATE jobs SET input_id=?,updated_at=? WHERE id=? AND state='dispatched'")
       .run(inputId, Date.now(), delivery.jobId)
+    this.database.connection.prepare(`INSERT INTO qq_group_inputs
+      SELECT i.id,i.session_id,i.turn_id,o.operator_qq,?,0,o.origin_json FROM inputs i JOIN qq_memo_origins o
+      ON o.session_id=i.session_id AND o.memo_id=? WHERE i.id=?`).run(`memo:${delivery.jobId}`, delivery.memo.id, inputId)
   }
 
   current(delivery: PendingMemoDelivery): boolean {

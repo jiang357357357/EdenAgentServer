@@ -21,7 +21,7 @@ test('normal, actor and self-awake prompts share location provenance without lea
   assert.deepEqual(actor.sources.find(source => source.title === '环境信息')!.content, expected)
   assert.deepEqual(awake.environment, expected)
   assert.deepEqual((request as Record<string, unknown>).environment, expected)
-  for (const text of [single.prompt, actor.prompt, selfAwakePrompt({ environment }), JSON.stringify(request)]) {
+  for (const text of [single.runtimeContext, actor.runtimeContext, selfAwakePrompt({ environment }), JSON.stringify(request)]) {
     assert.match(text, /儋州市/)
     assert.match(text, /manual_map/)
     assert.match(text, /2026-09-20T08:15:00\+08:00/)
@@ -42,7 +42,7 @@ test('older reports retain their place while missing location provenance remains
     assert.equal(output.location!.accuracy, null)
     assert.doesNotMatch(JSON.stringify(output), /browser_geolocation|manual_map/)
   }
-  const absent = sessionPromptContent({ environment: { timezone: 'Asia/Shanghai' } }).prompt
+  const absent = sessionPromptContent({ environment: { timezone: 'Asia/Shanghai' } }).runtimeContext
   assert.doesNotMatch(absent, /locationInterpretation|儋州市/)
 })
 

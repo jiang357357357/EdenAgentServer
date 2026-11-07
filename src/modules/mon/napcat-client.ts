@@ -11,6 +11,7 @@ import { QqActionResults } from './qq-action-results.ts'
 import { toJson, type JsonValue } from '@eden/api'
 
 import type { NapcatSessionTarget } from './napcat-target.ts'
+import { qqGroupOrigin } from '../qq-channel/index.ts'
 export type { NapcatSessionTarget } from './napcat-target.ts'
 
 const qqContextSchema = z.object({ session_id: z.uuid(), bot_qq: z.string().regex(/^\d{5,20}$/),
@@ -46,7 +47,7 @@ export class NapcatClient {
     if (session.status !== 'active' && (!turnId || !this.sessions.isRunningJobTurn(sessionId, turnId, ['memo.reminder', 'memo.reminder.redelivery'])))
       throw new Error('QQ tools require an active session or its running reminder turn')
     const background = turnId === undefined ? {} : { turnId }
-    if (session.sourceChannel === 'qq') return { ...this.qqTarget(sessionId, botId), ...background }
+    if (session.sourceChannel === 'qq') return { ...this.qqTarget(sessionId, botId, turnId), ...background }
     if (botId !== undefined) z.string().regex(/^[1-9]\d{0,19}$/).parse(botId)
     const connection = this.connections.read(sessionId)
     if (!connection) throw new Error('当前会话尚未连接 Core')
@@ -75,11 +76,10 @@ export class NapcatClient {
     }
   }
 
-  private qqTarget(sessionId: string, botId?: string): NapcatSessionTarget {
+  private qqTarget(sessionId: string, botId?: string, turnId?: string): NapcatSessionTarget {
     if (botId !== undefined) throw new Error('QQ 会话不接受 bot_id；操作身份由当前会话确定。')
     if (!this.identity) throw new Error('QQ service identity is unavailable')
-    const group = this.sessions.database.connection.prepare(
-      'SELECT session_id,bot_qq,group_qq,operator_qq AS contact_qq FROM qq_group_sessions WHERE session_id=?').get(sessionId)
+    const group = qqGroupOrigin(this.sessions.database, sessionId, turnId)
     if (group) {
       const context = qqContextSchema.parse(group)
       return { sessionId, baseUrl: this.identity.coreBaseUrl, identity: this.identity, qqContext: context,

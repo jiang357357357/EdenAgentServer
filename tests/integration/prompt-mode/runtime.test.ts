@@ -13,15 +13,27 @@ import { PromptModeRepository } from '../../../src/modules/prompt-mode/index.ts'
 import { PermissionService } from '../../../src/modules/permissions/index.ts'
 import { CommandService } from '../../../src/modules/commands/index.ts'
 import { WorkspaceService, workspaceTools } from '../../../src/modules/workspace/index.ts'
-import { BUILTIN_PROMPT_MODE_TEMPLATE } from '../../../src/model-prompts/prompt-mode-v3.ts'
+import { BUILTIN_PROMPT_MODE_TEMPLATE, PROMPT_MODE_LEADING_ANCHOR } from '../../../src/model-prompts/prompt-mode-eden.ts'
 
 const template = BUILTIN_PROMPT_MODE_TEMPLATE
 const identity = '你是普拉娜，称呼用户为老师。'
 const participant = { assistantId: 1, profile: { character: { name: '普拉娜', system_prompt: identity } } }
 function system(request: Record<string, unknown>) {
   const messages = request.messages as { role: string; content: string }[]
-  assert.equal(messages.filter(message => message.role === 'system').length, 1)
-  return messages.find(message => message.role === 'system')!.content
+  const systems = messages.filter(message => message.role === 'system')
+  const mode = systems.filter(message => message.content.includes(template))
+  assert.equal(systems.length, 1)
+  if (mode.length) {
+    assert.equal(mode.length, 1)
+    assert.equal(messages[0], mode[0])
+    assert.ok(systems[0]!.content.endsWith(PROMPT_MODE_LEADING_ANCHOR))
+    assert.ok(!systems[0]!.content.includes('工具选择与任务路由：'))
+    assert.ok(!systems[0]!.content.includes('**Workflow**'))
+    assert.ok(!systems[0]!.content.includes('Be concrete and operational.'))
+    assert.ok(!systems[0]!.content.includes('Fixed precedence: user task > task-class template > output rules.'))
+  }
+  assert.ok(systems.every(message => !message.content.includes('# 超限模式提示词')))
+  return systems.map(message => message.content).join('\n')
 }
 function setMode(repository: PromptModeRepository, enabled: boolean) {
   repository.update({ enabled, expectedUpdatedAt: repository.get().updatedAt })
@@ -53,8 +65,8 @@ test('real runtime wire applies off/on/off on the same session and restores syst
       assert.equal(system(model.requests[index]!).split(identity).length - 1, 1)
       assert.doesNotMatch(system(model.requests[index]!), /system_prompt|systemPrompt/)
     }
-    assert.doesNotMatch(JSON.stringify(model.requests[2]), /MODE: SANDBOX/)
-    assert.doesNotMatch(JSON.stringify(model.requests[4]), /MODE: SANDBOX/)
+    assert.ok(!system(model.requests[2]!).includes(template))
+    assert.ok(!system(model.requests[4]!).includes(template))
     assert.equal(mode.get().enabled, false)
     assert.ok(!Object.hasOwn(mode.get(), 'template'))
   } finally { await service.close(); database.close(); await model.close() }

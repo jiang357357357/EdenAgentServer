@@ -26,3 +26,5 @@ export const fileResult: ModelResult = (value, _input, hidden) => {
   if (raw.result) row.result = fileResult(raw.result, undefined, hidden)
   return row
 }
+
+export const imageResult: ModelResult = value => fields(value, ['name', 'path', 'mime', 'byteLength'])

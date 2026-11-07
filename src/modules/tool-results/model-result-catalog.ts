@@ -5,14 +5,14 @@ import { assistantListResult, deviceCommandResult, deviceListResult, emailResult
 import { connectorEventResult, connectorListResult, connectorPackageResult, createdSkillResult,
   mcpServersResult, mcpBusinessResult, pluginManagementResult, skillExecutionResult } from './extension-results.ts'
 import { attachmentResult, conversationResult, diaryResult, memoResult, memoryResult, reminderResult, selfAwakeResult, timerResult } from './personal-results.ts'
-import { fileResult, sharedQueryResult } from './shared-results.ts'
+import { fileResult, imageResult, sharedQueryResult } from './shared-results.ts'
 import { qqModelResult } from './qq-result-privacy.ts'
 import { stickerResult } from './sticker-results.ts'
 import { videoResult } from './video-results.ts'
 import { desktopResult } from './desktop-results.ts'
 
 /** These tools already construct business-only results. Their bodies remain opaque. */
-const businessTools = new Set(['request_user_input', 'list_tools', 'load_tools', 'unload_tools',
+const businessTools = new Set(['manage_ui_plugins', 'manage_plugin_packages', 'manage_plugin_grants', 'manage_connector_instances', 'build_connector_plugin', 'request_user_input', 'list_tools', 'load_tools', 'unload_tools',
   'list_skills', 'read_skill', 'load_skill', 'unload_skill', 'read_skill_file',
   'list_directory', 'search_files', 'exec_command', 'web_search', 'web_fetch', 'web_find',
   'analyze_screen', 'capture_camera', 'browser_inspect', 'list_contact_channels',
@@ -27,10 +27,11 @@ const projections: Record<string, ModelResult> = {
   list_character_stickers: stickerResult, remember_character_sticker: stickerResult,
   send_character_sticker: stickerResult, delete_character_sticker: stickerResult,
   read_file: fileResult, write_file: fileResult, edit_file: fileResult, delete_file: fileResult,
+  read_image: imageResult,
   rename_file: fileResult, restore_file: fileResult,
   read_attachment: attachmentResult,
   remember_memory: memoryResult, search_memories: memoryResult, update_memory: memoryResult, forget_memory: memoryResult,
-  create_memo: memoResult, create_reminder: memoResult, list_memos: memoResult, list_due_memos: memoResult,
+  create_memo: memoResult, create_reminder: memoResult, list_memos: memoResult, list_memos_page: memoResult, list_due_memos: memoResult,
   update_memo: memoResult, complete_memo: memoResult, archive_memo: memoResult, snooze_memo: memoResult, get_next_memo_wake: memoResult,
   show_desktop_reminder: reminderResult, get_desktop_reminder: reminderResult,
   set_self_awake_timer: timerResult, write_diary: diaryResult, get_self_awake_context: selfAwakeResult,

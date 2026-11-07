@@ -1,13 +1,14 @@
 import { timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { serviceSignature } from '@eden/integrations'
-import { QQ_FILE_MAX_JSON_BYTES, QQ_FILE_TRANSFER_TIMEOUT_MS } from '@eden/api'
+import { QQ_FILE_MAX_JSON_BYTES, QQ_FILE_TRANSFER_TIMEOUT_MS, QQ_GROUP_TURN_MAX_JSON_BYTES } from '@eden/api'
 import type { QqChannelBridge } from '../../modules/qq-channel/bridge.ts'
 import { BodyError, readBlobBody } from './blob-body.ts'
 
 const paths = ['/internal/channels/qq/turns', '/internal/channels/qq/status', '/internal/channels/qq/availability',
   '/internal/channels/qq/permissions', '/internal/channels/qq/permission-mode',
-  '/internal/channels/qq/upload', '/internal/channels/qq/file', '/internal/channels/qq/stage']
+  '/internal/channels/qq/upload', '/internal/channels/qq/file', '/internal/channels/qq/stage',
+  '/internal/channels/qq/group-history', '/internal/channels/qq/group-cancel']
 function reply(response: ServerResponse, status: number, value: unknown) {
   if (!response.destroyed && !response.writableEnded)
     response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify(value))
@@ -46,7 +47,8 @@ export class QqChannelHttp {
 
   private async dispatch(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const uploading = request.url === paths[5]
-    const body = await readBlobBody(request, uploading ? QQ_FILE_MAX_JSON_BYTES : 65536,
+    const limit = uploading ? QQ_FILE_MAX_JSON_BYTES : [paths[0], paths[8]].includes(request.url) ? QQ_GROUP_TURN_MAX_JSON_BYTES : 65536
+    const body = await readBlobBody(request, limit,
       uploading ? QQ_FILE_TRANSFER_TIMEOUT_MS : undefined)
     if (this.closed) { reply(response, 503, { error: 'Server is closing' }); return }
     if (!this.authorize(request, body)) { reply(response, 401, { error: 'Invalid service signature' }); return }
@@ -57,7 +59,9 @@ export class QqChannelHttp {
       : request.url === paths[4] ? this.bridge!.permissionMode(raw)
       : request.url === paths[5] ? await this.bridge!.upload(raw)
       : request.url === paths[6] ? await this.bridge!.file(raw)
-      : request.url === paths[7] ? await this.bridge!.stage(raw) : await this.bridge!.submit(raw)
+      : request.url === paths[7] ? await this.bridge!.stage(raw)
+      : request.url === paths[8] ? await this.bridge!.ingestGroupHistory(raw)
+      : request.url === paths[9] ? await this.bridge!.cancelGroupInput(raw) : await this.bridge!.submit(raw)
     reply(response, 200, value)
   }
 

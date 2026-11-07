@@ -30,7 +30,7 @@ export class StickerDelivery {
       this.publish(sticker)
       return toJson({ sticker, channel: 'app', status: 'success' })
     }
-    const target = this.napcat.target(this.sessionId)
+    const target = this.napcat.target(this.sessionId, undefined, this.turnId)
     if (!target.qqContext) throw new Error('Sticker sending requires a bound QQ conversation')
     const group = target.qqContext.group_qq
     const action = group ? 'send_group_sticker' : 'send_private_sticker'

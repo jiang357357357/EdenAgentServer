@@ -1,5 +1,8 @@
 import { permissionModeSchema, type PermissionMode } from '@eden/api'
 import type { EdenDatabase } from '@eden/store'
+import { qqGroupOrigin } from '../qq-channel/index.ts'
+
+export class QqPermissionModeConflict extends Error {}
 
 /** Approval policy only. Execution isolation and package grants are independent. */
 export class PermissionModeStore {
@@ -40,10 +43,11 @@ export class PermissionModeStore {
     return row ? permissionModeSchema.parse(JSON.parse(String(row.value_json))) : 'restricted'
   }
 
-  setQqMode(botQq: string, contactQq: string, value: PermissionMode, groupQq?: string): PermissionMode {
+  setQqMode(botQq: string, contactQq: string, value: PermissionMode, groupQq?: string, expected?: PermissionMode): PermissionMode {
     const mode = permissionModeSchema.parse(value)
     return this.database.transaction(() => {
       const previous = this.qqMode(botQq, contactQq, groupQq)
+      if (expected !== undefined && previous !== expected) throw new QqPermissionModeConflict('QQ permission mode changed')
       if (previous === mode) return mode
       const key = this.qqKey(botQq, contactQq, groupQq), now = Date.now()
       this.database.connection.prepare('INSERT OR REPLACE INTO runtime_settings VALUES (?, ?, ?)')
@@ -54,9 +58,9 @@ export class PermissionModeStore {
     })
   }
 
-  allowsQq(sessionId: string, capability: string): boolean {
-    const group = this.database.connection.prepare('SELECT bot_qq,group_qq,operator_qq FROM qq_group_sessions WHERE session_id=?').get(sessionId)
-    if (group) return this.modeAllows(this.qqMode(String(group.bot_qq), String(group.operator_qq), String(group.group_qq)), capability)
+  allowsQq(sessionId: string, capability: string, turnId?: string): boolean {
+    const group = qqGroupOrigin(this.database, sessionId, turnId)
+    if (group) return this.modeAllows(this.qqMode(group.bot_qq, group.contact_qq, group.group_qq), capability)
     const row = this.database.connection.prepare('SELECT bot_qq,contact_qq FROM qq_channel_conversations WHERE session_id=?')
       .get(sessionId)
     if (!row) return false

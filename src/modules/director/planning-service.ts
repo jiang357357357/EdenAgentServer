@@ -7,6 +7,7 @@ import { DirectorRunRepository } from './run-repository.ts'
 import { directorRoster } from './roster.ts'
 import { parseDirectorPlan } from './plan.ts'
 import { DIRECTOR_SYSTEM_PROMPT } from '../../model-prompts/director.ts'
+import { runtimeDiagnosticLogger } from '../logging/index.ts'
 
 export interface PlanningRequest {
   sessionId: string; turnId: string; userText: string; participants: JsonValue[]
@@ -24,6 +25,7 @@ export class DirectorPlanningService {
     const signal = AbortSignal.any([request.signal, AbortSignal.timeout(60000)])
     let diagnostic: string | undefined
     const text = roster.length === 1 ? '' : await completeText({ model: request.model, systemPrompt: DIRECTOR_SYSTEM_PROMPT, signal,
+      diagnostic: runtimeDiagnosticLogger({ origin: this.sessions.origin, turnId: request.turnId, operation: 'director.plan' }),
       text: JSON.stringify({ participants: roster, recentConversation: request.conversation, userMessage: request.userText, attachmentContext: request.attachments }),
       record: async snapshot => { this.sessions.events.append(request.sessionId, request.turnId, 'director.model.request', snapshot) },
     }).catch(error => {

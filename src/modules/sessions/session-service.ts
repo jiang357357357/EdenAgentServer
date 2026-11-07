@@ -1,11 +1,14 @@
 import { logDiagnostic } from '../logging/index.ts'
+import { SessionIdleActions } from './idle-actions.ts'
+import { SessionQueuedActions } from './queued-actions.ts'
 import { UiPreferenceRepository } from "../ui-preferences/index.ts"
 import { PromptModeRepository } from '../prompt-mode/index.ts'
+import { createPromptModeSnapshot } from '../../model-prompts/prompt-mode.ts'
 import { withAccount } from '../accounts/index.ts'
 import { randomUUID } from 'node:crypto'
 import { toJson, QQ_FILE_MAX_INPUT_BYTES } from '@eden/api'
 import type { JsonValue, AttachmentRef, AttachmentSnapshot } from '@eden/api'
-import { createIsolatedRuntime as createRuntime } from '@eden/runtime-pi'
+import { createIsolatedRuntime as createRuntime, RuntimeCancellationError } from '@eden/runtime-pi'
 import type { EdenRuntime, RuntimeModel, RuntimeTool } from '@eden/runtime-pi'
 import type { AcceptedInput, SessionInput, SessionTurnExtension, SessionBoundary } from './contracts.ts'
 import { SessionRepository } from './session-repository.ts'
@@ -19,9 +22,10 @@ import { InputAdmissions } from './input/admissions.ts'
 import { InputResubmissionRepository } from './input/resubmission-repository.ts'
 import type { MemoryRecall } from '../memories/index.ts'
 import { SessionTitleService } from './session-title-service.ts'
-import { isStandaloneSelfAwakeTurn, runtimeStopReason, transientTurnInput, turnRecallQuery } from './turn/single-turn-context.ts'
-import { SessionFaults, sessionFailureReason } from './session-faults.ts'
+import { isCompanionInput, isStandaloneSelfAwakeTurn, runtimeStopReason, transientTurnInput, turnRecallQuery } from './turn/single-turn-context.ts'
+import { SessionFaults, sessionFailureReason, userCancelledExecution, explicitlyCancelledExecution } from './session-faults.ts'
 import { recoverSessionStorage } from './session-storage-recovery.ts'
+import { sharedGroupRuntime, copySharedInput } from '../qq-channel/index.ts'
 
 export class SessionService {
   private readonly inputs: InputRepository
@@ -32,6 +36,8 @@ export class SessionService {
   private readonly controllers = new Map<string, AbortController>()
   private readonly stopping = new Set<string>()
   private readonly editing = new Set<string>()
+  private readonly idleActions = new SessionIdleActions()
+  private readonly queuedActions = new SessionQueuedActions()
   private readonly boundaryWaiting = new Set<string>()
   private descendantStop: ((sessionId: string) => Promise<void>) | undefined
   private endCleanup: ((sessionId: string) => Promise<void>) | undefined
@@ -51,7 +57,9 @@ export class SessionService {
       () => this.extension?.validateCheckpoints?.(sessionId)))
     this.titles = new SessionTitleService(repository, sessionId => this.resolveModel(sessionId))
     this.signals.interrupt()
-    for (const sessionId of this.inputs.interruptedSessions()) this.stopping.add(sessionId)
+    for (const sessionId of this.inputs.interruptedSessions()) {
+      if (!this.repository.database.connection.prepare('SELECT 1 FROM qq_shared_rooms WHERE session_id=?').get(sessionId)) this.stopping.add(sessionId)
+    }
     this.inputs.recoverInterrupted()
   }
 
@@ -67,11 +75,11 @@ export class SessionService {
 
   private resolveModel(sessionId: string): RuntimeModel | undefined { return typeof this.model === 'function' ? this.model(sessionId) : this.model }
 
-  start(sessionId: string, text: string, idempotencyKey: string = randomUUID(), environment?: JsonValue, kind: 'prompt' | 'compact' = 'prompt'): AcceptedInput {
-    return this.accept(sessionId, text, idempotencyKey, environment, kind)
+  start(sessionId: string, text: string, idempotencyKey: string = randomUUID(), environment?: JsonValue, kind: 'prompt' | 'compact' = 'prompt', channelContext?: JsonValue, onCommit?: (input: AcceptedInput) => void): AcceptedInput {
+    return this.accept(sessionId, text, idempotencyKey, environment, kind, [], onCommit, channelContext)
   }
   resubmissionPreview(sessionId: string, sourceId: string) {
-    const { snapshots: _snapshots, ...source } = new InputResubmissionRepository(this.repository).source(sessionId, sourceId)
+    const { snapshots: _snapshots, channelContext: _channelContext, ...source } = new InputResubmissionRepository(this.repository).source(sessionId, sourceId)
     return source
   }
   resubmit(sessionId: string, sourceId: string, fingerprint: string, note: string): Promise<AcceptedInput> {
@@ -91,7 +99,8 @@ export class SessionService {
       if (existing) return existing
       if (JSON.stringify(this.inputMetadata(sessionId, source.environment)) !== captured) throw new Error('Current session configuration changed; preview again')
       return this.accept(sessionId, source.text, `resubmit:${sourceId}`, source.environment, source.kind, snapshots,
-        accepted => recovery.record(sessionId, sourceId, fingerprint, note, accepted))
+        accepted => { recovery.record(sessionId, sourceId, fingerprint, note, accepted)
+          copySharedInput(this.repository.database, sourceId, accepted.inputId, accepted.turnId) }, source.channelContext)
     })
   }
 
@@ -105,16 +114,17 @@ export class SessionService {
     return accepted
   }
 
-  startWithAttachments(sessionId: string, text: string, references: readonly AttachmentRef[], idempotencyKey: string = randomUUID(), environment?: JsonValue, onCommit?: (input: AcceptedInput) => void): Promise<AcceptedInput> {
+  startWithAttachments(sessionId: string, text: string, references: readonly AttachmentRef[], idempotencyKey: string = randomUUID(), environment?: JsonValue, onCommit?: (input: AcceptedInput) => void, channelContext?: JsonValue): Promise<AcceptedInput> {
     const captured = structuredClone(this.inputMetadata(sessionId, environment))
     if (!this.attachments) return Promise.reject(new Error('Attachment service unavailable'))
     const refs = structuredClone(references)
     const savedEnvironment = environment === undefined ? undefined : structuredClone(environment)
+    const savedContext = channelContext === undefined ? undefined : structuredClone(channelContext)
     return this.admissions.submit(sessionId, async signal => {
       const snapshots = await this.attachments!.snapshot(refs, this.attachmentBudget(sessionId))
       signal.throwIfAborted()
       if (JSON.stringify(this.inputMetadata(sessionId, savedEnvironment)) !== JSON.stringify(captured)) throw new Error('Session configuration changed during attachment validation; resubmit')
-      return this.accept(sessionId, text, idempotencyKey, savedEnvironment, 'prompt', snapshots, onCommit)
+      return this.accept(sessionId, text, idempotencyKey, savedEnvironment, 'prompt', snapshots, onCommit, savedContext)
     })
   }
 
@@ -127,18 +137,24 @@ export class SessionService {
     const session = this.repository.read(sessionId)
     if (session.status !== 'active' && !allowClosed) throw new Error('Session is closed')
     const preferences = new UiPreferenceRepository(this.repository.database)
-    const replyLengths = Object.fromEntries(session.participants.map(participant => {
+    const replyLengths = session.sourceChannel === 'qq' ? {} : Object.fromEntries(session.participants.map(participant => {
       const value = participant && typeof participant === 'object' && !Array.isArray(participant) ? participant : {}
       const id = String(value.characterId ?? value.characterID ?? '')
       return [id, preferences.replyLength(id).length]
     }))
-    return { replyLengths, promptMode: new PromptModeRepository(this.repository.database).snapshot(),
+    return { replyLengths, promptMode: session.sourceChannel === 'qq' ? createPromptModeSnapshot({ enabled: false })
+      : new PromptModeRepository(this.repository.database).snapshot(),
       participants: session.participants, environment: environment === undefined ? session.environment : environment,
       ...(session.sourceChannel === 'qq' ? { sourceChannel: 'qq' } : {}), ...this.executionSnapshot(sessionId, session.participants) }
   }
 
-  private accept(sessionId: string, text: string, idempotencyKey: string, environment: JsonValue | undefined, kind: 'prompt' | 'compact', attachments: AttachmentSnapshot[] = [], onCommit?: (input: AcceptedInput) => void): AcceptedInput {
-    const metadata = { ...this.inputMetadata(sessionId, environment), ...(attachments.length ? { attachments: toJson(attachments) } : {}) }
+  private accept(sessionId: string, text: string, idempotencyKey: string, environment: JsonValue | undefined, kind: 'prompt' | 'compact', attachments: AttachmentSnapshot[] = [], onCommit?: (input: AcceptedInput) => void, channelContext?: JsonValue): AcceptedInput {
+    const metadata = { ...this.inputMetadata(sessionId, environment), ...(attachments.length ? { attachments: toJson(attachments) } : {}),
+      ...(channelContext === undefined ? {} : { channelContext }) }
+    if (metadata.sourceChannel === 'qq') {
+      const context = channelContext && typeof channelContext === 'object' && !Array.isArray(channelContext) ? channelContext : {}
+      metadata.promptMode = createPromptModeSnapshot({ enabled: context.prompt_mode_enabled === true })
+    }
     const result = this.inputs.enqueue(sessionId, text, idempotencyKey, metadata, kind,
       environment === undefined ? undefined : { participants: metadata.participants, environment }, onCommit)
     if (kind === 'prompt') this.titles.schedule(sessionId, result.turnId, text)
@@ -160,7 +176,8 @@ export class SessionService {
   }
 
   private wake(sessionId: string): void {
-    if (this.tasks.has(sessionId)) return
+    if (this.closed || this.editing.has(sessionId) || this.tasks.has(sessionId) || this.idleActions.has(sessionId)) return
+    if (this.queuedActions.start(sessionId, (signal, action) => this.runIdleAction(sessionId, signal, action))) return
     let account: ReturnType<SessionRepository['ownership']['account']>
     const task = Promise.resolve().then(() => {
       account = this.repository.ownership.account(sessionId)
@@ -176,13 +193,14 @@ export class SessionService {
         message: storage ? '会话因存储故障暂停。' : '本轮执行失败，允许提交新输入。', origin: this.repository.origin, sessionId, error: failure }, 'error')
     }).finally(() => {
       this.tasks.delete(sessionId)
-      if (!this.closed && !this.stopping.has(sessionId) && !this.boundaryWaiting.has(sessionId) && !this.faults.has(sessionId) && this.inputs.hasPending(sessionId)) this.wake(sessionId)
+      if (this.queuedActions.has(sessionId) || !this.closed && !this.stopping.has(sessionId) && !this.boundaryWaiting.has(sessionId) && !this.faults.has(sessionId) && this.inputs.hasPending(sessionId)) this.wake(sessionId)
     })
     this.tasks.set(sessionId, task)
   }
 
   private async drain(sessionId: string): Promise<void> {
     while (!this.closed && !this.stopping.has(sessionId)) {
+      if (this.queuedActions.has(sessionId)) return
       if (!await this.beforeNextInput(sessionId)) return
       if (this.closed || this.stopping.has(sessionId)) return
       const input = this.inputs.claim(sessionId)
@@ -208,14 +226,14 @@ export class SessionService {
     const controller = new AbortController()
     this.controllers.set(input.sessionId, controller)
     try {
-      if (input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata) && Object.hasOwn(input.metadata, 'companion')) {
+      if (isCompanionInput(input)) {
         if (!this.extension) throw new Error('Multi-actor execution is unavailable')
         this.turns.set(input.sessionId, input.turnId)
         await this.extension.execute(input, controller.signal)
       } else reason = await this.executeSingle(input)
     } catch (error) {
       reason = sessionFailureReason(error)
-      if (error !== controller.signal.reason) failure = error
+      if (!userCancelledExecution(error, controller.signal)) failure = error
     } finally {
       try { await this.runtimes.get(input.sessionId)?.dispose?.() }
       catch (error) {
@@ -224,13 +242,13 @@ export class SessionService {
       }
       finally { this.runtimes.delete(input.sessionId); this.turns.delete(input.sessionId); this.controllers.delete(input.sessionId) }
     }
-    try { this.signals.interrupt(input.turnId); this.inputs.finish(input, reason) }
+    try { this.signals.interrupt(input.turnId); this.inputs.finish(input, reason, explicitlyCancelledExecution(controller.signal, failure)) }
     catch (error) {
       if (failure) logDiagnostic({ event: 'session.turn.failed', origin: this.repository.origin,
         sessionId: input.sessionId, turnId: input.turnId, error: failure }, 'error')
       throw error
     }
-    if (reason) this.stopping.add(input.sessionId)
+    if (reason && !this.repository.database.connection.prepare('SELECT 1 FROM qq_shared_rooms WHERE session_id=?').get(input.sessionId)) this.stopping.add(input.sessionId)
     if (failure) throw failure
   }
 
@@ -242,12 +260,18 @@ export class SessionService {
     const checkpoint = isStandaloneSelfAwakeTurn(input) ? undefined : this.repository.checkpoint(input.sessionId)
     const images = await this.imagesFor(input)
     this.controllers.get(input.sessionId)?.signal.throwIfAborted()
-    const context = sessionPromptContent(input.metadata ?? {})
+    const referenceBudget = Math.max(512, Math.min(24_000, Math.floor((model.contextWindow - model.maxTokens) / 4)))
+    const context = sessionPromptContent(input.metadata ?? {}, referenceBudget)
+    const shared = sharedGroupRuntime(this.repository.database, input, context.inputContext)
     const recallQuery = turnRecallQuery(input)
     const memory = input.kind === 'compact' ? '' : await this.memoryRecall?.prompt(input.sessionId, input.turnId, recallQuery, undefined, this.controllers.get(input.sessionId)?.signal) ?? ''
     this.controllers.get(input.sessionId)?.signal.throwIfAborted()
     const runtime = createRuntime({
-      sessionId: input.sessionId, systemPrompt: context.prompt, turnContext: memory,
+      sessionId: input.sessionId, systemPrompt: context.prompt, turnContext: [context.turnContext, memory].filter(Boolean).join('\n\n'),
+      runtimeContext: context.runtimeContext, inputContext: shared ? '' : context.inputContext,
+      ...(shared ? { history: shared.history } : {}),
+      ...(context.systemPromptSuffix ? { systemPromptSuffix: context.systemPromptSuffix } : {}),
+      ...(context.trailingSystemPrompt ? { trailingSystemPrompt: context.trailingSystemPrompt } : {}),
       contextSources: toJson([...context.sources, { kind: 'memory', title: '召回记忆', content: memory }]) as JsonValue[],
       model, tools: this.tools(input.sessionId, input.turnId), refreshTools: () => this.tools(input.sessionId, input.turnId), transientInput,
       callbacks: runtimeCallbacks(this.repository, input, { privateUserInput: transientInput }),
@@ -255,7 +279,7 @@ export class SessionService {
     })
     this.runtimes.set(input.sessionId, runtime)
     this.turns.set(input.sessionId, input.turnId)
-    const response = input.kind === 'compact' ? await runtime.compact(input.text) : await runtime.prompt(input.text, images)
+    const response = input.kind === 'compact' ? await runtime.compact(input.text) : await runtime.prompt(shared?.text ?? input.text, images)
     return runtimeStopReason(response)
   }
 
@@ -285,7 +309,9 @@ export class SessionService {
     this.titles.cancel(sessionId)
     const admissionCancelled = this.admissions.cancel(sessionId)
     const running = this.tasks.has(sessionId)
-    this.controllers.get(sessionId)?.abort()
+    const idleActionCancelled = this.idleActions.cancel(sessionId)
+    const waitingActionCancelled = this.queuedActions.cancel(sessionId)
+    this.controllers.get(sessionId)?.abort(new RuntimeCancellationError())
     const abortRuntime = this.runtimes.get(sessionId)?.abort()
     const stopDescendants = this.descendantStop?.(sessionId)
     let queuedCancelled = 0
@@ -296,7 +322,18 @@ export class SessionService {
     const failures = results.flatMap(result => result.status === 'rejected' ? [result.reason] : [])
     if (queueFailure) failures.push(queueFailure)
     if (failures.length) throw new AggregateError(failures, 'Session cancellation failed')
-    return running || admissionCancelled || queuedCancelled > 0
+    return running || idleActionCancelled || waitingActionCancelled || admissionCancelled || queuedCancelled > 0
+  }
+
+  async cancelInput(sessionId: string, inputId: string): Promise<boolean> {
+    this.repository.read(sessionId)
+    const turn = this.inputs.cancelInput(sessionId, inputId)
+    if (!turn) return false
+    if (this.turns.get(sessionId) === turn) {
+      this.controllers.get(sessionId)?.abort(new RuntimeCancellationError())
+      await this.runtimes.get(sessionId)?.abort()
+    }
+    return true
   }
 
   async endSession(sessionId: string, state: 'closed' | 'deleted'): Promise<void> {
@@ -331,14 +368,15 @@ export class SessionService {
     if (this.closed || this.tasks.has(sessionId) || this.admissions.has(sessionId) || this.editing.has(sessionId)) throw new Error('Wait for the session to become idle before configuration')
     this.editing.add(sessionId)
     try { return await work() }
-    finally { this.editing.delete(sessionId) }
+    finally { this.editing.delete(sessionId); if (this.queuedActions.has(sessionId)) this.wake(sessionId) }
   }
 
-  async setParticipants(sessionId: string, participants: JsonValue[]) {
+  async setParticipants(sessionId: string, participants: JsonValue[], configure?: () => Promise<unknown>) {
     return this.configureWhileIdle(sessionId, async () => {
+      const previous = this.repository.read(sessionId).participants
       const session = this.repository.setMetadata(sessionId, participants)
-      this.participantsChanged(sessionId)
-      return session
+      try { this.participantsChanged(sessionId); await configure?.(); return session }
+      catch (error) { this.repository.setMetadata(sessionId, previous); this.participantsChanged(sessionId); throw error }
     })
   }
 
@@ -363,10 +401,25 @@ export class SessionService {
 
   async waitForIdle(sessionId: string): Promise<void> {
     await this.admissions.wait(sessionId)
-    while (this.tasks.has(sessionId)) await this.tasks.get(sessionId)
+    while (this.tasks.has(sessionId) || this.idleActions.has(sessionId) || this.queuedActions.has(sessionId)) {
+      await this.queuedActions.wait(sessionId)
+      await this.idleActions.wait(sessionId)
+      await this.tasks.get(sessionId)
+    }
   }
-  isRunning(sessionId: string): boolean { return this.tasks.has(sessionId) }
-  runningCount(): number { return this.tasks.size }
+  runIdleAction<T>(sessionId: string, signal: AbortSignal, action: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    this.repository.read(sessionId)
+    if (this.closed || this.tasks.has(sessionId) || this.editing.has(sessionId)) throw new Error('Wait for the conversation to become idle')
+    return this.idleActions.run(sessionId, signal, action, () => {
+      if (this.queuedActions.has(sessionId) || !this.closed && !this.stopping.has(sessionId) && !this.faults.has(sessionId) && this.inputs.hasPending(sessionId)) this.wake(sessionId)
+    })
+  }
+  queueIdleAction<T>(sessionId: string, signal: AbortSignal, action: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    this.repository.read(sessionId)
+    return this.queuedActions.enqueue(sessionId, signal, action, () => this.wake(sessionId))
+  }
+  isRunning(sessionId: string): boolean { return this.tasks.has(sessionId) || this.idleActions.has(sessionId) }
+  runningCount(): number { return this.tasks.size + this.idleActions.size }
   faultCount(): number { return this.faults.size }
   toolCatalog() {
     return this.tools('00000000-0000-4000-8000-000000000000', '00000000-0000-4000-8000-000000000000').map(tool => {
@@ -380,13 +433,16 @@ export class SessionService {
   }
   async close(): Promise<void> {
     this.closed = true
+    this.queuedActions.close()
     const titles = this.titles.close()
     const admissions = this.admissions.close()
+    const idleActions = this.idleActions.close()
     for (const controller of this.controllers.values()) controller.abort()
     const aborts = await Promise.allSettled([...this.runtimes.values()].map(runtime => runtime.abort()))
     await Promise.all(this.tasks.values())
     await titles
     await admissions
+    await idleActions
     const failures = aborts.filter(result => result.status === 'rejected')
     if (failures.length) throw new AggregateError(failures.map(result => result.reason), 'Runtime abort reported persistence failures')
   }

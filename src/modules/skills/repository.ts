@@ -10,13 +10,15 @@ export interface ContributedSkill { pluginId: string; revision: string; componen
 type Row = Record<string, SQLOutputValue>
 export class SkillRepository {
   constructor(private readonly database: EdenDatabase, private readonly workspace: () => string = () => '', private readonly contributions: () => ContributedSkill[] = () => [],
-    private readonly capabilities: () => SkillCapabilities = () => ({ tools: [], codeToolsAvailable: false }),
+    private readonly capabilities: (sessionId?: string) => SkillCapabilities = () => ({ tools: [], codeToolsAvailable: false }),
     private readonly systemSkills: () => readonly SkillSnapshot[] = () => [],
     private readonly projectSkills: () => readonly SkillSnapshot[] = () => [],
-    private readonly builtinSkills: () => readonly SkillSnapshot[] = () => [], private readonly sessionId?: string) {}
+    private readonly builtinSkills: () => readonly SkillSnapshot[] = () => [], private readonly sessionId?: string,
+    private readonly contributionIssues: () => { id: string; message: string }[] = () => []) {}
   forWorkspace(workspace: () => string, projectSkills: () => readonly SkillSnapshot[] = () => [], sessionId?: string): SkillRepository {
-    return new SkillRepository(this.database, workspace, this.contributions, this.capabilities, this.systemSkills, projectSkills, this.builtinSkills, sessionId)
+    return new SkillRepository(this.database, workspace, this.contributions, this.capabilities, this.systemSkills, projectSkills, this.builtinSkills, sessionId, this.contributionIssues)
   }
+  issues() { return this.contributionIssues() }
   target(scope: string): string {
     this.assertMutableScope(scope)
     if (scope === 'user') return ''
@@ -27,6 +29,7 @@ export class SkillRepository {
   }
   preview(data: SkillSnapshot, source: SkillSource, scope: string, root = this.target(scope)) {
     if (root !== this.target(scope)) throw new Error('Workspace changed while inspecting skill; inspect again')
+    const warnings = this.previewWarnings(data, root)
     const id = randomUUID(), expires = Date.now() + 15 * 60000
     this.database.transaction(() => {
       this.database.connection.prepare('DELETE FROM skill_previews WHERE expires_at<?').run(Date.now())
@@ -37,7 +40,27 @@ export class SkillRepository {
     })
     return { previewID: id, skillName: data.name, displayName: data.displayName, description: data.description, version: data.version,
       scope, workspaceRoot: root, source, tools: data.tools, profiles: data.profiles, modelInvocable: data.modelInvocable, contentHash: data.contentHash,
-      fileCount: Object.keys(data.files).length, totalBytes: data.totalBytes, expiresAt: expires }
+      fileCount: Object.keys(data.files).length, totalBytes: data.totalBytes, expiresAt: expires, warnings }
+  }
+  private previewWarnings(data: SkillSnapshot, root: string): string[] {
+    const warnings: string[] = []
+    const existing = this.list(false)
+    const same = existing.find(skill => skill.name === data.name)
+    if (same) warnings.push(same.workspaceRoot === root
+      ? `技能 ${data.name} 已存在，安装会更新当前范围的快照。`
+      : `技能 ${data.name} 已存在于 ${same.scope} 范围；实际生效项由来源优先级决定。`)
+    const capabilities = this.capabilities(this.sessionId)
+    for (const tool of data.codeTools ?? []) {
+      const others = existing.filter(skill => skill.name !== data.name && skill.enabled && skill.codeTools?.some(item => item.name === tool.name))
+        .map(skill => `技能 ${skill.name}`)
+      capabilities.tools.forEach((name, index) => {
+        if (name === tool.name && capabilities.identities?.[index] !== `skill:${data.name}:${tool.name}`) others.push(capabilities.identities?.[index] ?? name)
+      })
+      for (const conflict of capabilities.conflicts ?? []) if (conflict.name === tool.name)
+        others.push(...conflict.identities.filter(identity => identity !== `skill:${data.name}:${tool.name}`))
+      if (others.length) warnings.push(`工具 ${tool.name} 与 ${[...new Set(others)].join('、')} 同名；冲突的技能工具不会注册。`)
+    }
+    return warnings
   }
   install(previewId: string) {
     return this.database.transaction(() => {
@@ -63,12 +86,16 @@ export class SkillRepository {
     this.database.connection.prepare('DELETE FROM skill_previews WHERE id=?').run(previewId)
   }
   list(withCapabilities = true) {
+    const candidates = this.candidates()
+    const seen = new Set<string>()
+    return candidates.filter(row => { const name = String(row.name); if (seen.has(name)) return false; seen.add(name); return true })
+      .map(row => this.describe(row, false, withCapabilities, candidates.filter(other => other !== row && other.name === row.name)))
+  }
+  private candidates() {
     const root = this.workspace()
     const rows = this.database.connection.prepare(`SELECT * FROM installed_skills WHERE workspace_root='' OR workspace_root=?
       ORDER BY name,CASE WHEN workspace_root='' THEN 1 ELSE 0 END`).all(root)
-    const seen = new Set<string>()
-    return [...rows.filter(row => row.workspace_root !== ''), ...this.discoveredProjectRows(), ...rows.filter(row => row.workspace_root === ''), ...this.contributedRows(), ...this.systemRows()].filter(row => { const name = String(row.name); if (seen.has(name)) return false; seen.add(name); return true })
-      .map(row => this.describe(row, false, withCapabilities))
+    return [...rows.filter(row => row.workspace_root !== ''), ...this.discoveredProjectRows(), ...rows.filter(row => row.workspace_root === ''), ...this.contributedRows(), ...this.systemRows()]
   }
   read(name: string, includeContent = true, expected: Expected = {}) {
     const row = this.resolve(name)
@@ -82,7 +109,7 @@ export class SkillRepository {
   }
   toolDependencies(name: string) {
     const row = this.resolve(name), data: SkillSnapshot = JSON.parse(String(row.snapshot_json))
-    const capabilities = this.capabilities(), host = new Set(capabilities.tools)
+    const capabilities = this.capabilities(this.sessionId), host = new Set(capabilities.tools)
     const local = new Set(capabilities.codeToolsAvailable ? (data.codeTools ?? []).map(tool => tool.name) : [])
     return data.tools.map(tool => ({ name: tool, alternatives: [
       ...(host.has(tool) ? [tool] : []), ...(local.has(tool) && host.has(tool) ? [tool] : []),
@@ -100,6 +127,11 @@ export class SkillRepository {
     this.assertMutableScope(String(row.scope))
     if (row.contributed) throw new Error('Manage this skill through its owning plugin component')
     this.assertExpected(row, expected)
+    if (enabled) {
+      const data: SkillSnapshot = JSON.parse(String(row.snapshot_json))
+      const conflicts = this.previewWarnings(data, String(row.workspace_root)).filter(warning => warning.startsWith('工具 '))
+      if (conflicts.length) throw new Error(`${conflicts.join('；')} 请处理重名后再启用。`)
+    }
     if (row.builtin) {
       this.database.connection.prepare('INSERT OR REPLACE INTO runtime_settings(key,value_json,updated_at) VALUES(?,?,?)')
         .run(this.discoveredEnabledKey(row), JSON.stringify(enabled), Date.now())
@@ -133,10 +165,7 @@ export class SkillRepository {
     return row
   }
   private contributedRows(): Row[] {
-    const names = new Set<string>()
     return this.contributions().sort((a, b) => a.pluginId.localeCompare(b.pluginId)).map(item => {
-      if (names.has(item.snapshot.name)) throw new Error('Enabled plugin skill names conflict; disable a conflicting component')
-      names.add(item.snapshot.name)
       return { name: item.snapshot.name, workspace_root: `@plugin/${item.pluginId}/${item.revision}`, snapshot_json: JSON.stringify(item.snapshot),
         source_json: JSON.stringify({ type: 'marketplace', uri: `plugin:${item.pluginId}`, ref: item.revision, subpath: item.componentId }), scope: 'system', enabled: 1, contributed: 1 }
     })
@@ -148,7 +177,7 @@ export class SkillRepository {
     const root = this.workspace()
     return this.projectSkills().map(data => {
       const row: Row = { name: data.name, workspace_root: root, snapshot_json: JSON.stringify(data),
-        source_json: JSON.stringify({ type: 'local', uri: '', ref: data.contentHash, subpath: '' }), scope: 'project', enabled: 1, builtin: 1 }
+        source_json: JSON.stringify({ type: 'local', uri: data.discoveredSource ?? '', ref: data.contentHash, subpath: '' }), scope: 'project', enabled: 1, builtin: 1 }
       const saved = this.database.connection.prepare('SELECT value_json FROM runtime_settings WHERE key=?').get(this.discoveredEnabledKey(row))
       if (saved) {
         const enabled: unknown = JSON.parse(String(saved.value_json))
@@ -160,20 +189,22 @@ export class SkillRepository {
   }
   private systemRows(): Row[] {
     const configured = this.systemSkills()
-    const names = new Set(configured.map(skill => skill.name))
-    return [...configured, ...this.builtinSkills().filter(skill => !names.has(skill.name))].map(data => {
+    return [...configured, ...this.builtinSkills()].map((data, index) => {
       const saved = this.database.connection.prepare('SELECT value_json FROM runtime_settings WHERE key=?').get(`skill.system.enabled:${data.name}`)
       const enabled: unknown = saved ? JSON.parse(String(saved.value_json)) : true
       if (typeof enabled !== 'boolean') throw new Error('Invalid persisted system skill enabled state')
       return { name: data.name, workspace_root: '@system', snapshot_json: JSON.stringify(data),
-        source_json: JSON.stringify({ type: 'builtin', uri: '', ref: data.contentHash, subpath: '' }), scope: 'system', enabled: Number(enabled), builtin: 1 }
+        source_json: JSON.stringify({ type: index < configured.length ? 'local' : 'builtin', uri: data.discoveredSource ?? '', ref: data.contentHash, subpath: '' }), scope: 'system', enabled: Number(enabled), builtin: 1 }
     })
   }
   private exact(name: string, root: string) { return this.database.connection.prepare('SELECT * FROM installed_skills WHERE name=? AND workspace_root=?').get(name, root) }
-  private describe(row: Row, includeContent: boolean, withCapabilities = true) {
+  private describe(row: Row, includeContent: boolean, withCapabilities = true, shadowed: Row[] = []) {
     const data: SkillSnapshot = JSON.parse(String(row.snapshot_json)), source: SkillSource = JSON.parse(String(row.source_json))
+    const capabilities = withCapabilities ? this.capabilities(this.sessionId) : undefined
     return { ...data, files: Object.keys(data.files), content: includeContent ? data.content : null, enabled: Boolean(row.enabled),
-      ...(withCapabilities ? skillAvailability(data, this.capabilities()) : { available: false, missingTools: [] }), scope: String(row.scope), workspaceRoot: String(row.workspace_root), sourceType: source.type, manifest: { source, discovered: Boolean(row.builtin), workspaceRoot: String(row.workspace_root) } }
+      ...(capabilities ? skillAvailability(data, capabilities) : { available: false, missingTools: [], toolConflicts: [] }), scope: String(row.scope), workspaceRoot: String(row.workspace_root), sourceType: source.type,
+      shadowedSources: shadowed.map(other => ({ scope: String(other.scope), workspaceRoot: String(other.workspace_root), source: JSON.parse(String(other.source_json)) as SkillSource })),
+      manifest: { source, discovered: Boolean(row.builtin), workspaceRoot: String(row.workspace_root) } }
   }
   private hash(name: string, root: string): string | null {
     const row = this.exact(name, root)

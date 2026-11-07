@@ -32,7 +32,7 @@ export class InputResubmissionRepository {
     if (kind === 'compact' && attachments.length) throw new Error('Compaction resubmission cannot silently discard attachments')
     if (kind === 'prompt' && !text.trim() && !attachments.length) throw new Error('Original input has no prompt or attachments')
     return { fingerprint: createHash('sha256').update(JSON.stringify(row)).digest('hex'), text, kind, attachments, snapshots,
-      environment: legacy ? legacy.environment : metadata.environment }
+      environment: legacy ? legacy.environment : metadata.environment, channelContext: metadata.channelContext }
   }
   record(sessionId: string, sourceId: string, fingerprint: string, note: string, accepted: AcceptedInput) {
     if (!this.sessions.database.inTransaction) throw new Error('Input resubmission must commit with its accepted input')

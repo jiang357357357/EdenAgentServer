@@ -53,10 +53,11 @@ export class ConnectorWorkerRuntime {
   }
   private notify(method: string, value: JsonValue) {
     this.assertCurrent()
-    if (method === 'event.publish') {
+    if (method === 'event.publish' || method === 'event.publish.confirmed') {
       const parsed = toJson(connectorPublishedEventSchema.parse(value))
-      if (this.ready) this.events.accept(this.id, this.generation, parsed)
+      if (this.ready) return toJson(this.events.accept(this.id, this.generation, parsed))
       else {
+        if (method === 'event.publish.confirmed') throw new Error('Confirmed publishing is unavailable until initialization completes')
         if (this.bufferedEvents.length >= 8 || Buffer.byteLength(JSON.stringify(parsed)) > 256 * 1024) throw new Error('Connector startup event buffer exceeded')
         this.bufferedEvents.push(parsed)
       }

@@ -48,6 +48,9 @@ export class ActorExecutionService {
     signal.throwIfAborted()
     const runtime = createRuntime({ sessionId: input.sessionId, model: request.model, tools: request.tools, ...(request.refreshTools ? { refreshTools: request.refreshTools } : {}),
       systemPrompt: context.prompt, turnContext: memory,
+      runtimeContext: context.runtimeContext, inputContext: context.inputContext,
+      ...(context.systemPromptSuffix ? { systemPromptSuffix: context.systemPromptSuffix } : {}),
+      ...(context.trailingSystemPrompt ? { trailingSystemPrompt: context.trailingSystemPrompt } : {}),
       contextSources: toJson([...context.sources, { kind: 'memory', title: '召回记忆', content: memory }]) as JsonValue[],
       toolCallPrefix: `${plan.planID}:${beatIndex}:`, ...(checkpoint ? { checkpoint } : {}),
       callbacks: { ...callbacks, event: async (kind, payload, delivery) => callbacks.event(kind, actorMessage(payload, request.participant, plan, beatIndex), delivery) },

@@ -22,10 +22,16 @@ export function requestContext(snapshot: unknown, metadata: unknown, previous: u
   const identity = { provider: request.provider ?? null, model: request.model ?? null, reasoning: payload.reasoning_effort ?? null, system: prefix, tools: payload.tools ?? [] }
   const fingerprint = hash(identity)
   const stable = prior.promptCacheFingerprint === fingerprint
+  const messageFingerprints = messages.map(message => hash(message))
+  const oldMessages = Array.isArray(prior.messageFingerprints) ? prior.messageFingerprints : []
+  let commonPrefixMessageCount = 0
+  if (stable) while (commonPrefixMessageCount < messageFingerprints.length
+    && messageFingerprints[commonPrefixMessageCount] === oldMessages[commonPrefixMessageCount]) commonPrefixMessageCount++
   const epoch = typeof prior.promptCacheEpoch === 'number' ? prior.promptCacheEpoch : 0
   return { ...categories, tools: estimateRequestTokens(payload.tools ?? []),
     history: estimateRequestTokens(messages.filter(message => message.role !== 'system' && message.role !== 'developer')),
     tokenizer: 'text-json-heuristic', promptCacheFingerprint: fingerprint,
+    messageFingerprints, commonPrefixMessageCount, prefixComparison: 'whole-message-json-local-not-provider-cache',
     promptCacheEpoch: stable ? epoch : epoch + 1,
     promptCacheInvalidationReason: stable ? 'stable' : epoch ? 'fingerprint' : 'initial' }
 }

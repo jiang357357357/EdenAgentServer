@@ -11,7 +11,7 @@ import { WorkspaceService, workspaceTools } from '../src/modules/workspace/index
 import { PermissionService } from '../src/modules/permissions/index.ts'
 import { SessionRepository } from '../src/modules/sessions/index.ts'
 
-test('workspace writes and commands wait for approval and execute within the selected directory', async context => {
+test('local file writes wait for approval and commands retain the selected directory', async context => {
   if (!(await probeHostExecution()).available) { context.skip('Requires host runtime'); return }
   const directory = mkdtempSync(path.join(tmpdir(), 'eden-workspace-effects-'))
   const project = path.join(directory, 'project')
@@ -64,9 +64,11 @@ test('workspace writes and commands wait for approval and execute within the sel
     assert.ok(result.stdout.includes(project))
     assert.match(result.stdout, /你好，老师。/)
     assert.equal(readFileSync(path.join(project, 'result.txt'), 'utf8'), 'done')
-    const escaping = execute('write_file', { path: '../outside.txt', content: 'Escape' })
-    const escaped = assert.rejects(escaping, /escapes/)
-    await escaped
-    assert.equal(existsSync(path.join(directory, 'outside.txt')), false)
+    const outside = path.join(directory, 'exports', 'nested', 'outside.txt')
+    const external = execute('write_file', { path: outside, content: 'Approved outside write' })
+    assert.equal(existsSync(path.join(directory, 'exports')), false)
+    await approve()
+    await external
+    assert.equal(readFileSync(outside, 'utf8'), 'Approved outside write')
   } finally { controller.abort(); database.close(); await rm(directory, { recursive: true, maxRetries: 10, retryDelay: 100 }) }
 })

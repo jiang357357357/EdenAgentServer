@@ -22,14 +22,14 @@ export const connectorListResult: ModelResult = (value, _input, hidden) => {
   const raw = resultObject(value)
   const summary = (item: JsonValue) => fields(item, ['id', 'key', 'name', 'desiredState', 'runtimeState', 'lastError',
     'queries', 'actions', 'events', 'queryTool', 'actionTool'], hidden, ['revision', 'generation'])
-  return raw.connectors ? { connectors: resultList(raw.connectors, summary) } : summary(raw)
+  return raw.connectors ? { ...fields(raw, ['notice']), connectors: resultList(raw.connectors, summary) } : summary(raw)
 }
 
 export const connectorEventResult: ModelResult = (value, _input, hidden) => {
   const raw = resultObject(value)
-  const event = (item: JsonValue) => fields(item, ['id', 'connectorId', 'eventType', 'payload', 'createdAt'],
+  const event = (item: JsonValue) => fields(item, ['id', 'connectorId', 'eventType', 'payload', 'createdAt', 'wake'],
     hidden, ['externalId', 'sessionId', 'jobId'])
-  return raw.events ? { events: resultList(raw.events, event) } : event(raw)
+  return raw.events ? { ...fields(raw, ['nextCursor', 'hasMore', 'direction']), events: resultList(raw.events, event) } : event(raw)
 }
 
 export const mcpServersResult: ModelResult = (value, _input, hidden) => {

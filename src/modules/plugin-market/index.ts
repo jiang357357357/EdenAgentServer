@@ -7,3 +7,8 @@ export { PackageAssets } from './packages/assets.ts'
 
 export { PackageRecoveryRepository } from './packages/recovery-repository.ts'
 export { connectorPluginTools } from './connector-tools.ts'
+export { pluginGrantTools } from './grant-tools.ts'
+export { connectorBuildTool } from './connector-build-tool.ts'
+export { packageTools } from './package-tools.ts'
+export { packageUiModules } from './packages/ui-modules.ts'
+export { activatePluginPackage } from './activation.ts'

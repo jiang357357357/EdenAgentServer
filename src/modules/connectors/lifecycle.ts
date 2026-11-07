@@ -54,7 +54,12 @@ export class ConnectorLifecycle {
     if (running && (running.generation !== connector.generation || connector.desiredState !== 'connected' || !grants.ready || grants.revision !== running.revision)) {
       await running.runtime.close(); this.active.delete(connector.id)
     }
-    if (this.active.has(connector.id) || connector.desiredState !== 'connected' || (this.retry.get(connector.id) ?? 0) > Date.now() || this.active.size >= 4) return
+    if (this.active.has(connector.id) || connector.desiredState !== 'connected' || (this.retry.get(connector.id) ?? 0) > Date.now()) return
+    if (this.active.size >= 4) {
+      if (connector.runtimeState !== 'connecting' || connector.lastError !== 'Waiting for a connector worker slot (4 per runtime)')
+        this.repository.runtimeState(connector.id, connector.generation, 'connecting', 'Waiting for a connector worker slot (4 per runtime)')
+      return
+    }
     if (!grants.ready) throw new Error('Connector permissions are not ready')
     const launched = await launchComponent(connector.id, this.dataRoot, this.repository, this.catalog, this.permissions, this.events, this.credentials, this.abort.signal)
     this.active.set(connector.id, launched)

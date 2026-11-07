@@ -3,9 +3,8 @@ import { fileURLToPath } from 'node:url'
 import { readFile, mkdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { z } from 'zod'
-import { launchMcpProcess } from '@eden/execution'
-import { McpClient, McpStdioChannel } from '@eden/integrations'
 import type { JsonValue } from '@eden/api'
+import { callVideoWorker } from './worker.ts'
 
 declare const EDEN_BUNDLED_SERVER: boolean
 const resources = typeof EDEN_BUNDLED_SERVER !== 'undefined' && EDEN_BUNDLED_SERVER
@@ -54,14 +53,8 @@ export class VideoContextBackend implements VideoBackend {
       input = { ...input, transcript: { ...transcript, model: manifest.model } }
     }
     await mkdir(path.join(scope, 'input'), { recursive: true, mode: 0o700 })
-    const worker = await launchMcpProcess(new Map(), { command: path.resolve(this.runtime, manifest.python),
-      args: ['-I', path.join(resources, 'eden_entry.py'), this.runtime, scope], cwd: '.' }, signal)
-    const client = new McpClient(new McpStdioChannel(worker.input, worker.output, worker.terminate))
-    try {
-      // Give copied Python and native media dependencies a bounded cold-start allowance.
-      await client.initialize(signal, 60000)
-      return await client.call(name, input, signal)
-    } finally { client.close(); await worker.close() }
+    return callVideoWorker({ python: path.resolve(this.runtime, manifest.python), entry: path.join(resources, 'eden_entry.py'),
+      runtime: this.runtime, scope, name, input, signal })
   }
 
   async close() {

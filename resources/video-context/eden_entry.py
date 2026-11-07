@@ -8,6 +8,11 @@ sys.dont_write_bytecode = True
 # This directory is copied with the Server artifact. Workers import the installed
 # package from the private Python distribution prepared by the setup script.
 sys.path.insert(0, str(Path(__file__).parent / "src"))
+from video_understanding_mcp.logging import configure_logging
+
+# stdout belongs exclusively to MCP, including during engine imports/startup.
+configure_logging()
+
 from video_understanding_mcp.config import Settings
 from video_understanding_mcp.server import serve_stdio
 

@@ -9,6 +9,7 @@ import { workspaceWriteTools } from './workspace-write-tools.ts'
 import { workspaceFileTools } from './workspace-file-tools.ts'
 import { toolDescription } from '../../model-prompts/tool-descriptions.ts'
 import { terminalToolContext } from '../../model-prompts/terminal.ts'
+import { localImageTool } from './image-tool.ts'
 
 const commandSchema = z.object({ command: z.string().min(1).max(65536),
   timeoutSeconds: z.number().int().min(1).max(600).default(30) }).strict()
@@ -18,6 +19,7 @@ export function workspaceTools(workspace: WorkspaceService, permissions: Permiss
   const terminal = sessionId === '00000000-0000-4000-8000-000000000000' ? null : commands.snapshot(sessionId).terminal
   return [
     ...workspaceReadTools(workspace, scope),
+    localImageTool(workspace),
     ...workspaceWriteTools(workspace, permissions, sessionId, turnId, scope),
     ...workspaceFileTools(workspace, permissions, sessionId, turnId, scope, actorId),
     {

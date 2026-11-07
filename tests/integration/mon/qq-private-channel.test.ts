@@ -48,6 +48,8 @@ test('group permission commands, approval events and file export share the priva
   const target = { ...contact, group_qq: '333333' }
   assert.deepEqual(f.bridge.permissionMode(target), { mode: 'restricted' })
   f.bridge.permissionMode({ ...contact, mode: 'takeover' })
+  assert.deepEqual(f.bridge.permissionMode({ ...contact, mode: 'restricted', expected_mode: 'full_access' }), { mode: 'takeover', conflict: true })
+  assert.deepEqual(f.bridge.permissionMode({ ...contact }), { mode: 'takeover' })
   assert.deepEqual(f.bridge.permissionMode(target), { mode: 'restricted' })
   const input = f.inputs.enqueue(group.id, '读取并发送文件', 'group-approval')
   f.database.connection.prepare("UPDATE inputs SET state='running' WHERE id=?").run(input.inputId)

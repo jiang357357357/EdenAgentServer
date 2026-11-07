@@ -95,7 +95,7 @@ function localModel(env: NodeJS.ProcessEnv): RuntimeModel | undefined {
   return configuredModelSchema.parse({
     provider, id, baseUrl,
     contextWindow: z.coerce.number().int().positive().parse(env.EDEN_AGENT_CONTEXT_WINDOW ?? 262144),
-    maxTokens: z.coerce.number().int().positive().parse(env.EDEN_AGENT_MAX_TOKENS ?? 4096),
+    maxTokens: z.coerce.number().int().positive().parse(env.EDEN_AGENT_MAX_OUTPUT_TOKENS ?? env.EDEN_AGENT_MAX_TOKENS ?? 4096),
     ...(env.EDEN_AGENT_MODEL_COST ? { cost: JSON.parse(env.EDEN_AGENT_MODEL_COST) } : {}),
     ...(apiKey ? { apiKey } : {}),
   })

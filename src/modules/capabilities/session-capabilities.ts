@@ -3,7 +3,7 @@ import type { RuntimeTool } from '@eden/runtime-pi'
 import type { SessionRepository } from '../sessions/index.ts'
 import type { SkillRepository } from '../skills/index.ts'
 import { filterSubagentTools, roleSkillBindings } from '../subagent-execution/index.ts'
-import { capabilityHint, toolDirectoryHint } from '../../model-prompts/capabilities.ts'
+import { capabilityHint, toolDirectoryHint, SKILL_DISCOVERY_INSTRUCTION, TOOL_DISCOVERY_INSTRUCTION } from '../../model-prompts/capabilities.ts'
 import { SelectionRepository } from './selection-repository.ts'
 import type { CapabilitySelection } from './selection-repository.ts'
 import { ToolRegistry } from './tool-registry.ts'
@@ -18,14 +18,14 @@ export interface CapabilityScope { sessionId: string; owner: string; profile: st
 
 // QQ is an authenticated conversation channel. Keep a bounded builtin list;
 // Each tool enforces its approval; NapCat tools bind the durable QQ contact, not the owner target.
-const qqTools = new Set(['web_search', 'web_fetch', 'web_find', 'read_file', 'list_directory', 'search_files',
-  'write_file', 'edit_file', 'exec_command', 'list_memos', 'create_reminder',
+const qqTools = new Set(['web_search', 'web_fetch', 'web_find', 'read_file', 'read_image', 'list_directory', 'search_files',
+  'write_file', 'edit_file', 'exec_command', 'list_memos', 'list_memos_page', 'create_reminder',
   'list_contact_channels', 'send_external_email', 'read_attachment', 'send_qq_file',
   'list_esp32_devices', 'control_esp32_device', 'get_esp32_command_status', 'show_desktop_reminder', 'get_desktop_reminder',
   'list_qq_capabilities', 'list_qq_events', 'read_qq_action', 'execute_qq_action',
   'list_character_stickers', 'remember_character_sticker', 'send_character_sticker', 'delete_character_sticker'])
 for (const name of ['inspect_video', 'prepare_video', 'read_video_timeline', 'get_video_frames', 'get_video_frame_previews', 'delete_video_job', 'video_context_doctor']) qqTools.add(name)
-const qqReadTools = new Set(['web_find', 'read_file', 'list_directory', 'search_files', 'list_memos'])
+const qqReadTools = new Set(['web_find', 'read_file', 'read_image', 'list_directory', 'search_files', 'list_memos', 'list_memos_page'])
 
 export class SessionCapabilities {
   private readonly selections: SelectionRepository
@@ -83,15 +83,17 @@ export class SessionCapabilities {
     const visible = this.visible(registry)
     const stale = this.saved().some(item => item.enabled && !this.current(item, registry, scope))
     const hint = capabilityHint(availableSkillSummaries(this.skills, registry, scope.profile), stale)
-    const directory = toolDirectoryHint(registry.tools.filter(tool => !visible.has(tool.identity!)))
+    const directory = toolDirectoryHint(registry.tools)
     const assertScope = () => {
       const current = this.scope
       if (scope.sessionId !== current.sessionId || scope.owner !== current.owner || scope.profile !== current.profile
         || scope.workspaceRoot !== current.workspaceRoot || scope.sourceChannel !== current.sourceChannel) throw new Error('Tool execution scope changed; refresh before calling')
     }
     return registry.tools.map(tool => ({ ...tool, exposure: visible.has(tool.identity!) ? 'direct' : 'deferred',
-      ...(tool.name === 'list_skills' ? { promptHint: [hint, tool.promptHint].filter(Boolean).join('\n') } : {}),
-      ...(tool.name === 'list_tools' ? { promptHint: [directory, tool.promptHint].filter(Boolean).join('\n') } : {}),
+      ...(tool.name === 'list_skills' ? { promptHint: SKILL_DISCOVERY_INSTRUCTION,
+        contextHint: { kind: 'skills' as const, content: [hint, tool.promptHint].filter(Boolean).join('\n') } } : {}),
+      ...(tool.name === 'list_tools' ? { promptHint: [TOOL_DISCOVERY_INSTRUCTION, tool.promptHint].filter(Boolean).join('\n'),
+        contextHint: { kind: 'tools' as const, content: directory } } : {}),
       resolveCall: input => {
         assertScope()
         const latest = this.registry()
@@ -146,7 +148,7 @@ export class SessionCapabilities {
     this.save([selection])
     const visible = this.visible(registry)
     return { name, tools: selection.tools.map(tool => ({ id: tool.id, name: tool.name, loaded: visible.has(tool.id) })),
-      missingTools: this.skills.read(name, false).tools.filter(dependency => !registry.lookup(dependency)) }
+      missingTools: availableSkillSummaries(this.skills, registry, this.scope.profile).find(skill => skill.name === name)?.missingTools ?? [] }
   }
 
   unloadSkill(name: string) {

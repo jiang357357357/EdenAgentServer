@@ -8,8 +8,9 @@ import { pluginDraftOperationSchema, pluginIdSchema, pluginVersionSchema, plugin
   pluginGrantSchema, toJson } from '@eden/api'
 import type { JsonValue } from '@eden/api'
 import type { PluginService } from '@eden/plugin-host'
+import type { PermissionService } from '../../modules/permissions/index.ts'
 
-export function pluginRoutes(plugins: PluginService, packages?: InstalledPackageRepository): Record<string, (value: JsonValue) => JsonValue | Promise<JsonValue>> {
+export function pluginRoutes(plugins: PluginService, packages?: InstalledPackageRepository, permissions?: PermissionService): Record<string, (value: JsonValue) => JsonValue | Promise<JsonValue>> {
   const handlers: Record<string, (value: JsonValue) => JsonValue | Promise<JsonValue>> = {
     'plugin.version.diff': value => { const input = pluginDiffSchema.parse(value); return toJson(plugins.management.diff(input.id, input.fromRevision, input.toRevision)) },
     'plugin.operation.list': value => { const input = pluginLogQuerySchema.parse(value); return toJson(plugins.operations.list(input.id, input.before, input.limit)) },
@@ -35,7 +36,11 @@ export function pluginRoutes(plugins: PluginService, packages?: InstalledPackage
     'plugin.enable': async value => {
       const input = managedPluginIdSchema.extend({ enabled: z.boolean() }).parse(value)
       if (packages?.has(input.id)) {
-        if (input.enabled) return toJson(packages.enable(input.id))
+        if (input.enabled) {
+          const mode = permissions?.mode()
+          return toJson(mode === 'full_access' || mode === 'takeover'
+            ? packages.applyActivation(packages.activationPlan(input.id)) : packages.enable(input.id))
+        }
         return toJson(packages.disable(input.id))
       }
       if (!input.enabled) plugins.disable(input.id)

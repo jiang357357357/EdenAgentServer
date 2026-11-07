@@ -39,6 +39,9 @@ test('a configured roster recovers a draft and numeric string IDs follow the Cor
   assert.throws(() => f.projection.ensure(f.client, session.id, 'owner-one', new AbortController().signal), MonProjectionConfigurationRequired)
   f.sessions.setMetadata(session.id, [{ assistantId: ' 5 ', characterId: 9 }])
   assert.equal(await f.projection.ensure(f.client, session.id, 'owner-one', new AbortController().signal), '17')
+  assert.deepEqual(f.calls.map(call => call.path), [
+    '/api/agent/sessions/?response=minimal', '/api/agent/sessions/17/participants/?response=minimal',
+  ])
   assert.deepEqual(f.calls.at(-1)!.body, { assistant_ids: [5], mode: 'companion' })
   assert.deepEqual(f.database.connection.prepare('SELECT state FROM mon_projection_outbox').all().map(row => row.state), ['applied'])
 })
@@ -50,6 +53,22 @@ test('local drafts remain legal and cannot create a Core projection', context =>
   assert.deepEqual(session.participants, [])
   assert.throws(() => f.projection.ensure(f.client, session.id, 'not-a-mon-connection', new AbortController().signal), MonProjectionConfigurationRequired)
   assert.deepEqual(f.calls, [])
+})
+
+test('older Core full responses still confirm the same durable projection without duplicate delivery', async context => {
+  const f = fixture()
+  context.after(() => f.database.close())
+  const session = f.sessions.create('Older Core', [{ assistantId: 5 }])
+  const post = f.client.post.bind(f.client), put = f.client.put.bind(f.client)
+  f.client.post = async (...args) => ({ ...await post(...args) as object,
+    messages: [{ message_payload: { content: 'legacy history' } }], session_events_payload: [{ type: 'legacy' }],
+  })
+  f.client.put = async (...args) => { await put(...args); return { id: 17, participants: [], messages: [] } }
+  const signal = new AbortController().signal
+  assert.equal(await f.projection.ensure(f.client, session.id, 'older-core', signal), '17')
+  assert.equal(await f.projection.ensure(f.client, session.id, 'older-core', signal), '17')
+  assert.equal(f.calls.length, 2)
+  assert.equal(f.database.connection.prepare('SELECT state FROM mon_projection_outbox').get()!.state, 'applied')
 })
 
 test('legacy identity reconciliation stays separate from ordinary draft configuration', context => {

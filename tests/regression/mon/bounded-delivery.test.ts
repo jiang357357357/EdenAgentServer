@@ -54,7 +54,7 @@ test('unconfirmed outcomes and repeated 503 stop after eight attempts, including
 })
 test('credential rotation preserves progress and exact legacy receipts; changing Core starts another destination', async t => {
   const f = fixture(t); let messages = 0
-  t.mock.method(MonClient.prototype, 'post', async (path: string) => { if (path.endsWith('/messages/')) messages++; return path === '/api/agent/sessions/' ? { id: 17 } : { sync_status: 'synced' } })
+  t.mock.method(MonClient.prototype, 'post', async (path: string) => { if (path.endsWith('/messages/')) messages++; return new URL(path, 'http://core').pathname === '/api/agent/sessions/' ? { id: 17 } : { sync_status: 'synced' } })
   const event = f.sessions.events.append(f.session.id, null, 'agent.message_end', { messageId: 'one', message: { role: 'user', content: [{ type: 'text', text: 'one' }] } })
   await f.worker.syncPending(); assert.equal(messages, 1)
   const key = destinationDigest(monDestination(f.connection)), old = destinationDigest(JSON.stringify(f.connection))

@@ -5,6 +5,7 @@ import type { RuntimeTool } from '@eden/runtime-pi'
 import type { ConnectorCatalog } from './catalog.ts'
 import type { ConnectorRepository } from './repository.ts'
 import { toolDescription } from '../../model-prompts/tool-descriptions.ts'
+import { EMPTY_CONNECTOR_NOTICE } from '../../model-prompts/capabilities.ts'
 const schema = z.object({ connectorId: z.string().uuid().optional() }).strict()
 export function connectorDiscoveryTools(repository: ConnectorRepository, catalog: ConnectorCatalog, sessionId: string): RuntimeTool[] {
   return [{ name: 'list_connectors', revision: 'eden.connectors.discovery.v1', executionMode: 'sequential',
@@ -13,10 +14,11 @@ export function connectorDiscoveryTools(repository: ConnectorRepository, catalog
     async execute(raw, context) {
       context.signal.throwIfAborted()
       const input = schema.parse(raw)
-      const bound = repository.list().filter(item => item.settings.boundSessionId === sessionId)
+      const bound = repository.list().filter(item => repository.accessible(item.id, sessionId))
       const summarize = (item: typeof bound[number]) => ({ id: item.id, key: item.connectorKey, name: item.displayName,
         desiredState: item.desiredState, runtimeState: item.runtimeState, lastError: item.lastError })
-      if (!input.connectorId) return toJson({ connectors: bound.map(summarize) })
+      if (!input.connectorId) return toJson({ connectors: bound.map(summarize),
+        ...(bound.length === 0 ? { notice: EMPTY_CONNECTOR_NOTICE } : {}) })
       const item = bound.find(value => value.id === input.connectorId)
       if (!item) throw new Error('该连接器未绑定到当前会话')
       const descriptor = catalog.descriptor(item.connectorKey)
