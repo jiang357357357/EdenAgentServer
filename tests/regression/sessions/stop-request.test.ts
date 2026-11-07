@@ -50,7 +50,7 @@ test('stop signals the current tool before waiting for descendants and cannot ru
     descendantsRelease.release()
     assert.equal(await stopping, true)
     await sessions.waitForIdle(session.id)
-    assert.equal(database.connection.prepare("SELECT state FROM inputs WHERE idempotency_key='first'").get()?.state, 'interrupted')
+    assert.equal(database.connection.prepare("SELECT state FROM inputs WHERE idempotency_key='first'").get()?.state, 'cancelled')
     assert.equal(model.requests.length, 1, 'stopping does not start another model request')
     assert.equal(repository.read(session.id).executionStatus, 'idle')
     assert.equal(sessions.isRunning(session.id), false)

@@ -13,9 +13,12 @@ const environment = { timezone: 'Asia/Shanghai', locale: 'zh-CN', location: { co
   source: 'manual_map', updated_at: '2026-09-20T08:15:00+08:00', accuracy: 25, latitude: 31.234567, longitude: 121.456789 } }
 
 function requestEnvironment(request: unknown): ReturnType<typeof modelEnvironment> {
-  const { messages } = request as { messages: Array<{ role: string; content: string }> }
-  const content = messages.find(message => message.role === 'system')!.content
-  return JSON.parse(content.slice(content.indexOf('\n{') + 1)).environment
+  const { messages } = request as { messages: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }> }
+  const content = messages.filter(message => message.role === 'user')
+    .flatMap(message => typeof message.content === 'string' ? [message.content] : message.content.flatMap(block => block.text ? [block.text] : []))
+    .find(text => text.includes('[runtime]\n'))!
+  assert.ok(content, 'the environment must reach the model in a sourced runtime snapshot')
+  return JSON.parse(content.split('[runtime]\n')[1]!.split(/\n\n\[/)[0]!).environment
 }
 
 test('environment updates commit with queued input, survive reopen, and reach the model without coordinates', async () => {

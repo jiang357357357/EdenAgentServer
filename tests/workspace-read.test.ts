@@ -6,7 +6,7 @@ import path from 'node:path'
 import { EdenDatabase } from '@eden/store'
 import { WorkspaceService } from '../src/modules/workspace/index.ts'
 
-test('selected workspace persists, bounds reads, skips links, and limits binary and large files', async () => {
+test('selected workspace persists, local reads resolve paths, listing skips links, and binary and large files are bounded', async () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'eden-workspace-'))
   const root = path.join(directory, 'project')
   const privateRoot = path.join(directory, 'private')
@@ -27,10 +27,12 @@ test('selected workspace persists, bounds reads, skips links, and limits binary 
     assert.equal((await workspace.read('README.md')).content, '你好，老师。')
     assert.equal((await workspace.read('binary.bin')).binary, true)
     assert.equal((await workspace.read('large.txt')).truncated, true)
-    await assert.rejects(workspace.read('../private/secret'), /escapes/)
+    assert.equal((await workspace.read('../private/secret')).content, 'private')
+    assert.equal((await workspace.read(path.join(privateRoot, 'secret'))).content, 'private')
+    await assert.rejects(workspace.read('invalid\0path'), /Invalid file path/)
     if (process.platform !== 'win32') {
       symlinkSync(privateRoot, path.join(root, 'escape'))
-      await assert.rejects(workspace.read('escape/secret'), /escapes/)
+      assert.equal((await workspace.read('escape/secret')).content, 'private')
       assert.ok(!(await workspace.list('')).entries.some(entry => entry.name === 'escape'))
     }
     await assert.rejects(workspace.read(''), /regular file/)
